@@ -710,7 +710,7 @@ def login_required(f):
 
 # ========== HTML Templates ==========
 
-# ---- Admin Login (unchanged) ----
+# ---- Admin Login ----
 ADMIN_LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -726,8 +726,6 @@ ADMIN_LOGIN_HTML = '''
         button { width: 100%; padding: 14px; background: linear-gradient(135deg, #7c3aed, #2563eb); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
         button:hover { transform: scale(1.02); }
         .error { color: #f87171; text-align: center; margin: 10px 0; }
-        .link { text-align: center; margin-top: 15px; }
-        .link a { color: #c084fc; text-decoration: none; }
     </style>
 </head>
 <body>
@@ -745,8 +743,9 @@ ADMIN_LOGIN_HTML = '''
             <input type="password" name="password" placeholder="Password" required>
             <button type="submit">Login</button>
         </form>
-        <div class="link"><a href="{{ url_for('login') }}">User Login</a></div>
-        <div class="link"><a href="{{ url_for('agent_login') }}">Agent Login</a></div>
+        <div style="text-align:center;margin-top:15px;">
+            <a href="{{ url_for('login') }}" style="color:#c084fc;text-decoration:none;">← Back to Main</a>
+        </div>
     </div>
 </body>
 </html>
@@ -768,8 +767,6 @@ AGENT_LOGIN_HTML = '''
         button { width: 100%; padding: 14px; background: linear-gradient(135deg, #7c3aed, #2563eb); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
         button:hover { transform: scale(1.02); }
         .error { color: #f87171; text-align: center; margin: 10px 0; }
-        .link { text-align: center; margin-top: 15px; }
-        .link a { color: #c084fc; text-decoration: none; }
     </style>
 </head>
 <body>
@@ -787,14 +784,15 @@ AGENT_LOGIN_HTML = '''
             <input type="password" name="password" placeholder="Password" required>
             <button type="submit">Login</button>
         </form>
-        <div class="link"><a href="{{ url_for('login') }}">User Login</a></div>
-        <div class="link"><a href="{{ url_for('admin_login') }}">Admin Login</a></div>
+        <div style="text-align:center;margin-top:15px;">
+            <a href="{{ url_for('login') }}" style="color:#c084fc;text-decoration:none;">← Back to Main</a>
+        </div>
     </div>
 </body>
 </html>
 '''
 
-# ---- Agent Dashboard (added Delete Account) ----
+# ---- Agent Dashboard (REMOVED Delete Account) ----
 AGENT_DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -823,16 +821,8 @@ AGENT_DASHBOARD_HTML = '''
         th { color: #c084fc; }
         code { background: #1a1a3e; padding: 3px 8px; border-radius: 6px; color: #fbbf24; font-size: 0.8rem; }
         .stat-box { display: inline-block; background: rgba(0,0,0,0.4); padding: 6px 18px; border-radius: 40px; color: #c084fc; font-weight: bold; }
-        .delete-section { margin-top: 30px; border-top: 2px solid #ef4444; padding-top: 20px; }
-        .delete-btn { background: #ef4444; color: #fff; padding: 12px 30px; border-radius: 40px; border: none; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .delete-btn:hover { background: #b91c1c; transform: scale(1.02); }
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); z-index: 10000; justify-content: center; align-items: center; }
-        .modal-overlay.active { display: flex; }
-        .modal-box { background: #1a1a3e; border-radius: 30px; padding: 2rem; max-width: 500px; width: 95%; border: 1px solid #ef4444; }
-        .modal-box h3 { color: #f87171; }
-        .modal-close { float: right; font-size: 2rem; cursor: pointer; color: #a78bfa; background: none; border: none; }
-        .modal-input { width: 100%; padding: 12px; border-radius: 30px; border: 1px solid #302b63; background: #0a0a1a; color: #fff; margin: 10px 0; }
-        .modal-btn { padding: 10px 25px; border-radius: 30px; border: none; font-weight: bold; cursor: pointer; }
+        .back-link { color: #c084fc; text-decoration: none; }
+        .back-link:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -882,77 +872,15 @@ AGENT_DASHBOARD_HTML = '''
             </table>
         </div>
 
-        <!-- Delete Account Section -->
-        <div class="delete-section">
-            <h3 style="color:#f87171;">⚠️ Delete My Account</h3>
-            <p style="color:#a78bfa;">This action is irreversible. All your keys will be deleted.</p>
-            <button onclick="openDeleteModal()" class="delete-btn"><i class="fas fa-trash-alt"></i> Delete Account</button>
-        </div>
-
         <div style="margin-top:20px;">
-            <a href="{{ url_for('login') }}" style="color:#c084fc;">← Back to main site</a>
+            <a href="{{ url_for('login') }}" class="back-link">← Back to Main Site</a>
         </div>
     </div>
-
-    <!-- Delete Confirmation Modal -->
-    <div id="deleteModal" class="modal-overlay">
-        <div class="modal-box">
-            <button class="modal-close" onclick="closeDeleteModal()">&times;</button>
-            <h3>⚠️ Confirm Account Deletion</h3>
-            <p style="color:#a78bfa;">Enter your password to permanently delete your agent account.</p>
-            <input type="password" id="deletePassword" class="modal-input" placeholder="Password">
-            <div style="display:flex; gap:15px; justify-content:flex-end; margin-top:15px;">
-                <button onclick="closeDeleteModal()" class="modal-btn" style="background:#475569;color:#fff;">Cancel</button>
-                <button onclick="confirmDelete()" class="modal-btn" style="background:#ef4444;color:#fff;">Delete</button>
-            </div>
-            <div id="deleteStatus" style="margin-top:10px; color:#f87171;"></div>
-        </div>
-    </div>
-
-    <script>
-        function openDeleteModal() {
-            document.getElementById('deleteModal').classList.add('active');
-            document.getElementById('deletePassword').value = '';
-            document.getElementById('deleteStatus').innerHTML = '';
-        }
-        function closeDeleteModal() {
-            document.getElementById('deleteModal').classList.remove('active');
-        }
-        function confirmDelete() {
-            const pw = document.getElementById('deletePassword').value.trim();
-            if (!pw) {
-                document.getElementById('deleteStatus').innerHTML = 'Please enter your password.';
-                return;
-            }
-            document.getElementById('deleteStatus').innerHTML = 'Processing...';
-            fetch('/agent/delete_self', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ password: pw })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    document.getElementById('deleteStatus').innerHTML = '✅ Account deleted. Redirecting...';
-                    setTimeout(() => window.location.href = '/', 2000);
-                } else {
-                    document.getElementById('deleteStatus').innerHTML = '❌ ' + (data.message || 'Error');
-                }
-            })
-            .catch(() => {
-                document.getElementById('deleteStatus').innerHTML = '❌ Network error.';
-            });
-        }
-        // Close modal on overlay click
-        document.getElementById('deleteModal').addEventListener('click', function(e) {
-            if (e.target === this) closeDeleteModal();
-        });
-    </script>
 </body>
 </html>
 '''
 
-# ---- Admin Dashboard (with Agent Delete) ----
+# ---- Admin Dashboard ----
 ADMIN_DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -994,6 +922,7 @@ ADMIN_DASHBOARD_HTML = '''
         .progress-fill { background: linear-gradient(90deg, #c084fc, #60a5fa, #34d399); height: 100%; width: 0%; border-radius: 1rem; transition: width 0.5s ease; }
         .system-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; }
         .back-link { color: #c084fc; text-decoration: none; }
+        .back-link:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -1156,13 +1085,13 @@ ADMIN_DASHBOARD_HTML = '''
             </table>
         </div>
 
-        <a href="{{ url_for('logout') }}" class="back-link">← Back to main site</a>
+        <a href="{{ url_for('logout') }}" class="back-link">← Back to Main Site</a>
     </div>
 </body>
 </html>
 '''
 
-# ---- File Manager (unchanged) ----
+# ---- File Manager ----
 FILE_MANAGER_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1360,7 +1289,7 @@ FILE_MANAGER_HTML = '''
 </html>
 '''
 
-# ---- User Login (unchanged) ----
+# ---- User Login (with Hamburger Menu) ----
 LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1372,7 +1301,7 @@ LOGIN_HTML = '''
         .main-container { width: 100%; max-width: 450px; padding: 20px; }
         .logo-container { text-align: center; margin-bottom: 20px; }
         .logo-container img { height: 100px; border-radius: 20px; box-shadow: 0 10px 30px rgba(124,58,237,0.3); }
-        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); position: relative; }
         h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
         input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
         input:focus { outline: none; border-color: #7c3aed; }
@@ -1380,12 +1309,43 @@ LOGIN_HTML = '''
         button:hover { transform: scale(1.02); }
         .error { color: #f87171; text-align: center; margin: 10px 0; }
         .success { color: #4ade80; text-align: center; margin: 10px 0; }
+
+        /* Hamburger Menu Styles */
+        .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
+        .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
+        .hamburger-btn:hover { background: rgba(124,58,237,0.5); transform: scale(1.05); }
+        .menu-dropdown { display: none; position: absolute; top: 70px; left: 0; background: rgba(15,12,41,0.95); backdrop-filter: blur(20px); border: 1px solid #7c3aed; border-radius: 16px; padding: 12px 0; min-width: 220px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+        .menu-dropdown.active { display: block; animation: slideDown 0.3s ease; }
+        @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        .menu-item { display: block; padding: 12px 24px; color: #e2e8f0; text-decoration: none; transition: 0.3s; font-size: 0.95rem; border-left: 3px solid transparent; }
+        .menu-item:hover { background: rgba(124,58,237,0.15); border-left-color: #7c3aed; color: #c084fc; }
+        .menu-item i { width: 24px; margin-right: 12px; color: #a78bfa; }
+        .menu-divider { border-top: 1px solid #302b63; margin: 6px 12px; }
+        .menu-title { padding: 8px 24px; color: #a78bfa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; }
+
         .link { text-align: center; margin-top: 15px; }
         .link a { color: #c084fc; text-decoration: none; }
         .link a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
+    <!-- Hamburger Menu -->
+    <div class="hamburger-menu">
+        <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
+        <div class="menu-dropdown" id="menuDropdown">
+            <div class="menu-title">🔐 Authentication</div>
+            <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
+            <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
+            <a href="{{ url_for('recover') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+            <div class="menu-divider"></div>
+            <div class="menu-title">👥 Roles</div>
+            <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
+            <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+            <div class="menu-divider"></div>
+            <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
+        </div>
+    </div>
+
     <div class="main-container">
         <div class="logo-container">
             <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo">
@@ -1404,17 +1364,26 @@ LOGIN_HTML = '''
                 <input type="password" name="password" placeholder="Password" required>
                 <button type="submit">Login</button>
             </form>
-            <div class="link"><a href="{{ url_for('register') }}">Don't have account? Register</a></div>
-            <div class="link"><a href="{{ url_for('recover') }}">Forgot password? Recover</a></div>
-            <div class="link"><a href="{{ url_for('admin_login') }}">Admin Login</a></div>
-            <div class="link"><a href="{{ url_for('agent_login') }}">Agent Login</a></div>
         </div>
     </div>
+
+    <script>
+        function toggleMenu() {
+            document.getElementById('menuDropdown').classList.toggle('active');
+        }
+        // Close menu when clicking outside
+        document.addEventListener('click', function(e) {
+            const menu = document.querySelector('.hamburger-menu');
+            if (!menu.contains(e.target)) {
+                document.getElementById('menuDropdown').classList.remove('active');
+            }
+        });
+    </script>
 </body>
 </html>
 '''
 
-# ---- User Register (unchanged) ----
+# ---- User Register ----
 REGISTER_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1426,7 +1395,7 @@ REGISTER_HTML = '''
         .main-container { width: 100%; max-width: 450px; padding: 20px; }
         .logo-container { text-align: center; margin-bottom: 20px; }
         .logo-container img { height: 100px; border-radius: 20px; box-shadow: 0 10px 30px rgba(124,58,237,0.3); }
-        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); position: relative; }
         h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
         input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
         input:focus { outline: none; border-color: #7c3aed; }
@@ -1437,9 +1406,38 @@ REGISTER_HTML = '''
         .link { text-align: center; margin-top: 15px; }
         .link a { color: #c084fc; text-decoration: none; }
         .link a:hover { text-decoration: underline; }
+
+        .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
+        .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
+        .hamburger-btn:hover { background: rgba(124,58,237,0.5); transform: scale(1.05); }
+        .menu-dropdown { display: none; position: absolute; top: 70px; left: 0; background: rgba(15,12,41,0.95); backdrop-filter: blur(20px); border: 1px solid #7c3aed; border-radius: 16px; padding: 12px 0; min-width: 220px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+        .menu-dropdown.active { display: block; animation: slideDown 0.3s ease; }
+        @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        .menu-item { display: block; padding: 12px 24px; color: #e2e8f0; text-decoration: none; transition: 0.3s; font-size: 0.95rem; border-left: 3px solid transparent; }
+        .menu-item:hover { background: rgba(124,58,237,0.15); border-left-color: #7c3aed; color: #c084fc; }
+        .menu-item i { width: 24px; margin-right: 12px; color: #a78bfa; }
+        .menu-divider { border-top: 1px solid #302b63; margin: 6px 12px; }
+        .menu-title { padding: 8px 24px; color: #a78bfa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; }
     </style>
 </head>
 <body>
+    <!-- Hamburger Menu -->
+    <div class="hamburger-menu">
+        <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
+        <div class="menu-dropdown" id="menuDropdown">
+            <div class="menu-title">🔐 Authentication</div>
+            <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
+            <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
+            <a href="{{ url_for('recover') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+            <div class="menu-divider"></div>
+            <div class="menu-title">👥 Roles</div>
+            <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
+            <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+            <div class="menu-divider"></div>
+            <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
+        </div>
+    </div>
+
     <div class="main-container">
         <div class="logo-container">
             <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo">
@@ -1461,14 +1459,25 @@ REGISTER_HTML = '''
                 <button type="submit">Register</button>
             </form>
             <div class="link"><a href="{{ url_for('login') }}">Already have account? Login</a></div>
-            <div class="link"><a href="{{ url_for('recover') }}">Forgot password?</a></div>
         </div>
     </div>
+
+    <script>
+        function toggleMenu() {
+            document.getElementById('menuDropdown').classList.toggle('active');
+        }
+        document.addEventListener('click', function(e) {
+            const menu = document.querySelector('.hamburger-menu');
+            if (!menu.contains(e.target)) {
+                document.getElementById('menuDropdown').classList.remove('active');
+            }
+        });
+    </script>
 </body>
 </html>
 '''
 
-# ---- Password Recovery (unchanged) ----
+# ---- Password Recovery ----
 RECOVER_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1477,7 +1486,7 @@ RECOVER_HTML = '''
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; width: 400px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; width: 400px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); position: relative; }
         h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
         input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
         input:focus { outline: none; border-color: #7c3aed; }
@@ -1489,9 +1498,38 @@ RECOVER_HTML = '''
         .link a { color: #c084fc; text-decoration: none; }
         .password-box { background: #1a1a3e; padding: 15px; border-radius: 12px; border: 1px solid #7c3aed; margin: 10px 0; word-break: break-all; }
         .password-box code { color: #fbbf24; font-size: 1.1rem; }
+
+        .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
+        .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
+        .hamburger-btn:hover { background: rgba(124,58,237,0.5); transform: scale(1.05); }
+        .menu-dropdown { display: none; position: absolute; top: 70px; left: 0; background: rgba(15,12,41,0.95); backdrop-filter: blur(20px); border: 1px solid #7c3aed; border-radius: 16px; padding: 12px 0; min-width: 220px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+        .menu-dropdown.active { display: block; animation: slideDown 0.3s ease; }
+        @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+        .menu-item { display: block; padding: 12px 24px; color: #e2e8f0; text-decoration: none; transition: 0.3s; font-size: 0.95rem; border-left: 3px solid transparent; }
+        .menu-item:hover { background: rgba(124,58,237,0.15); border-left-color: #7c3aed; color: #c084fc; }
+        .menu-item i { width: 24px; margin-right: 12px; color: #a78bfa; }
+        .menu-divider { border-top: 1px solid #302b63; margin: 6px 12px; }
+        .menu-title { padding: 8px 24px; color: #a78bfa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; }
     </style>
 </head>
 <body>
+    <!-- Hamburger Menu -->
+    <div class="hamburger-menu">
+        <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
+        <div class="menu-dropdown" id="menuDropdown">
+            <div class="menu-title">🔐 Authentication</div>
+            <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
+            <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
+            <a href="{{ url_for('recover') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+            <div class="menu-divider"></div>
+            <div class="menu-title">👥 Roles</div>
+            <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
+            <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+            <div class="menu-divider"></div>
+            <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
+        </div>
+    </div>
+
     <div class="container">
         <h2>🔑 Recover Password</h2>
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -1508,11 +1546,23 @@ RECOVER_HTML = '''
         </form>
         <div class="link"><a href="{{ url_for('login') }}">Back to Login</a></div>
     </div>
+
+    <script>
+        function toggleMenu() {
+            document.getElementById('menuDropdown').classList.toggle('active');
+        }
+        document.addEventListener('click', function(e) {
+            const menu = document.querySelector('.hamburger-menu');
+            if (!menu.contains(e.target)) {
+                document.getElementById('menuDropdown').classList.remove('active');
+            }
+        });
+    </script>
 </body>
 </html>
 '''
 
-# ---- USER_PANEL_HTML (unchanged - removed guild and website) ----
+# ---- USER_PANEL_HTML (unchanged) ----
 USER_PANEL_HTML = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
