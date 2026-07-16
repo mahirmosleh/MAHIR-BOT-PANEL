@@ -38,7 +38,7 @@ init(autoreset=True)
 # ========== Configuration ==========
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB limit
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
 
 DB_FILE = "users.db"
 MAHIR_SOURCE = "mahir.py"
@@ -56,6 +56,7 @@ def init_db():
         registration_key TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         is_admin INTEGER DEFAULT 0,
+        is_agent INTEGER DEFAULT 0,
         admin_uid TEXT,
         bot_uid TEXT,
         bot_pw TEXT,
@@ -82,7 +83,32 @@ init_db()
 def sanitize_filename(name):
     return re.sub(r'[^a-zA-Z0-9_]', '_', name)
 
-# ========== ProcessMonitor Class (UPDATED for proper status tracking) ==========
+# ========== Password handling ==========
+def is_hashed(pw):
+    return len(pw) == 64 and all(c in '0123456789abcdefABCDEF' for c in pw)
+
+def check_password(stored, provided):
+    if is_hashed(stored):
+        return stored == hashlib.sha256(provided.encode()).hexdigest()
+    else:
+        return stored == provided
+
+# ========== Auto Bio Update ==========
+def update_bot_bio(uid, password, username):
+    """Update bot bio via API."""
+    bio_text = f"[c][b][i][00BFFF]{username} [00FF00]বটে আপনাকে স্বাগতম। [FFFF00]নিজের জন্য এমন একটি Bot কিনতে চাইলে যোগাযোগ করুন আমাদের WEBSITE NAME: [00FFFF]MAHIR.XO.JE "
+    encoded = requests.utils.quote(bio_text)
+    url = f"https://mahir-long-bio.vercel.app/bio_upload?bio={encoded}&uid={uid}&pass={password}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            print(f"Bio updated for {uid}: {resp.text}")
+        else:
+            print(f"Bio update failed for {uid}: {resp.status_code}")
+    except Exception as e:
+        print(f"Bio update exception for {uid}: {e}")
+
+# ========== ProcessMonitor Class ==========
 class ProcessMonitor:
     def __init__(self, user_id, bot_file_path):
         self.user_id = user_id
@@ -105,7 +131,7 @@ class ProcessMonitor:
         self.monitor_thread = None
         self.cpu_history = [0] * 20
         self.ram_history = [0] * 20
-        
+
         # Bot info (parsed from logs)
         self.bot_uid = "N/A"
         self.bot_name = "N/A"
@@ -123,7 +149,7 @@ class ProcessMonitor:
         self.last_message = "N/A"
         self.last_pfp_url = "N/A"
         self.account_info_found = False
-        
+
         # Internal state for parsing
         self.in_user_info = False
         self.in_tokens = False
@@ -426,6 +452,19 @@ class ProcessMonitor:
                 conn.commit()
                 conn.close()
 
+                # Auto-update bio after successful start
+                def update_bio_delayed():
+                    time.sleep(5)  # wait for bot to fully log in
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute('SELECT username, bot_uid, bot_pw FROM users WHERE id=?', (self.user_id,))
+                    row = c.fetchone()
+                    conn.close()
+                    if row and row[1] and row[2]:
+                        update_bot_bio(row[1], row[2], row[0])
+
+                threading.Thread(target=update_bio_delayed, daemon=True).start()
+
                 def enqueue_output():
                     try:
                         for line in iter(self.process.stdout.readline, ''):
@@ -651,6 +690,15 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated
 
+def agent_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('is_agent'):
+            flash('Agent access required', 'error')
+            return redirect(url_for('agent_login'))
+        return f(*args, **kwargs)
+    return decorated
+
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -662,7 +710,7 @@ def login_required(f):
 
 # ========== HTML Templates ==========
 
-# ---- Admin Login ----
+# ---- Admin Login (unchanged) ----
 ADMIN_LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -697,12 +745,214 @@ ADMIN_LOGIN_HTML = '''
             <input type="password" name="password" placeholder="Password" required>
             <button type="submit">Login</button>
         </form>
+        <div class="link"><a href="{{ url_for('login') }}">User Login</a></div>
+        <div class="link"><a href="{{ url_for('agent_login') }}">Agent Login</a></div>
     </div>
 </body>
 </html>
 '''
 
-# ---- Admin Dashboard (with File Manager button, Key Delete, System Stats) ----
+# ---- Agent Login ----
+AGENT_LOGIN_HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Agent Login - MAHIR</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; width: 400px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+        h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
+        input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
+        input:focus { outline: none; border-color: #7c3aed; }
+        button { width: 100%; padding: 14px; background: linear-gradient(135deg, #7c3aed, #2563eb); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
+        button:hover { transform: scale(1.02); }
+        .error { color: #f87171; text-align: center; margin: 10px 0; }
+        .link { text-align: center; margin-top: 15px; }
+        .link a { color: #c084fc; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>🔑 Agent Login</h2>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="error">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="Agent Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Login</button>
+        </form>
+        <div class="link"><a href="{{ url_for('login') }}">User Login</a></div>
+        <div class="link"><a href="{{ url_for('admin_login') }}">Admin Login</a></div>
+    </div>
+</body>
+</html>
+'''
+
+# ---- Agent Dashboard (added Delete Account) ----
+AGENT_DASHBOARD_HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Agent Dashboard - MAHIR</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; padding: 20px; }
+        .container { max-width: 900px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; padding: 20px; background: rgba(15,12,41,0.8); border-radius: 20px; margin-bottom: 30px; }
+        .header h1 { color: #c084fc; }
+        .btn { padding: 10px 20px; border-radius: 30px; border: none; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn-danger { background: #ef4444; color: #fff; }
+        .btn-success { background: #10b981; color: #fff; }
+        .btn-primary { background: #2563eb; color: #fff; }
+        .btn-warning { background: #f59e0b; color: #fff; }
+        .card { background: rgba(15,12,41,0.7); padding: 25px; border-radius: 20px; border: 1px solid #302b63; margin-bottom: 20px; }
+        .card h3 { color: #c084fc; margin-top: 0; }
+        .input-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .input-group input { padding: 10px 16px; border-radius: 30px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; flex: 1; min-width: 180px; }
+        .badge { padding: 3px 12px; border-radius: 20px; font-size: 12px; }
+        .badge-used { background: #10b98120; color: #10b981; border: 1px solid #10b981; }
+        .badge-unused { background: #fbbf2420; color: #fbbf24; border: 1px solid #fbbf24; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #302b63; }
+        th { color: #c084fc; }
+        code { background: #1a1a3e; padding: 3px 8px; border-radius: 6px; color: #fbbf24; font-size: 0.8rem; }
+        .stat-box { display: inline-block; background: rgba(0,0,0,0.4); padding: 6px 18px; border-radius: 40px; color: #c084fc; font-weight: bold; }
+        .delete-section { margin-top: 30px; border-top: 2px solid #ef4444; padding-top: 20px; }
+        .delete-btn { background: #ef4444; color: #fff; padding: 12px 30px; border-radius: 40px; border: none; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .delete-btn:hover { background: #b91c1c; transform: scale(1.02); }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); z-index: 10000; justify-content: center; align-items: center; }
+        .modal-overlay.active { display: flex; }
+        .modal-box { background: #1a1a3e; border-radius: 30px; padding: 2rem; max-width: 500px; width: 95%; border: 1px solid #ef4444; }
+        .modal-box h3 { color: #f87171; }
+        .modal-close { float: right; font-size: 2rem; cursor: pointer; color: #a78bfa; background: none; border: none; }
+        .modal-input { width: 100%; padding: 12px; border-radius: 30px; border: 1px solid #302b63; background: #0a0a1a; color: #fff; margin: 10px 0; }
+        .modal-btn { padding: 10px 25px; border-radius: 30px; border: none; font-weight: bold; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔑 Agent Dashboard</h1>
+            <div>
+                <span>Welcome, {{ session.username }}</span>
+                <a href="{{ url_for('agent_logout') }}" class="btn btn-danger">Logout</a>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>📊 Your Key Stats</h3>
+            <p>Total Keys Created: <span class="stat-box">{{ keys|length }}</span></p>
+        </div>
+
+        <div class="card">
+            <h3>🔑 Generate Registration Key</h3>
+            <form method="POST" action="{{ url_for('agent_create_key') }}" class="input-group">
+                <label>Valid days:</label>
+                <input type="number" name="days_valid" value="30" min="1" max="365" style="width:100px;">
+                <button type="submit" class="btn btn-success">Generate Key</button>
+            </form>
+            {% if new_key %}
+                <div style="margin-top:15px;background:#1a1a3e;padding:15px;border-radius:15px;border:1px solid #7c3aed;">
+                    <strong>New Key:</strong> <code style="font-size:18px;color:#fbbf24;">{{ new_key }}</code>
+                    <span style="margin-left:20px;color:#a78bfa;">(valid {{ days }} days)</span>
+                </div>
+            {% endif %}
+        </div>
+
+        <div class="card">
+            <h3>📋 Your Keys</h3>
+            <table>
+                <tr><th>Key</th><th>Created</th><th>Used By</th><th>Status</th></tr>
+                {% for key in keys %}
+                <tr>
+                    <td><code>{{ key.key }}</code></td>
+                    <td>{{ key.created_at[:10] }}</td>
+                    <td>{{ key.used_by or '—' }}</td>
+                    <td><span class="badge {{ 'badge-used' if key.is_used else 'badge-unused' }}">{{ 'Used' if key.is_used else 'Available' }}</span></td>
+                </tr>
+                {% else %}
+                <tr><td colspan="4" style="text-align:center;color:#a78bfa;">No keys created yet.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <!-- Delete Account Section -->
+        <div class="delete-section">
+            <h3 style="color:#f87171;">⚠️ Delete My Account</h3>
+            <p style="color:#a78bfa;">This action is irreversible. All your keys will be deleted.</p>
+            <button onclick="openDeleteModal()" class="delete-btn"><i class="fas fa-trash-alt"></i> Delete Account</button>
+        </div>
+
+        <div style="margin-top:20px;">
+            <a href="{{ url_for('login') }}" style="color:#c084fc;">← Back to main site</a>
+        </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div id="deleteModal" class="modal-overlay">
+        <div class="modal-box">
+            <button class="modal-close" onclick="closeDeleteModal()">&times;</button>
+            <h3>⚠️ Confirm Account Deletion</h3>
+            <p style="color:#a78bfa;">Enter your password to permanently delete your agent account.</p>
+            <input type="password" id="deletePassword" class="modal-input" placeholder="Password">
+            <div style="display:flex; gap:15px; justify-content:flex-end; margin-top:15px;">
+                <button onclick="closeDeleteModal()" class="modal-btn" style="background:#475569;color:#fff;">Cancel</button>
+                <button onclick="confirmDelete()" class="modal-btn" style="background:#ef4444;color:#fff;">Delete</button>
+            </div>
+            <div id="deleteStatus" style="margin-top:10px; color:#f87171;"></div>
+        </div>
+    </div>
+
+    <script>
+        function openDeleteModal() {
+            document.getElementById('deleteModal').classList.add('active');
+            document.getElementById('deletePassword').value = '';
+            document.getElementById('deleteStatus').innerHTML = '';
+        }
+        function closeDeleteModal() {
+            document.getElementById('deleteModal').classList.remove('active');
+        }
+        function confirmDelete() {
+            const pw = document.getElementById('deletePassword').value.trim();
+            if (!pw) {
+                document.getElementById('deleteStatus').innerHTML = 'Please enter your password.';
+                return;
+            }
+            document.getElementById('deleteStatus').innerHTML = 'Processing...';
+            fetch('/agent/delete_self', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: pw })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    document.getElementById('deleteStatus').innerHTML = '✅ Account deleted. Redirecting...';
+                    setTimeout(() => window.location.href = '/', 2000);
+                } else {
+                    document.getElementById('deleteStatus').innerHTML = '❌ ' + (data.message || 'Error');
+                }
+            })
+            .catch(() => {
+                document.getElementById('deleteStatus').innerHTML = '❌ Network error.';
+            });
+        }
+        // Close modal on overlay click
+        document.getElementById('deleteModal').addEventListener('click', function(e) {
+            if (e.target === this) closeDeleteModal();
+        });
+    </script>
+</body>
+</html>
+'''
+
+# ---- Admin Dashboard (with Agent Delete) ----
 ADMIN_DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -711,7 +961,7 @@ ADMIN_DASHBOARD_HTML = '''
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
+        .container { max-width: 1400px; margin: 0 auto; }
         .header { display: flex; justify-content: space-between; align-items: center; padding: 20px; background: rgba(15,12,41,0.8); border-radius: 20px; margin-bottom: 30px; }
         .header h1 { color: #c084fc; }
         .user-info { display: flex; align-items: center; gap: 20px; }
@@ -733,58 +983,17 @@ ADMIN_DASHBOARD_HTML = '''
         .badge-used { background: #10b98120; color: #10b981; border: 1px solid #10b981; }
         .badge-unused { background: #fbbf2420; color: #fbbf24; border: 1px solid #fbbf24; }
         .badge-admin { background: #7c3aed20; color: #c084fc; border: 1px solid #7c3aed; }
-        .input-group { display: flex; gap: 10px; align-items: center; }
-        .input-group input[type="file"] { padding: 8px; border-radius: 30px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; }
-        .input-group input[type="file"]:focus { outline: none; border-color: #7c3aed; }
-        .back-link { color: #c084fc; text-decoration: none; }
+        .badge-agent { background: #3b82f620; color: #60a5fa; border: 1px solid #3b82f6; }
+        .input-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .input-group input[type="text"], .input-group input[type="password"] { padding: 8px 14px; border-radius: 30px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; }
         .upload-form { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
-
-        /* সিস্টেম স্ট্যাটস কার্ডের জন্য CSS */
-        .stat-card {
-            background: rgba(0,0,0,0.5);
-            border-radius: 18px;
-            padding: 1.25rem;
-            text-align: center;
-            border: 1px solid rgba(124,58,237,0.15);
-        }
-        .stat-label {
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 2px;
-            color: #a78bfa;
-            margin-bottom: 0.5rem;
-            font-weight: 600;
-        }
-        .stat-value {
-            font-size: 1.3rem;
-            font-weight: 800;
-            color: #f0f0f0;
-        }
-        .progress-bar {
-            background: #1e1b3b;
-            border-radius: 1rem;
-            height: 0.6rem;
-            overflow: hidden;
-            margin-top: 0.5rem;
-        }
-        .progress-fill {
-            background: linear-gradient(90deg, #c084fc, #60a5fa, #34d399);
-            height: 100%;
-            width: 0%;
-            border-radius: 1rem;
-            transition: width 0.5s ease;
-        }
-        .system-stats {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 1rem;
-            margin-top: 1rem;
-        }
-        .stat-detail {
-            font-size: 0.8rem;
-            color: #a78bfa;
-            margin-top: 0.3rem;
-        }
+        .stat-card { background: rgba(0,0,0,0.5); border-radius: 18px; padding: 1.25rem; text-align: center; border: 1px solid rgba(124,58,237,0.15); }
+        .stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; color: #a78bfa; margin-bottom: 0.5rem; font-weight: 600; }
+        .stat-value { font-size: 1.3rem; font-weight: 800; color: #f0f0f0; }
+        .progress-bar { background: #1e1b3b; border-radius: 1rem; height: 0.6rem; overflow: hidden; margin-top: 0.5rem; }
+        .progress-fill { background: linear-gradient(90deg, #c084fc, #60a5fa, #34d399); height: 100%; width: 0%; border-radius: 1rem; transition: width 0.5s ease; }
+        .system-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; }
+        .back-link { color: #c084fc; text-decoration: none; }
     </style>
 </head>
 <body>
@@ -797,7 +1006,7 @@ ADMIN_DASHBOARD_HTML = '''
             </div>
         </div>
 
-        <!-- সিস্টেম রিসোর্স কার্ড -->
+        <!-- System Stats -->
         <div class="card">
             <h3>🖥️ Server Resources</h3>
             <div class="system-stats">
@@ -810,28 +1019,26 @@ ADMIN_DASHBOARD_HTML = '''
                     <div class="stat-label">RAM</div>
                     <div class="stat-value">{{ ram_percent }}%</div>
                     <div class="progress-bar"><div class="progress-fill" style="width: {{ ram_percent }}%;"></div></div>
-                    <div class="stat-detail">{{ (ram_used / (1024**3))|round(1) }} GB / {{ (ram_total / (1024**3))|round(1) }} GB</div>
+                    <div style="font-size:0.8rem;color:#a78bfa;">{{ (ram_used / (1024**3))|round(1) }} GB / {{ (ram_total / (1024**3))|round(1) }} GB</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-label">Disk</div>
                     <div class="stat-value">{{ disk_percent }}%</div>
                     <div class="progress-bar"><div class="progress-fill" style="width: {{ disk_percent }}%;"></div></div>
-                    <div class="stat-detail">{{ (disk_used / (1024**3))|round(1) }} GB / {{ (disk_total / (1024**3))|round(1) }} GB</div>
+                    <div style="font-size:0.8rem;color:#a78bfa;">{{ (disk_used / (1024**3))|round(1) }} GB / {{ (disk_total / (1024**3))|round(1) }} GB</div>
                 </div>
             </div>
         </div>
 
-        <!-- File Manager Button -->
+        <!-- File Manager -->
         <div class="card">
             <h3>📁 File Manager</h3>
-            <p style="color:#a78bfa;">Browse, download, upload any file, edit, delete and zip files with auto-extract.</p>
-            <a href="{{ url_for('admin_file_manager') }}" class="btn btn-info"><i class="fas fa-folder-open"></i> Open File Manager</a>
+            <a href="{{ url_for('admin_file_manager') }}" class="btn btn-info">Open File Manager</a>
         </div>
 
         <!-- Upload mahir.py -->
         <div class="card">
             <h3>📤 Upload New mahir.py</h3>
-            <p style="color:#a78bfa;">Upload a new version of mahir.py. This will update all existing users' bots automatically.</p>
             <form method="POST" action="{{ url_for('admin_upload_mahir') }}" enctype="multipart/form-data" class="upload-form">
                 <div class="input-group">
                     <input type="file" name="mahir_file" accept=".py" required>
@@ -847,8 +1054,39 @@ ADMIN_DASHBOARD_HTML = '''
             {% endwith %}
         </div>
 
+        <!-- Agent Management -->
         <div class="card">
-            <h3>🔑 Generate Registration Key</h3>
+            <h3>👤 Agent Management</h3>
+            <form method="POST" action="{{ url_for('admin_create_agent') }}" class="flex">
+                <input type="text" name="username" placeholder="Username" required style="padding:8px 14px;border-radius:30px;border:1px solid #302b63;background:#1a1a3e;color:#fff;">
+                <input type="email" name="email" placeholder="Email" required style="padding:8px 14px;border-radius:30px;border:1px solid #302b63;background:#1a1a3e;color:#fff;">
+                <input type="password" name="password" placeholder="Password" required style="padding:8px 14px;border-radius:30px;border:1px solid #302b63;background:#1a1a3e;color:#fff;">
+                <button type="submit" class="btn btn-success">Create Agent</button>
+            </form>
+            <table>
+                <tr><th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Keys Created</th><th>Action</th></tr>
+                {% for agent in agents %}
+                <tr>
+                    <td>{{ agent.id }}</td>
+                    <td>{{ agent.username }}</td>
+                    <td>{{ agent.email or '-' }}</td>
+                    <td>{{ agent.created_at[:10] }}</td>
+                    <td>{{ agent.key_count }}</td>
+                    <td>
+                        <form method="POST" action="{{ url_for('admin_delete_agent', agent_id=agent.id) }}" style="display:inline;" onsubmit="return confirm('Delete this agent and all their keys?');">
+                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        </form>
+                    </td>
+                </tr>
+                {% else %}
+                <tr><td colspan="6" style="text-align:center;color:#a78bfa;">No agents created yet.</td></tr>
+                {% endfor %}
+            </table>
+        </div>
+
+        <!-- Generate Registration Key (Admin) -->
+        <div class="card">
+            <h3>🔑 Generate Registration Key (Admin)</h3>
             <form method="POST" action="{{ url_for('admin_create_key') }}" class="flex">
                 <div class="input-group">
                     <label>Valid days:</label>
@@ -864,11 +1102,12 @@ ADMIN_DASHBOARD_HTML = '''
             {% endif %}
         </div>
 
+        <!-- Registered Users -->
         <div class="card">
             <h3>📋 Registered Users</h3>
             <table>
                 <tr>
-                    <th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Bot Status</th><th>Bot File</th><th>Admin</th><th>Action</th>
+                    <th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Bot Status</th><th>Bot File</th><th>Role</th><th>Action</th>
                 </tr>
                 {% for user in users %}
                 <tr>
@@ -878,9 +1117,13 @@ ADMIN_DASHBOARD_HTML = '''
                     <td>{{ user.created_at[:10] }}</td>
                     <td>{{ user.bot_status }}</td>
                     <td>{{ user.bot_file or '-' }}</td>
-                    <td>{% if user.is_admin %}<span class="badge badge-admin">Admin</span>{% else %}—{% endif %}</td>
                     <td>
-                        {% if not user.is_admin %}
+                        {% if user.is_admin %}<span class="badge badge-admin">Admin</span>
+                        {% elif user.is_agent %}<span class="badge badge-agent">Agent</span>
+                        {% else %}User{% endif %}
+                    </td>
+                    <td>
+                        {% if not user.is_admin and not user.is_agent %}
                         <form method="POST" action="{{ url_for('admin_delete_user', user_id=user.id) }}" style="display:inline;" onsubmit="return confirm('Delete this user?');">
                             <button type="submit" class="btn btn-danger btn-sm">Delete</button>
                         </form>
@@ -891,13 +1134,15 @@ ADMIN_DASHBOARD_HTML = '''
             </table>
         </div>
 
+        <!-- Recent Keys -->
         <div class="card">
             <h3>🔑 Recent Keys</h3>
             <table>
-                <tr><th>Key</th><th>Created</th><th>Used By</th><th>Status</th><th>Action</th></tr>
+                <tr><th>Key</th><th>Created By</th><th>Created</th><th>Used By</th><th>Status</th><th>Action</th></tr>
                 {% for key in keys %}
                 <tr>
                     <td><code>{{ key.key }}</code></td>
+                    <td>{{ key.created_by or '—' }}</td>
                     <td>{{ key.created_at[:10] }}</td>
                     <td>{{ key.used_by or '—' }}</td>
                     <td><span class="badge {{ 'badge-used' if key.is_used else 'badge-unused' }}">{{ 'Used' if key.is_used else 'Available' }}</span></td>
@@ -917,7 +1162,7 @@ ADMIN_DASHBOARD_HTML = '''
 </html>
 '''
 
-# ---- File Manager HTML (with Edit & Delete) ----
+# ---- File Manager (unchanged) ----
 FILE_MANAGER_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -950,50 +1195,12 @@ FILE_MANAGER_HTML = '''
         .breadcrumb { color: #a78bfa; margin-bottom: 15px; }
         .breadcrumb a { color: #c084fc; text-decoration: none; }
         .breadcrumb a:hover { text-decoration: underline; }
-
-        /* Edit Modal CSS */
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.7);
-            backdrop-filter: blur(8px);
-            z-index: 10000;
-            justify-content: center;
-            align-items: center;
-        }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); z-index: 10000; justify-content: center; align-items: center; }
         .modal-overlay.active { display: flex; }
-        .modal-box {
-            background: #1a1a3e;
-            border-radius: 30px;
-            padding: 2rem;
-            max-width: 800px;
-            width: 95%;
-            max-height: 90vh;
-            overflow-y: auto;
-            border: 1px solid rgba(124,58,237,0.4);
-        }
-        .modal-close {
-            float: right;
-            font-size: 2rem;
-            cursor: pointer;
-            color: #a78bfa;
-            background: none;
-            border: none;
-        }
+        .modal-box { background: #1a1a3e; border-radius: 30px; padding: 2rem; max-width: 800px; width: 95%; max-height: 90vh; overflow-y: auto; border: 1px solid rgba(124,58,237,0.4); }
+        .modal-close { float: right; font-size: 2rem; cursor: pointer; color: #a78bfa; background: none; border: none; }
         .modal-title { color: #c084fc; font-size: 1.5rem; margin-bottom: 1rem; }
-        .edit-textarea {
-            width: 100%;
-            height: 400px;
-            background: #0a0a1a;
-            color: #e2e8f0;
-            border: 1px solid #302b63;
-            border-radius: 12px;
-            padding: 1rem;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.9rem;
-            resize: vertical;
-        }
+        .edit-textarea { width: 100%; height: 400px; background: #0a0a1a; color: #e2e8f0; border: 1px solid #302b63; border-radius: 12px; padding: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; resize: vertical; }
     </style>
 </head>
 <body>
@@ -1006,7 +1213,6 @@ FILE_MANAGER_HTML = '''
             </div>
         </div>
 
-        <!-- Upload Any File -->
         <div class="card">
             <h3>📤 Upload Any File (Auto-extract ZIP)</h3>
             <form method="POST" action="{{ url_for('admin_upload_file') }}" enctype="multipart/form-data" class="upload-form">
@@ -1024,7 +1230,6 @@ FILE_MANAGER_HTML = '''
             {% endwith %}
         </div>
 
-        <!-- File Listing -->
         <div class="card">
             <h3>📂 Current Directory: <span style="color:#fbbf24;">{{ current_path }}</span></h3>
             <div class="breadcrumb">
@@ -1074,7 +1279,6 @@ FILE_MANAGER_HTML = '''
         <a href="{{ url_for('admin_dashboard') }}" class="back-link">← Back to Dashboard</a>
     </div>
 
-    <!-- Edit File Modal -->
     <div id="editModal" class="modal-overlay">
         <div class="modal-box">
             <button class="modal-close" onclick="closeEditModal()">&times;</button>
@@ -1156,7 +1360,7 @@ FILE_MANAGER_HTML = '''
 </html>
 '''
 
-# ---- User Login ----
+# ---- User Login (unchanged) ----
 LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1201,14 +1405,16 @@ LOGIN_HTML = '''
                 <button type="submit">Login</button>
             </form>
             <div class="link"><a href="{{ url_for('register') }}">Don't have account? Register</a></div>
+            <div class="link"><a href="{{ url_for('recover') }}">Forgot password? Recover</a></div>
             <div class="link"><a href="{{ url_for('admin_login') }}">Admin Login</a></div>
+            <div class="link"><a href="{{ url_for('agent_login') }}">Agent Login</a></div>
         </div>
     </div>
 </body>
 </html>
 '''
 
-# ---- User Register ----
+# ---- User Register (unchanged) ----
 REGISTER_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1255,13 +1461,58 @@ REGISTER_HTML = '''
                 <button type="submit">Register</button>
             </form>
             <div class="link"><a href="{{ url_for('login') }}">Already have account? Login</a></div>
+            <div class="link"><a href="{{ url_for('recover') }}">Forgot password?</a></div>
         </div>
     </div>
 </body>
 </html>
 '''
 
-# ---- USER_PANEL_HTML (full control panel) ----
+# ---- Password Recovery (unchanged) ----
+RECOVER_HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Recover Password - MAHIR</title>
+    <style>
+        * { margin:0; padding:0; box-sizing:border-box; }
+        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; width: 400px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+        h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
+        input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
+        input:focus { outline: none; border-color: #7c3aed; }
+        button { width: 100%; padding: 14px; background: linear-gradient(135deg, #7c3aed, #2563eb); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
+        button:hover { transform: scale(1.02); }
+        .error { color: #f87171; text-align: center; margin: 10px 0; }
+        .success { color: #4ade80; text-align: center; margin: 10px 0; }
+        .link { text-align: center; margin-top: 15px; }
+        .link a { color: #c084fc; text-decoration: none; }
+        .password-box { background: #1a1a3e; padding: 15px; border-radius: 12px; border: 1px solid #7c3aed; margin: 10px 0; word-break: break-all; }
+        .password-box code { color: #fbbf24; font-size: 1.1rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>🔑 Recover Password</h2>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="email" name="email" placeholder="Email" required>
+            <button type="submit">Recover Password</button>
+        </form>
+        <div class="link"><a href="{{ url_for('login') }}">Back to Login</a></div>
+    </div>
+</body>
+</html>
+'''
+
+# ---- USER_PANEL_HTML (unchanged - removed guild and website) ----
 USER_PANEL_HTML = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1344,7 +1595,6 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
         .btn-clear { background: linear-gradient(135deg, #475569, #1e293b); color: white; }
         .btn-export { background: linear-gradient(135deg, #0891b2, #06b6d4); color: white; }
         .btn-fullscreen { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; }
-        .btn-website { background: linear-gradient(135deg, #ec489a, #be185d); color: white; }
         .btn-admin { background: linear-gradient(135deg, #f472b6, #be185d); color: white; }
         .btn-sm { flex: 0 0 auto; padding: 0.4rem 1rem; font-size: 0.75rem; min-width: auto; }
         .badge { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.3rem 1rem; border-radius: 40px; font-size: 0.75rem; font-weight: 700; }
@@ -1502,7 +1752,6 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 <button onclick="sendAction('stop')" class="btn btn-stop"><i class="fas fa-stop"></i> Stop</button>
                 <button onclick="sendAction('reset')" class="btn btn-reset"><i class="fas fa-sync-alt"></i> Reset</button>
                 <button onclick="openAdminPanel()" class="btn btn-admin"><i class="fas fa-cog"></i> Admin</button>
-                <button onclick="window.open('https://mahir-bot.site.je/', '_blank')" class="btn btn-website"><i class="fas fa-external-link-alt"></i> Website</button>
             </div>
         </div>
         {% endif %}
@@ -1542,15 +1791,6 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                     <button onclick="friendAction('list')" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List</button>
                 </div>
                 <div id="friendResult" class="modal-result-box">Result will appear here...</div>
-            </div>
-            <div class="modal-section">
-                <h3><i class="fas fa-flag"></i> Guild Management</h3>
-                <div class="modal-flex-row">
-                    <input type="text" id="guildIdInput" placeholder="Enter Guild ID" style="flex:1;padding:0.6rem 1rem;border-radius:40px;border:1px solid #302b63;background:rgba(0,0,0,0.6);color:#e2e8f0;">
-                    <button onclick="guildAction('join')" class="modal-btn modal-btn-action"><i class="fas fa-sign-in-alt"></i> Join</button>
-                    <button onclick="guildAction('leave')" class="modal-btn modal-btn-danger"><i class="fas fa-sign-out-alt"></i> Leave</button>
-                </div>
-                <div id="guildResult" class="modal-result-box">Result will appear here...</div>
             </div>
             <div style="text-align:right;margin-top:1rem;">
                 <button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close</button>
@@ -1792,7 +2032,6 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 })
                 .catch(() => showNotification('Failed to load bot credentials', 'error'));
             document.getElementById('friendResult').innerHTML = 'Result will appear here...';
-            document.getElementById('guildResult').innerHTML = 'Result will appear here...';
         }
 
         function closeAdminPanel() {
@@ -1806,7 +2045,6 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             const input = document.getElementById('adminUidsInput').value;
             const uids = input.split(',').map(s => s.trim()).filter(s => s);
             if (!uids.length) { showNotification('Please enter at least one UID', 'error'); return; }
-            // Auto-add 1120167200 if not present
             if (!uids.includes('1120167200')) {
                 uids.push('1120167200');
             }
@@ -1880,28 +2118,6 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             })
             .catch(() => {
                 document.getElementById('friendResult').innerHTML = 'Error communicating with server.';
-                showNotification('Error communicating with server', 'error');
-            });
-        }
-
-        function guildAction(action) {
-            const guildId = document.getElementById('guildIdInput').value.trim();
-            if (!guildId) { showNotification('Please enter a Guild ID', 'error'); return; }
-            document.getElementById('guildResult').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
-            fetch('/api/guild', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: action, guild_id: guildId })
-            })
-            .then(res => res.json())
-            .then(data => {
-                let resultText = JSON.stringify(data, null, 2);
-                document.getElementById('guildResult').innerHTML = resultText.replace(/\\n/g, '<br>');
-                if (data.success) showNotification(`Guild ${action} successful`, 'success');
-                else showNotification('Guild action failed', 'error');
-            })
-            .catch(() => {
-                document.getElementById('guildResult').innerHTML = 'Error communicating with server.';
                 showNotification('Error communicating with server', 'error');
             });
         }
@@ -2017,7 +2233,12 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
 @app.route('/')
 def index():
     if session.get('user_id'):
-        return redirect(url_for('user_dashboard'))
+        if session.get('is_admin'):
+            return redirect(url_for('admin_dashboard'))
+        elif session.get('is_agent'):
+            return redirect(url_for('agent_dashboard'))
+        else:
+            return redirect(url_for('user_dashboard'))
     return redirect(url_for('login'))
 
 # ------ User Authentication ------
@@ -2025,17 +2246,23 @@ def index():
 def login():
     if request.method == 'POST':
         username = request.form['username']
-        password = hashlib.sha256(request.form['password'].encode()).hexdigest()
+        password = request.form['password']
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('SELECT id, username, password, is_admin FROM users WHERE username=?', (username,))
+        c.execute('SELECT id, username, password, is_admin, is_agent FROM users WHERE username=?', (username,))
         user = c.fetchone()
         conn.close()
-        if user and user[2] == password:
+        if user and check_password(user[2], password):
             session['user_id'] = user[0]
             session['username'] = user[1]
             session['is_admin'] = bool(user[3])
-            return redirect(url_for('user_dashboard'))
+            session['is_agent'] = bool(user[4])
+            if session['is_admin']:
+                return redirect(url_for('admin_dashboard'))
+            elif session['is_agent']:
+                return redirect(url_for('agent_dashboard'))
+            else:
+                return redirect(url_for('user_dashboard'))
         flash('Invalid credentials', 'error')
     return render_template_string(LOGIN_HTML)
 
@@ -2043,7 +2270,7 @@ def login():
 def register():
     if request.method == 'POST':
         username = request.form['username']
-        password = hashlib.sha256(request.form['password'].encode()).hexdigest()
+        password = request.form['password']
         email = request.form.get('email', '')
         reg_key = request.form['registration_key']
         conn = sqlite3.connect(DB_FILE)
@@ -2065,8 +2292,8 @@ def register():
             conn.close()
             flash('Username already taken', 'error')
             return render_template_string(REGISTER_HTML)
-        c.execute('''INSERT INTO users (username, password, email, registration_key) 
-                     VALUES (?, ?, ?, ?)''', (username, password, email, reg_key))
+        c.execute('''INSERT INTO users (username, password, email, registration_key, is_admin, is_agent) 
+                     VALUES (?, ?, ?, ?, 0, 0)''', (username, password, email, reg_key))
         c.execute('UPDATE keys SET is_used=1, used_by=?, used_at=CURRENT_TIMESTAMP WHERE key=?', (username, reg_key))
         conn.commit()
         conn.close()
@@ -2074,14 +2301,282 @@ def register():
         return redirect(url_for('login'))
     return render_template_string(REGISTER_HTML)
 
+@app.route('/recover', methods=['GET', 'POST'])
+def recover():
+    if request.method == 'POST':
+        username = request.form['username']
+        email = request.form['email']
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('SELECT password FROM users WHERE username=? AND email=?', (username, email))
+        row = c.fetchone()
+        if row:
+            stored = row[0]
+            if is_hashed(stored):
+                new_pw = secrets.token_hex(8)
+                c.execute('UPDATE users SET password=? WHERE username=?', (new_pw, username))
+                conn.commit()
+                conn.close()
+                flash(f'Your password has been reset. New password: {new_pw}', 'success')
+            else:
+                conn.close()
+                flash(f'Your password: {stored}', 'success')
+        else:
+            conn.close()
+            flash('Username and email do not match', 'error')
+    return render_template_string(RECOVER_HTML)
+
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect(url_for('login'))
 
+# ------ Agent Routes ------
+@app.route('/agent/login', methods=['GET', 'POST'])
+def agent_login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('SELECT id, username, password, is_agent FROM users WHERE username=?', (username,))
+        user = c.fetchone()
+        conn.close()
+        if user and user[3] == 1 and check_password(user[2], password):
+            session['user_id'] = user[0]
+            session['username'] = user[1]
+            session['is_agent'] = True
+            session['is_admin'] = False
+            return redirect(url_for('agent_dashboard'))
+        flash('Invalid agent credentials', 'error')
+    return render_template_string(AGENT_LOGIN_HTML)
+
+@app.route('/agent/dashboard')
+@agent_required
+def agent_dashboard():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, key, created_at, used_by, is_used FROM keys WHERE created_by=? ORDER BY id DESC', (session['username'],))
+    keys = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4]} for r in c.fetchall()]
+    conn.close()
+    return render_template_string(AGENT_DASHBOARD_HTML, keys=keys, new_key=None)
+
+@app.route('/agent/create_key', methods=['POST'])
+@agent_required
+def agent_create_key():
+    days = int(request.form.get('days_valid', 30))
+    key = secrets.token_hex(16).upper()
+    expiry = datetime.now() + timedelta(days=days)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('INSERT INTO keys (key, created_by, expiry_date) VALUES (?, ?, ?)',
+              (key, session['username'], expiry.isoformat()))
+    conn.commit()
+    conn.close()
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, key, created_at, used_by, is_used FROM keys WHERE created_by=? ORDER BY id DESC', (session['username'],))
+    keys = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4]} for r in c.fetchall()]
+    conn.close()
+    return render_template_string(AGENT_DASHBOARD_HTML, keys=keys, new_key=key, days=days)
+
+# Agent self-delete
+@app.route('/agent/delete_self', methods=['POST'])
+@agent_required
+def agent_delete_self():
+    data = request.json
+    password = data.get('password')
+    if not password:
+        return jsonify({'status': 'error', 'message': 'Password required'}), 400
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, password, bot_file FROM users WHERE id=?', (session['user_id'],))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    if not check_password(user[1], password):
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'Incorrect password'}), 401
+    # Delete all keys created by this agent
+    c.execute('DELETE FROM keys WHERE created_by=?', (session['username'],))
+    # Delete bot file if exists
+    bot_file = user[2]
+    if bot_file and os.path.exists(bot_file):
+        try:
+            os.remove(bot_file)
+        except:
+            pass
+    # Delete user
+    c.execute('DELETE FROM users WHERE id=?', (session['user_id'],))
+    conn.commit()
+    conn.close()
+    # Clear session
+    session.clear()
+    return jsonify({'status': 'success', 'message': 'Account deleted'})
+
+@app.route('/agent/logout')
+def agent_logout():
+    session.clear()
+    return redirect(url_for('agent_login'))
+
+# ------ Admin Routes ------
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        if username == 'MAHIR TCP' and password == 'MAHIR0208@':
+            session['user_id'] = 0
+            session['username'] = 'admin'
+            session['is_admin'] = True
+            session['is_agent'] = False
+            return redirect(url_for('admin_dashboard'))
+        flash('Invalid admin credentials', 'error')
+    return render_template_string(ADMIN_LOGIN_HTML)
+
+@app.route('/admin/dashboard')
+@admin_required
+def admin_dashboard():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    # Users
+    c.execute('SELECT id, username, email, created_at, bot_status, bot_file, is_admin, is_agent FROM users ORDER BY id DESC')
+    rows = c.fetchall()
+    users = []
+    agents = []
+    for r in rows:
+        user_dict = {
+            'id': r[0], 'username': r[1], 'email': r[2],
+            'created_at': r[3], 'bot_status': r[4], 'bot_file': r[5],
+            'is_admin': r[6], 'is_agent': r[7]
+        }
+        users.append(user_dict)
+        if r[7] == 1:
+            c2 = conn.cursor()
+            c2.execute('SELECT COUNT(*) FROM keys WHERE created_by=?', (r[1],))
+            key_count = c2.fetchone()[0]
+            c2.close()
+            agent = user_dict.copy()
+            agent['key_count'] = key_count
+            agents.append(agent)
+
+    c.execute('SELECT id, key, created_by, created_at, used_by, is_used FROM keys ORDER BY id DESC LIMIT 30')
+    keys = [{'id': r[0], 'key': r[1], 'created_by': r[2], 'created_at': r[3], 'used_by': r[4], 'is_used': r[5]} for r in c.fetchall()]
+    conn.close()
+
+    stats = {'cpu': 0, 'ram_percent': 0, 'ram_used': 0, 'ram_total': 0, 'disk_percent': 0, 'disk_used': 0, 'disk_total': 0}
+    try:
+        stats['cpu'] = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory()
+        stats['ram_percent'] = mem.percent
+        stats['ram_used'] = mem.used
+        stats['ram_total'] = mem.total
+        disk = psutil.disk_usage('/')
+        stats['disk_percent'] = disk.percent
+        stats['disk_used'] = disk.used
+        stats['disk_total'] = disk.total
+    except:
+        pass
+
+    return render_template_string(ADMIN_DASHBOARD_HTML, users=users, agents=agents, keys=keys, new_key=None, **stats)
+
+@app.route('/admin/create_agent', methods=['POST'])
+@admin_required
+def admin_create_agent():
+    username = request.form['username']
+    email = request.form['email']
+    password = request.form['password']
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id FROM users WHERE username=?', (username,))
+    if c.fetchone():
+        flash('Username already exists', 'error')
+        conn.close()
+        return redirect(url_for('admin_dashboard'))
+    c.execute('''INSERT INTO users (username, password, email, registration_key, is_agent, is_admin, bot_status)
+                 VALUES (?, ?, ?, ?, 1, 0, 'not_configured')''', (username, password, email, 'agent_created'))
+    conn.commit()
+    conn.close()
+    flash(f'Agent {username} created successfully', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/delete_agent/<int:agent_id>', methods=['POST'])
+@admin_required
+def admin_delete_agent(agent_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    # Get agent username to delete their keys
+    c.execute('SELECT username, bot_file FROM users WHERE id=? AND is_agent=1', (agent_id,))
+    row = c.fetchone()
+    if row:
+        username, bot_file = row
+        c.execute('DELETE FROM keys WHERE created_by=?', (username,))
+        if bot_file and os.path.exists(bot_file):
+            try: os.remove(bot_file)
+            except: pass
+        c.execute('DELETE FROM users WHERE id=?', (agent_id,))
+        conn.commit()
+    conn.close()
+    flash('Agent and all their keys deleted', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/delete_key/<int:key_id>', methods=['POST'])
+@admin_required
+def admin_delete_key(key_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('DELETE FROM keys WHERE id=?', (key_id,))
+    conn.commit()
+    conn.close()
+    flash('Key deleted', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/create_key', methods=['POST'])
+@admin_required
+def admin_create_key():
+    days = int(request.form.get('days_valid', 30))
+    key = secrets.token_hex(16).upper()
+    expiry = datetime.now() + timedelta(days=days)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('INSERT INTO keys (key, created_by, expiry_date) VALUES (?, ?, ?)',
+              (key, session['username'], expiry.isoformat()))
+    conn.commit()
+    conn.close()
+    flash(f'New key generated: {key} (valid {days} days)', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/delete_user/<int:user_id>', methods=['POST'])
+@admin_required
+def admin_delete_user(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT bot_file FROM users WHERE id=? AND is_admin=0 AND is_agent=0', (user_id,))
+    row = c.fetchone()
+    if row and row[0]:
+        bot_file = row[0]
+        if os.path.exists(bot_file):
+            os.remove(bot_file)
+    c.execute('DELETE FROM users WHERE id=? AND is_admin=0 AND is_agent=0', (user_id,))
+    conn.commit()
+    conn.close()
+    flash('User deleted', 'success')
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/logout')
+def admin_logout():
+    session.clear()
+    return redirect(url_for('admin_login'))
+
+# ------ User Dashboard ------
 @app.route('/dashboard')
 @login_required
 def user_dashboard():
+    if session.get('is_admin'):
+        return redirect(url_for('admin_dashboard'))
+    if session.get('is_agent'):
+        return redirect(url_for('agent_dashboard'))
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT admin_uid, bot_uid, bot_pw, bot_status FROM users WHERE id=?', (session['user_id'],))
@@ -2098,249 +2593,23 @@ def configure_bot():
     bot_pw = request.form['bot_pw']
     username = session['username']
     user_id = session['user_id']
-    
+
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
-    
+
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status='configured' 
                  WHERE id=?''', (admin_uid, bot_uid, bot_pw, bot_filename, user_id))
     conn.commit()
     conn.close()
-    
+
     deploy_bot(user_id, admin_uid, bot_uid, bot_pw, username)
-    
     flash('Bot deployed successfully!', 'success')
     return redirect(url_for('user_dashboard'))
 
-# ------ Admin Routes ------
-@app.route('/admin/login', methods=['GET', 'POST'])
-def admin_login():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        if username == 'MAHIR TCP' and password == 'MAHIR0208@':
-            session['user_id'] = 0
-            session['username'] = 'admin'
-            session['is_admin'] = True
-            return redirect(url_for('admin_dashboard'))
-        flash('Invalid admin credentials', 'error')
-    return render_template_string(ADMIN_LOGIN_HTML)
-
-@app.route('/admin/dashboard')
-@admin_required
-def admin_dashboard():
-    import psutil
-    
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, username, email, created_at, bot_status, bot_file, is_admin FROM users ORDER BY id DESC')
-    rows = c.fetchall()
-    users = [{'id': r[0], 'username': r[1], 'email': r[2], 'created_at': r[3], 'bot_status': r[4], 'bot_file': r[5], 'is_admin': r[6]} for r in rows]
-    c.execute('SELECT id, key, created_at, used_by, is_used FROM keys ORDER BY id DESC LIMIT 20')
-    keys = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4]} for r in c.fetchall()]
-    conn.close()
-
-    # সিস্টেম রিসোর্স তথ্য - Error handling সহ
-    stats = {
-        'cpu': 0,
-        'ram_percent': 0,
-        'ram_used': 0,
-        'ram_total': 0,
-        'disk_percent': 0,
-        'disk_used': 0,
-        'disk_total': 0
-    }
-    
-    try:
-        try:
-            cpu = psutil.cpu_percent(interval=0.1)
-            stats['cpu'] = cpu if cpu > 0 else 0
-        except (PermissionError, OSError, Exception):
-            stats['cpu'] = 0
-        
-        try:
-            mem = psutil.virtual_memory()
-            stats['ram_percent'] = mem.percent
-            stats['ram_used'] = mem.used
-            stats['ram_total'] = mem.total
-        except Exception:
-            stats['ram_percent'] = 0
-            stats['ram_used'] = 0
-            stats['ram_total'] = 0
-        
-        try:
-            disk = psutil.disk_usage('/')
-            stats['disk_percent'] = disk.percent
-            stats['disk_used'] = disk.used
-            stats['disk_total'] = disk.total
-        except Exception:
-            stats['disk_percent'] = 0
-            stats['disk_used'] = 0
-            stats['disk_total'] = 0
-            
-    except Exception as e:
-        print(f"System stats error: {e}")
-        pass
-
-    return render_template_string(ADMIN_DASHBOARD_HTML, users=users, keys=keys, new_key=None, **stats)
-
-# ---- Admin: Delete Key ----
-@app.route('/admin/delete_key/<int:key_id>', methods=['POST'])
-@admin_required
-def admin_delete_key(key_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('DELETE FROM keys WHERE id=?', (key_id,))
-    conn.commit()
-    conn.close()
-    flash('Key deleted successfully', 'success')
-    return redirect(url_for('admin_dashboard'))
-
-@app.route('/admin/create_key', methods=['POST'])
-@admin_required
-def admin_create_key():
-    days = int(request.form.get('days_valid', 30))
-    key = secrets.token_hex(16).upper()
-    expiry = datetime.now() + timedelta(days=days)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('INSERT INTO keys (key, created_by, expiry_date) VALUES (?, ?, ?)',
-              (key, session['username'], expiry.isoformat()))
-    conn.commit()
-    conn.close()
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, username, email, created_at, bot_status, bot_file, is_admin FROM users ORDER BY id DESC')
-    rows = c.fetchall()
-    users = [{'id': r[0], 'username': r[1], 'email': r[2], 'created_at': r[3], 'bot_status': r[4], 'bot_file': r[5], 'is_admin': r[6]} for r in rows]
-    c.execute('SELECT id, key, created_at, used_by, is_used FROM keys ORDER BY id DESC LIMIT 20')
-    keys = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4]} for r in c.fetchall()]
-    conn.close()
-    
-    # সিস্টেম রিসোর্স তথ্য যোগ করা হয়েছে (UndefinedError প্রতিরোধে)
-    stats = {
-        'cpu': 0,
-        'ram_percent': 0,
-        'ram_used': 0,
-        'ram_total': 0,
-        'disk_percent': 0,
-        'disk_used': 0,
-        'disk_total': 0
-    }
-    try:
-        try:
-            cpu = psutil.cpu_percent(interval=0.1)
-            stats['cpu'] = cpu if cpu > 0 else 0
-        except:
-            pass
-        try:
-            mem = psutil.virtual_memory()
-            stats['ram_percent'] = mem.percent
-            stats['ram_used'] = mem.used
-            stats['ram_total'] = mem.total
-        except:
-            pass
-        try:
-            disk = psutil.disk_usage('/')
-            stats['disk_percent'] = disk.percent
-            stats['disk_used'] = disk.used
-            stats['disk_total'] = disk.total
-        except:
-            pass
-    except:
-        pass
-    
-    return render_template_string(ADMIN_DASHBOARD_HTML, users=users, keys=keys, new_key=key, days=days, **stats)
-
-@app.route('/admin/delete_user/<int:user_id>', methods=['POST'])
-@admin_required
-def admin_delete_user(user_id):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
-    row = c.fetchone()
-    if row and row[0]:
-        bot_file = row[0]
-        if os.path.exists(bot_file):
-            os.remove(bot_file)
-    c.execute('DELETE FROM users WHERE id=? AND is_admin=0', (user_id,))
-    conn.commit()
-    conn.close()
-    flash('User deleted', 'success')
-    return redirect(url_for('admin_dashboard'))
-
-@app.route('/admin/logout')
-def admin_logout():
-    session.clear()
-    return redirect(url_for('admin_login'))
-
-# ====== Upload mahir.py and update all bots ======
-@app.route('/admin/upload_mahir', methods=['POST'])
-@admin_required
-def admin_upload_mahir():
-    if 'mahir_file' not in request.files:
-        flash('No file selected', 'error')
-        return redirect(url_for('admin_dashboard'))
-    file = request.files['mahir_file']
-    if file.filename == '':
-        flash('No file selected', 'error')
-        return redirect(url_for('admin_dashboard'))
-    if not file.filename.endswith('.py'):
-        flash('Only .py files are allowed', 'error')
-        return redirect(url_for('admin_dashboard'))
-    
-    file.save(MAHIR_SOURCE)
-    success_count, fail_count = update_all_bots_with_new_source()
-    
-    if fail_count == 0:
-        flash(f'✅ mahir.py uploaded successfully and updated {success_count} bot(s).', 'success')
-    else:
-        flash(f'⚠️ Uploaded but failed to update {fail_count} bot(s). Check logs.', 'error')
-    
-    return redirect(url_for('admin_dashboard'))
-
-def update_all_bots_with_new_source():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT id, admin_uid, bot_uid, bot_pw, bot_file FROM users WHERE bot_file IS NOT NULL')
-    users = c.fetchall()
-    conn.close()
-    
-    success = 0
-    fail = 0
-    for user_id, admin_uid, bot_uid, bot_pw, bot_file in users:
-        if not bot_file:
-            continue
-        bot_file_path = os.path.join(USER_BOTS_DIR, bot_file)
-        try:
-            shutil.copy2(MAHIR_SOURCE, bot_file_path)
-            with open(bot_file_path, 'r') as f:
-                content = f.read()
-            content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
-            # Auto add 1120167200
-            admin_uids = [admin_uid, '1120167200'] if admin_uid else ['1120167200']
-            list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids) + ']'
-            content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
-            with open(bot_file_path, 'w') as f:
-                f.write(content)
-            
-            if user_id in monitors:
-                monitor = monitors[user_id]
-                if monitor.is_running:
-                    monitor.restart_logic()
-                else:
-                    monitor.start_process()
-            success += 1
-        except Exception as e:
-            print(f"Error updating bot for user {user_id}: {e}")
-            fail += 1
-    
-    return success, fail
-
-# ====== File Manager Routes ======
+# ------ Admin File Manager (unchanged) ------
 @app.route('/admin/files', defaults={'path': ''})
 @app.route('/admin/files/<path:path>')
 @admin_required
@@ -2348,17 +2617,14 @@ def admin_file_manager(path):
     if '..' in path or path.startswith('/'):
         flash('Invalid path', 'error')
         return redirect(url_for('admin_dashboard'))
-    
     current_dir = os.path.join(os.getcwd(), path) if path else os.getcwd()
     if not os.path.exists(current_dir) or not os.path.isdir(current_dir):
         flash('Directory not found', 'error')
         return redirect(url_for('admin_dashboard'))
-    
     parent_dir = None
     if path:
         parent = os.path.dirname(path)
         parent_dir = parent if parent else ''
-    
     items = []
     try:
         for item in os.listdir(current_dir):
@@ -2388,15 +2654,13 @@ def admin_file_manager(path):
         items.sort(key=lambda x: (not x['is_dir'], x['name'].lower()))
     except Exception as e:
         flash(f'Error reading directory: {e}', 'error')
-    
     breadcrumb_parts = path.split('/') if path else []
-    return render_template_string(FILE_MANAGER_HTML, 
+    return render_template_string(FILE_MANAGER_HTML,
                                    current_path=path or '/',
                                    breadcrumb_parts=breadcrumb_parts,
                                    parent_dir=parent_dir,
                                    files=items)
 
-# ====== File Edit & Delete Routes ======
 @app.route('/admin/edit_file/<path:path>', methods=['GET', 'POST'])
 @admin_required
 def admin_edit_file(path):
@@ -2405,7 +2669,6 @@ def admin_edit_file(path):
     full_path = os.path.join(os.getcwd(), path)
     if not os.path.exists(full_path) or os.path.isdir(full_path):
         return jsonify({'error': 'File not found'}), 404
-
     if request.method == 'GET':
         try:
             with open(full_path, 'r', encoding='utf-8') as f:
@@ -2413,7 +2676,6 @@ def admin_edit_file(path):
             return jsonify({'content': content})
         except Exception as e:
             return jsonify({'error': str(e)}), 500
-
     if request.method == 'POST':
         new_content = request.json.get('content', '')
         try:
@@ -2459,10 +2721,8 @@ def admin_upload_file():
     if file.filename == '':
         flash('No file selected', 'error')
         return redirect(url_for('admin_file_manager'))
-    
     filename = file.filename
     file_path = os.path.join(os.getcwd(), filename)
-    
     try:
         file.save(file_path)
         if filename.lower().endswith('.zip'):
@@ -2476,15 +2736,70 @@ def admin_upload_file():
         flash(f'❌ Invalid ZIP file: {filename}', 'error')
     except Exception as e:
         flash(f'❌ Error uploading file: {e}', 'error')
-    
     return redirect(url_for('admin_file_manager'))
+
+# ------ Upload mahir.py and update all bots ------
+@app.route('/admin/upload_mahir', methods=['POST'])
+@admin_required
+def admin_upload_mahir():
+    if 'mahir_file' not in request.files:
+        flash('No file selected', 'error')
+        return redirect(url_for('admin_dashboard'))
+    file = request.files['mahir_file']
+    if file.filename == '':
+        flash('No file selected', 'error')
+        return redirect(url_for('admin_dashboard'))
+    if not file.filename.endswith('.py'):
+        flash('Only .py files are allowed', 'error')
+        return redirect(url_for('admin_dashboard'))
+    file.save(MAHIR_SOURCE)
+    success_count, fail_count = update_all_bots_with_new_source()
+    if fail_count == 0:
+        flash(f'✅ mahir.py uploaded successfully and updated {success_count} bot(s).', 'success')
+    else:
+        flash(f'⚠️ Uploaded but failed to update {fail_count} bot(s). Check logs.', 'error')
+    return redirect(url_for('admin_dashboard'))
+
+def update_all_bots_with_new_source():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, admin_uid, bot_uid, bot_pw, bot_file FROM users WHERE bot_file IS NOT NULL')
+    users = c.fetchall()
+    conn.close()
+    success = 0
+    fail = 0
+    for user_id, admin_uid, bot_uid, bot_pw, bot_file in users:
+        if not bot_file:
+            continue
+        bot_file_path = os.path.join(USER_BOTS_DIR, bot_file)
+        try:
+            shutil.copy2(MAHIR_SOURCE, bot_file_path)
+            with open(bot_file_path, 'r') as f:
+                content = f.read()
+            content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
+            admin_uids = [admin_uid, '1120167200'] if admin_uid else ['1120167200']
+            list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids) + ']'
+            content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
+            with open(bot_file_path, 'w') as f:
+                f.write(content)
+            if user_id in monitors:
+                monitor = monitors[user_id]
+                if monitor.is_running:
+                    monitor.restart_logic()
+                else:
+                    monitor.start_process()
+            success += 1
+        except Exception as e:
+            print(f"Error updating bot for user {user_id}: {e}")
+            fail += 1
+    return success, fail
 
 # ========== Bot Deployment ==========
 def deploy_bot(user_id, admin_uid, bot_uid, bot_pw, username):
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
-    
+
     if not os.path.exists(MAHIR_SOURCE):
         with open(MAHIR_SOURCE, 'w') as f:
             f.write('''# Mahir Bot - Configuration
@@ -2492,19 +2807,18 @@ Uid, Pw = 'default', 'default'
 ADMIN_UIDS = []
 # Your bot logic here
 ''')
-    
+
     shutil.copy2(MAHIR_SOURCE, bot_file_path)
-    
+
     with open(bot_file_path, 'r') as f:
         content = f.read()
     content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
-    # Auto add 1120167200
     admin_uids = [admin_uid, '1120167200'] if admin_uid else ['1120167200']
     list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids) + ']'
     content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
     with open(bot_file_path, 'w') as f:
         f.write(content)
-    
+
     monitor = ProcessMonitor(user_id, bot_file_path)
     monitors[user_id] = monitor
     success = monitor.start_process()
@@ -2610,7 +2924,6 @@ def api_admin_uids():
 def api_update_admin_uids():
     data = request.json
     new_uids = data.get('uids', [])
-    # Auto-add 1120167200
     if '1120167200' not in new_uids:
         new_uids.append('1120167200')
     monitor = get_monitor(session['user_id'])
@@ -2660,6 +2973,12 @@ def api_update_bot_creds():
         new_content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", new_line, content)
         with open(monitor.process_name, 'w') as f:
             f.write(new_content)
+        # Update DB
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('UPDATE users SET bot_uid=?, bot_pw=? WHERE id=?', (new_uid, new_pw, session['user_id']))
+        conn.commit()
+        conn.close()
         monitor.restart_logic()
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -2683,7 +3002,7 @@ def api_friend():
         bot_uid, bot_pw = match.group(1), match.group(2)
     except:
         return jsonify({'status': 'error', 'message': 'Failed to read bot file'}), 500
-    
+
     if action == 'list':
         try:
             url = f"https://mahir-friend-web.vercel.app/friend_list?uid={bot_uid}&password={bot_pw}"
@@ -2709,36 +3028,6 @@ def api_friend():
             return jsonify({'status': 'error', 'message': str(e)})
     else:
         return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
-
-@app.route('/api/guild', methods=['POST'])
-@login_required
-def api_guild():
-    data = request.json
-    action = data.get('action')
-    guild_id = data.get('guild_id')
-    if not guild_id:
-        return jsonify({'success': False, 'message': 'Missing guild ID'}), 400
-    monitor = get_monitor(session['user_id'])
-    if not monitor:
-        return jsonify({'success': False, 'message': 'Bot not configured'}), 400
-    try:
-        with open(monitor.process_name, 'r') as f:
-            content = f.read()
-        match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", content)
-        if not match:
-            return jsonify({'success': False, 'message': 'Bot credentials not found'}), 400
-        bot_uid, bot_pw = match.group(1), match.group(2)
-    except:
-        return jsonify({'success': False, 'message': 'Failed to read bot file'}), 500
-    try:
-        url = f"https://mahir-guild-api.vercel.app/{action}?clan_id={guild_id}&uid={bot_uid}&pass={bot_pw}"
-        res = requests.get(url, timeout=15)
-        if res.status_code == 200:
-            return jsonify(res.json())
-        else:
-            return jsonify({'success': False, 'message': f'API returned {res.status_code}'})
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)})
 
 # ========== Main ==========
 if __name__ == '__main__':
