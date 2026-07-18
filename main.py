@@ -114,6 +114,13 @@ def check_password(stored, provided):
     else:
         return stored == provided
 
+# ========== Debug Print Function ==========
+def debug_print(msg):
+    """Print debug messages with timestamp."""
+    if True:  # Set to False to disable debug output
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        print(f"[{timestamp}] 🔍 {msg}")
+
 # ========== Bio Update (via MAHIR API) ==========
 def update_bot_bio(uid, password, username):
     """Update bot bio via MAHIR long-bio API."""
@@ -555,12 +562,12 @@ def _select_veteran(region, jwt_token, session):
         return False
 
 # ---- Main account creation (full flow) ----
-def create_acc(region, session):
+def create_acc(region, session, custom_name=None):
     """
     Full OB54 account creation with TCP activation.
     Returns dict with uid, password, name, account_id, jwt_token, tcp_activated.
     """
-    max_attempts = 5
+    max_attempts = 10  # Increased from 5 to 10 for better chance
     for attempt in range(max_attempts):
         try:
             password = generate_custom_password()
@@ -588,10 +595,11 @@ def create_acc(region, session):
             )
             if resp_reg.status_code != 200:
                 if resp_reg.status_code == 429:
-                    time.sleep(0.5)
+                    time.sleep(1.0)  # Increased delay for rate limit
                 continue
             reg_json = resp_reg.json()
             if reg_json.get("code") != 0:
+                debug_print(f"Register error code: {reg_json.get('code')}")
                 continue
             uid = reg_json['data']['uid']
             smart_delay()
@@ -625,13 +633,20 @@ def create_acc(region, session):
                 continue
             tok_json = resp_tok.json()
             if tok_json.get("code") != 0:
+                debug_print(f"Token error: {tok_json.get('code')}")
                 continue
             access_token = tok_json['data']['access_token']
-            open_id      = tok_json['data']['open_id']
+            open_id = tok_json['data']['open_id']
             smart_delay()
 
             # Step 3: MajorRegister + MajorLogin + TCP activation
-            name = generate_random_name()
+            # Use custom_name if provided, otherwise generate random name
+            if custom_name:
+                name = custom_name
+                debug_print(f"Attempt {attempt+1}/{max_attempts}: Trying to create account with name: {name}")
+            else:
+                name = generate_random_name()
+            
             # XOR encode open_id for MajorRegister
             keystream = [0x30,0x30,0x30,0x32,0x30,0x31,0x37,0x30,0x30,0x30,0x30,0x30,0x32,0x30,0x31,0x37,
                          0x30,0x30,0x30,0x30,0x30,0x32,0x30,0x31,0x37,0x30,0x30,0x30,0x30,0x30,0x32,0x30]
@@ -662,18 +677,20 @@ def create_acc(region, session):
             resp_reg2 = session.post(register_url, headers=headers_reg2,
                                      data=encrypted_payload, verify=False, timeout=15)
             if resp_reg2.status_code != 200:
+                debug_print(f"MajorRegister failed with status: {resp_reg2.status_code}")
                 continue
 
             # MajorLogin
             login_result = _perform_major_login_sync(uid, password, access_token, open_id, region, session)
             account_id = login_result.get("account_id", "N/A")
-            jwt_token  = login_result.get("jwt_token", "")
-            ml_key     = login_result.get("ml_key")
-            ml_iv      = login_result.get("ml_iv")
-            ml_ts      = login_result.get("ml_timestamp")
-            ml_url     = login_result.get("ml_url")
+            jwt_token = login_result.get("jwt_token", "")
+            ml_key = login_result.get("ml_key")
+            ml_iv = login_result.get("ml_iv")
+            ml_ts = login_result.get("ml_timestamp")
+            ml_url = login_result.get("ml_url")
 
             if account_id == "N/A":
+                debug_print(f"MajorLogin failed - account_id is N/A")
                 continue
 
             # Region binding and veteran selection
@@ -689,6 +706,8 @@ def create_acc(region, session):
                     open_id, access_token, ml_url, session
                 )
 
+            # Account creation successful
+            print(f"✅ Account created successfully with name: {name} (Attempt {attempt+1})")
             return {
                 "uid": uid,
                 "password": password,
@@ -699,8 +718,16 @@ def create_acc(region, session):
                 "tcp_activated": tcp_ok,
             }
         except Exception as e:
-            print(f"create_acc error: {e}")
-        smart_delay()
+            print(f"create_acc error (attempt {attempt+1}): {e}")
+        
+        # Wait before retry (with jitter)
+        if attempt < max_attempts - 1:
+            wait_time = random.uniform(1.0, 3.0)  # Wait 1-3 seconds between retries
+            print(f"🔄 Retrying account creation... (Attempt {attempt+2}/{max_attempts})")
+            time.sleep(wait_time)
+    
+    # All attempts failed
+    print(f"❌ Failed to create account after {max_attempts} attempts")
     return None
 
 # =============================================================================
@@ -3222,23 +3249,48 @@ def configure_bot():
     admin_uid = row[0] if row and row[0] else None
     conn.close()
 
-    # Generate a new account
+    # Try multiple times to create account with custom name
+    max_global_attempts = 3
+    account_data = None
     session_requests = requests.Session()
-    account_data = create_acc('BD', session_requests)
+    
+    for global_attempt in range(max_global_attempts):
+        print(f"🔄 Global attempt {global_attempt+1}/{max_global_attempts} for bot: {bot_name}")
+        
+        # Try with custom name first
+        account_data = create_acc('BD', session_requests, custom_name=bot_name)
+        
+        if account_data:
+            break
+        
+        # If custom name fails, try with a slight variation
+        if global_attempt < max_global_attempts - 1:
+            variations = [
+                f"{bot_name}{random.randint(1, 99)}",
+                f"{bot_name}_{random.randint(1, 99)}",
+                f"{bot_name}{random.choice(['X', 'Z', 'Q'])}"
+            ]
+            bot_name = random.choice(variations)
+            print(f"🔄 Trying variation: {bot_name}")
+            
+            # Create a new session for each attempt
+            session_requests = requests.Session()
+            time.sleep(2)
+    
     if not account_data:
-        flash('Failed to create bot account. Please try again.', 'error')
+        flash('Failed to create bot account after multiple attempts. Please try again with a different name.', 'error')
         return redirect(url_for('user_dashboard'))
 
     bot_uid = account_data['uid']
     bot_pw = account_data['password']
     account_id = account_data.get('account_id', 'N/A')
+    actual_bot_name = account_data.get('name', bot_name)
 
     # Save to database
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
-    bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
 
     c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status='configured' 
                  WHERE id=?''', (admin_uid, bot_uid, bot_pw, bot_filename, user_id))
@@ -3246,9 +3298,9 @@ def configure_bot():
     conn.close()
 
     # Deploy the bot
-    deploy_bot_with_account(user_id, admin_uid, bot_uid, bot_pw, bot_name, username)
+    deploy_bot_with_account(user_id, admin_uid, bot_uid, bot_pw, actual_bot_name, username)
 
-    flash(f'Bot deployed successfully! Account ID: {account_id}', 'success')
+    flash(f'✅ Bot deployed successfully! Account ID: {account_id}, Name: {actual_bot_name}', 'success')
     return redirect(url_for('user_dashboard'))
 
 # ------ NEW: Regenerate Bot (API) ------
@@ -3268,8 +3320,6 @@ def api_regenerate_bot():
         return jsonify({'status': 'error', 'message': 'User not found'}), 404
     admin_uid = row[0]
     bot_file = row[1]
-    old_uid = row[2]
-    old_pw = row[3]
     conn.close()
 
     # Delete old bot file if exists
@@ -3286,14 +3336,33 @@ def api_regenerate_bot():
         monitors[user_id].stop_process()
         del monitors[user_id]
 
-    # Generate a new account
+    # Try multiple times to create account
+    max_global_attempts = 3
+    account_data = None
     session_requests = requests.Session()
-    account_data = create_acc('BD', session_requests)
+    bot_name = f"{username}_BOT"
+    
+    for global_attempt in range(max_global_attempts):
+        print(f"🔄 Regeneration attempt {global_attempt+1}/{max_global_attempts}")
+        
+        account_data = create_acc('BD', session_requests, custom_name=bot_name)
+        
+        if account_data:
+            break
+        
+        # If fails, try with variation
+        if global_attempt < max_global_attempts - 1:
+            bot_name = f"{username}_{random.randint(100, 999)}"
+            print(f"🔄 Trying variation: {bot_name}")
+            session_requests = requests.Session()
+            time.sleep(2)
+
     if not account_data:
-        return jsonify({'status': 'error', 'message': 'Failed to create new account'}), 500
+        return jsonify({'status': 'error', 'message': 'Failed to create new account after multiple attempts'}), 500
 
     new_uid = account_data['uid']
     new_pw = account_data['password']
+    actual_bot_name = account_data.get('name', bot_name)
 
     # Update database
     conn = sqlite3.connect(DB_FILE)
@@ -3303,10 +3372,10 @@ def api_regenerate_bot():
     conn.commit()
     conn.close()
 
-    # Deploy new bot (use the same bot_file name or regenerate)
+    # Deploy new bot
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
-    deploy_bot_with_account(user_id, admin_uid, new_uid, new_pw, username, username)
+    deploy_bot_with_account(user_id, admin_uid, new_uid, new_pw, actual_bot_name, username)
 
     return jsonify({'status': 'success', 'message': 'Bot regenerated successfully'})
 
