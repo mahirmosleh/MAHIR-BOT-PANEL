@@ -14,16 +14,21 @@ import threading
 import re
 import signal
 import zipfile
+import hmac
+import base64
+import random
+import string
+import asyncio
 from datetime import datetime, timedelta
 from queue import Queue, Empty
-from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, flash, send_file, send_from_directory
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, flash, send_file
 from functools import wraps
 import psutil
 import requests
 
 # ========== Dependency Check ==========
 def install_dependencies():
-    required_pkgs = ["colorama", "psutil", "flask", "requests"]
+    required_pkgs = ["colorama", "psutil", "flask", "requests", "pycryptodome", "protobuf"]
     for pkg in required_pkgs:
         try:
             __import__(pkg)
@@ -35,7 +40,24 @@ install_dependencies()
 from colorama import init, Fore, Style
 init(autoreset=True)
 
-# ========== Configuration ==========
+# ========== Additional Imports ==========
+try:
+    from Crypto.Cipher import AES
+    from Crypto.Util.Padding import pad
+    AES_AVAILABLE = True
+except:
+    AES_AVAILABLE = False
+
+# Protobuf modules – if missing, fallback to text parsing
+try:
+    import MajoRLoGinrEq_pb2
+    import MajoRLoGinrEs_pb2
+    import PorTs_pb2
+    NEW_PROTO_AVAILABLE = True
+except ImportError:
+    NEW_PROTO_AVAILABLE = False
+
+# ========== Flask Configuration ==========
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
@@ -79,11 +101,10 @@ def init_db():
 
 init_db()
 
-# ========== Helper: sanitize username for filename ==========
+# ========== Helper Functions ==========
 def sanitize_filename(name):
     return re.sub(r'[^a-zA-Z0-9_]', '_', name)
 
-# ========== Password handling ==========
 def is_hashed(pw):
     return len(pw) == 64 and all(c in '0123456789abcdefABCDEF' for c in pw)
 
@@ -93,9 +114,9 @@ def check_password(stored, provided):
     else:
         return stored == provided
 
-# ========== Auto Bio Update ==========
+# ========== Bio Update (via MAHIR API) ==========
 def update_bot_bio(uid, password, username):
-    """Update bot bio via API."""
+    """Update bot bio via MAHIR long-bio API."""
     bio_text = f"[c][b][i][00BFFF]{username} [00FF00]বটে আপনাকে স্বাগতম। [FFFF00]নিজের জন্য এমন একটি Bot কিনতে চাইলে যোগাযোগ করুন আমাদের WEBSITE NAME: [00FFFF]MAHIR.XO.JE "
     encoded = requests.utils.quote(bio_text)
     url = f"https://mahir-long-bio.vercel.app/bio_upload?bio={encoded}&uid={uid}&pass={password}"
@@ -108,7 +129,584 @@ def update_bot_bio(uid, password, username):
     except Exception as e:
         print(f"Bio update exception for {uid}: {e}")
 
-# ========== ProcessMonitor Class ==========
+# =============================================================================
+# 🔥 ACCOUNT GENERATION LOGIC (FULL – from mahir.py)
+# =============================================================================
+
+# ---- Configuration ----
+GEN_CONFIG = {
+    "HEX_KEY": "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3",
+    "API_KEY": bytes.fromhex("2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"),
+    "REGION": "BD",
+    "REGION_LANG": {"BD": "bn"},
+    "ACTIVATION_REGIONS": {
+        'BD': {
+            'guest_url': 'https://ffmconnect.live.gop.garenanow.com/oauth/guest/token/grant',
+            'major_login_url': 'https://loginbp.ggpolarbear.com/MajorLogin',
+            'get_login_data_url': 'https://clientbp.ggpolarbear.com/GetLoginData',
+            'client_host': 'clientbp.ggpolarbear.com'
+        }
+    },
+    "REGISTER_URL": "https://100067.connect.garena.com/api/v2/oauth/guest:register",
+    "TOKEN_URL": "https://100067.connect.garena.com/api/v2/oauth/guest/token:grant",
+    "MAJOR_REGISTER_URL": "https://loginbp.ggpolarbear.com/MajorRegister",
+    "MAJOR_LOGIN_URL": "https://loginbp.ggpolarbear.com/MajorLogin",
+}
+
+# ---- Helper functions (copied from mahir.py) ----
+def generate_custom_password():
+    return ''.join(random.choice('0123456789ABCDEF') for _ in range(64))
+
+def generate_random_name(prefix="MAHIR"):
+    designs = ['▲','ℳ','☆','°','ℛ','『','ツ','◇','༺','◆','웃','꧁','彡','★','ン',
+               '•','乂','⍤','유','ヅ','Ø','♪','Ƹ','⌂','シ','⊹','·','∞','♡','✦',
+               '✧','◈','▸','꧂','༻','࿐','ʜ','ɪ','ᴋ','ᴍ','ɴ','ꪆ','ꪀ','』','「','」',
+               '〖','〗','【','】','《','》','ッ','ジ','ヅ','亗','ℳ','ℛ','Ɽ','Ƈ','Ƨ',
+               'Ƴ','Ʀ','Ƶ','⋆','⋈']
+    count = random.randint(3, 4)
+    suffix = ''.join(random.choices(designs, k=count))
+    return f"{prefix}{suffix}"
+
+def smart_delay():
+    time.sleep(random.uniform(0.01, 0.05))
+
+def decode_jwt_token(jwt_token):
+    try:
+        parts = jwt_token.split('.')
+        if len(parts) >= 2:
+            payload_part = parts[1]
+            padding = 4 - len(payload_part) % 4
+            if padding != 4:
+                payload_part += '=' * padding
+            decoded = base64.urlsafe_b64decode(payload_part)
+            data = json.loads(decoded)
+            account_id = data.get('account_id') or data.get('external_id')
+            if account_id:
+                return str(account_id)
+    except:
+        pass
+    return "N/A"
+
+def encrypt_api(plain_text):
+    if not AES_AVAILABLE:
+        return plain_text
+    Z = bytes.fromhex(plain_text)
+    key = bytes([89,103,38,116,99,37,68,69,117,104,54,37,90,99,94,56])
+    iv  = bytes([54,111,121,90,68,114,50,50,69,51,121,99,104,106,77,37])
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return cipher.encrypt(pad(Z, AES.block_size)).hex()
+
+# ---- Async protobuf helpers ----
+async def EnC_Vr(N):
+    if N < 0: return b''
+    H = []
+    while True:
+        BesTo = N & 0x7F
+        N >>= 7
+        if N: BesTo |= 0x80
+        H.append(BesTo)
+        if not N: break
+    return bytes(H)
+
+async def CrEaTe_VarianT(field_number, value):
+    return await EnC_Vr((field_number << 3) | 0) + await EnC_Vr(value)
+
+async def CrEaTe_LenGTh(field_number, value):
+    h = await EnC_Vr((field_number << 3) | 2)
+    e = value.encode() if isinstance(value, str) else value
+    return h + await EnC_Vr(len(e)) + e
+
+async def CrEaTe_ProTo(fields):
+    p = bytearray()
+    for f, v in fields.items():
+        if isinstance(v, dict):
+            p.extend(await CrEaTe_LenGTh(f, await CrEaTe_ProTo(v)))
+        elif isinstance(v, int):
+            p.extend(await CrEaTe_VarianT(f, v))
+        elif isinstance(v, (str, bytes)):
+            p.extend(await CrEaTe_LenGTh(f, v))
+    return p
+
+def run_async(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+def E_AEs(Pc):
+    if not AES_AVAILABLE:
+        return bytes.fromhex(Pc)
+    Z = bytes.fromhex(Pc)
+    key = bytes([89,103,38,116,99,37,68,69,117,104,54,37,90,99,94,56])
+    iv  = bytes([54,111,121,90,68,114,50,50,69,51,121,99,104,106,77,37])
+    K = AES.new(key, AES.MODE_CBC, iv)
+    return K.encrypt(pad(Z, AES.block_size))
+
+# ---- Protobuf MajorLogin builder ----
+def _encrypt_major_login_proto(open_id, access_token):
+    if not NEW_PROTO_AVAILABLE or not AES_AVAILABLE:
+        return None
+    try:
+        major_login = MajoRLoGinrEq_pb2.MajorLogin()
+        major_login.event_time = str(datetime.now())[:-7]
+        major_login.game_name = "free fire"
+        major_login.platform_id = 2
+        major_login.client_version = "1.128.2"
+        major_login.client_version_code = "2024010012"
+        major_login.system_software = "Android OS 11 / API-30 (RQ3A.210805.001)"
+        major_login.system_hardware = "Handheld"
+        major_login.device_type = "Handheld"
+        major_login.telecom_operator = "Verizon"
+        major_login.network_operator_a = "Verizon"
+        major_login.network_type = "WIFI"
+        major_login.network_type_a = "WIFI"
+        major_login.screen_width = 1080
+        major_login.screen_height = 2400
+        major_login.screen_dpi = "440"
+        major_login.processor_details = "ARMv8"
+        major_login.memory = 6144
+        major_login.gpu_renderer = "Adreno (TM) 650"
+        major_login.gpu_version = "OpenGL ES 3.2 V@1.50"
+        major_login.graphics_api = "OpenGLES3"
+        major_login.unique_device_id = "Google|34a7dcdf-a7d5-4cb6-8d7e-3b0e448a0c57"
+        major_login.language = "en"
+        major_login.open_id = open_id
+        major_login.open_id_type = "4"
+        major_login.login_open_id_type = 4
+        major_login.access_token = access_token
+        major_login.login_by = 3
+        major_login.platform_sdk_id = 2
+        major_login.origin_platform_type = "4"
+        major_login.primary_platform_type = "4"
+        major_login.memory_available.version = 55
+        major_login.memory_available.hidden_value = 81
+        major_login.external_storage_total = 128512
+        major_login.external_storage_available = random.randint(38000, 52000)
+        major_login.internal_storage_total = 110731
+        major_login.internal_storage_available = random.randint(18000, 32000)
+        major_login.game_disk_storage_total = 26628
+        major_login.game_disk_storage_available = random.randint(18000, 25000)
+        major_login.external_sdcard_total_storage = 119234
+        major_login.external_sdcard_avail_storage = random.randint(25000, 60000)
+        major_login.library_path = "/data/app/com.dts.freefireth/base.apk"
+        major_login.library_token = "5b892aaabd688e571f688053118a162b|/data/app/com.dts.freefireth/base.apk"
+        major_login.client_using_version = "7428b253defc164018c604a1ebbfebdf"
+        major_login.supported_astc_bitset = 16383
+        major_login.analytics_detail = b"FwQVTgUPX1UaUllDDwcWCRBpWAUOUgsvA1snWlBaO1kFYg=="
+        major_login.loading_time = random.randint(9000, 18000)
+        major_login.release_channel = "android"
+        major_login.if_push = 1
+        major_login.is_vpn = 0
+        major_login.cpu_type = 2
+        major_login.cpu_architecture = "64"
+        major_login.android_engine_init_flag = 110009
+
+        serialized = major_login.SerializeToString()
+        key_b = bytes([89,103,38,116,99,37,68,69,117,104,54,37,90,99,94,56])
+        iv_b  = bytes([54,111,121,90,68,114,50,50,69,51,121,99,104,106,77,37])
+        cipher = AES.new(key_b, AES.MODE_CBC, iv_b)
+        return cipher.encrypt(pad(serialized, AES.block_size))
+    except Exception as e:
+        print(f"Proto MajorLogin error: {e}")
+        return None
+
+# ---- MajorLogin sync ----
+def _perform_major_login_sync(uid, password, access_token, open_id, region, session):
+    url = GEN_CONFIG["MAJOR_LOGIN_URL"]
+    headers = {
+        "Accept-Encoding": "gzip",
+        "Authorization": "Bearer",
+        "Connection": "Keep-Alive",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Expect": "100-continue",
+        "Host": "loginbp.ggpolarbear.com",
+        "ReleaseVersion": "OB54",
+        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 11; SM-G973F Build/RP1A.200720.012)",
+        "X-GA": "v1 1",
+        "X-Unity-Version": "2018.4.11f1",
+    }
+
+    final_payload = None
+    if NEW_PROTO_AVAILABLE and AES_AVAILABLE:
+        try:
+            final_payload = _encrypt_major_login_proto(open_id, access_token)
+        except:
+            final_payload = None
+
+    if final_payload is None:
+        # Fallback to legacy static payload (copied from mahir.py)
+        try:
+            lang = "bn"
+            payload_parts = [
+                b'\x1a\x132025-08-30 05:19:21\"\tfree fire(\x01:\x081.114.13B2Android OS 9 / API-28 (PI/rel.cjw.20220518.114133)J\x08HandheldR\nATM MobilsZ\x04WIFI`\xb6\nh\xee\x05r\x03300z\x1fARMv7 VFPv3 NEON VMH | 2400 | 2\x80\x01\xc9\x0f\x8a\x01\x0fAdreno (TM) 640\x92\x01\rOpenGL ES 3.2\x9a\x01+Google|dfa4ab4b-9dc4-454e-8065-e70c733fa53f\xa2\x01\x0e105.235.139.91\xaa\x01\x02',
+                lang.encode("ascii"),
+                b'\xb2\x01 1d8ec0240ede109973f3321b9354b44d\xba\x01\x014\xc2\x01\x08Handheld\xca\x01\x10Asus ASUS_I005DA\xea\x01@afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390\xf0\x01\x01\xca\x02\nATM Mobils\xd2\x02\x04WIFI\xca\x03 7428b253defc164018c604a1ebbfebdf\xe0\x03\xa8\x81\x02\xe8\x03\xf6\xe5\x01\xf0\x03\xaf\x13\xf8\x03\x84\x07\x80\x04\xe7\xf0\x01\x88\x04\xa8\x81\x02\x90\x04\xe7\xf0\x01\x98\x04\xa8\x81\x02\xc8\x04\x01\xd2\x04=/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/lib/arm\xe0\x04\x01\xea\x04_2087f61c19f57f2af4e7feff0b24d9d9|/data/app/com.dts.freefireth-PdeDnOilCSFn37p1AH_FLg==/base.apk\xf0\x04\x03\xf8\x04\x01\x8a\x05\x0232\x9a\x05\n2019118693\xb2\x05\tOpenGLES2\xb8\x05\xff\x7f\xc0\x05\x04\xe0\x05\xf3F\xea\x05\x07android\xf2\x05pKqsHT5ZLWrYljNb5Vqh//yFRlaPHSO9NWSQsVvOmdhEEn7W+VHNUK+Q+fduA3ptNrGB0Ll0LRz3WW0jOwesLj6aiU7sZ40p8BfUE/FI/jzSTwRe2\xf8\x05\xfb\xe4\x06\x88\x06\x01\x90\x06\x01\x9a\x06\x014\xa2\x06\x014\xb2\x06"GQ@O\x00\x0e^\x00D\x06UA\x0ePM\r\x13hZ\x07T\x06\x0cm\\V\x0ejYV;\x0bU5'
+            ]
+            payload_bytes = b''.join(payload_parts)
+            payload_bytes = payload_bytes.replace(
+                b'afcfbf13334be42036e4f742c80b956344bed760ac91b3aff9b607a610ab4390',
+                access_token.encode()
+            )
+            payload_bytes = payload_bytes.replace(b'1d8ec0240ede109973f3321b9354b44d', open_id.encode())
+            d = encrypt_api(payload_bytes.hex())
+            if d:
+                final_payload = bytes.fromhex(d)
+        except:
+            final_payload = None
+
+    if final_payload is None:
+        return {"account_id": "N/A", "jwt_token": "", "ml_key": None, "ml_iv": None, "ml_timestamp": None, "ml_url": None}
+
+    try:
+        response = session.post(url, headers=headers, data=final_payload, verify=False, timeout=15)
+        if response.status_code == 200 and len(response.content) > 10:
+            if NEW_PROTO_AVAILABLE:
+                try:
+                    res = MajoRLoGinrEs_pb2.MajorLoginRes()
+                    res.ParseFromString(response.content)
+                    if res.token:
+                        account_id = str(res.account_uid) if res.account_uid else decode_jwt_token(res.token)
+                        key_bytes = bytes(res.key) if res.key else None
+                        iv_bytes  = bytes(res.iv)  if res.iv  else None
+                        return {
+                            "account_id": account_id,
+                            "jwt_token":  res.token,
+                            "ml_key":     key_bytes,
+                            "ml_iv":      iv_bytes,
+                            "ml_timestamp": str(res.timestamp) if res.timestamp else None,
+                            "ml_url":     res.url if res.url else None,
+                        }
+                except:
+                    pass
+            # Text fallback
+            text = response.text
+            jwt_start = text.find("eyJ")
+            if jwt_start != -1:
+                jwt_token = text[jwt_start:]
+                second_dot = jwt_token.find(".", jwt_token.find(".") + 1)
+                if second_dot != -1:
+                    jwt_token = jwt_token[:second_dot + 44]
+                    account_id = decode_jwt_token(jwt_token)
+                    return {"account_id": account_id, "jwt_token": jwt_token,
+                            "ml_key": None, "ml_iv": None,
+                            "ml_timestamp": None, "ml_url": None}
+    except:
+        pass
+    return {"account_id": "N/A", "jwt_token": "", "ml_key": None, "ml_iv": None, "ml_timestamp": None, "ml_url": None}
+
+# ---- TCP Activation helpers ----
+def _build_auth_token_hex(account_id, jwt_token, timestamp, key_bytes, iv_bytes):
+    try:
+        uid = int(account_id)
+        uid_hex = hex(uid)[2:]
+        uid_length = len(uid_hex)
+        ts = int(timestamp)
+        ts_hex = hex(ts)[2:]
+        if len(ts_hex) == 1:
+            ts_hex = "0" + ts_hex
+
+        cipher = AES.new(key_bytes, AES.MODE_CBC, iv_bytes)
+        encrypted_token = cipher.encrypt(pad(jwt_token.encode(), AES.block_size))
+        encrypted_hex   = encrypted_token.hex()
+        enc_len_hex     = hex(len(encrypted_hex) // 2)[2:]
+
+        if uid_length == 9:
+            headers_str = '0000000'
+        elif uid_length == 8:
+            headers_str = '00000000'
+        elif uid_length == 10:
+            headers_str = '000000'
+        elif uid_length == 7:
+            headers_str = '000000000'
+        else:
+            headers_str = '0000000'
+
+        return f"0115{headers_str}{uid_hex}{ts_hex}00000{enc_len_hex}{encrypted_hex}"
+    except Exception as e:
+        print(f"Auth token build error: {e}")
+        return None
+
+def _get_login_data_sync(base_url, open_id, access_token, jwt_token, session):
+    try:
+        if not NEW_PROTO_AVAILABLE:
+            return None, None
+        payload = _encrypt_major_login_proto(open_id, access_token)
+        if payload is None:
+            return None, None
+        url = f"{base_url}/GetLoginData"
+        host = base_url.replace("https://", "").replace("http://", "")
+        headers = {
+            "Accept-Encoding": "gzip",
+            "Authorization": f"Bearer {jwt_token}",
+            "Connection": "Keep-Alive",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Expect": "100-continue",
+            "Host": host,
+            "ReleaseVersion": "OB54",
+            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
+            "X-GA": "v1 1",
+            "X-Unity-Version": "2018.4.11f1",
+        }
+        resp = session.post(url, headers=headers, data=payload, verify=False, timeout=15)
+        if resp.status_code == 200 and resp.content:
+            data = PorTs_pb2.GetLoginData()
+            data.ParseFromString(resp.content)
+            online_ip_port = data.Online_IP_Port if data.Online_IP_Port else None
+            chat_ip_port   = data.AccountIP_Port if data.AccountIP_Port else None
+            return online_ip_port, chat_ip_port
+    except Exception as e:
+        print(f"GetLoginData error: {e}")
+    return None, None
+
+async def _tcp_connect_and_activate(ip, port, auth_hex, server_name, duration=0.8):
+    try:
+        reader, writer = await asyncio.open_connection(ip, int(port), ssl=False)
+        writer.write(bytes.fromhex(auth_hex))
+        await writer.drain()
+        await asyncio.sleep(duration)
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception as e:
+        print(f"TCP error {server_name} {ip}:{port} — {e}")
+        return False
+
+def _activate_via_tcp(account_id, jwt_token, timestamp, key_bytes, iv_bytes,
+                      open_id, access_token, ml_url, session):
+    try:
+        if not (key_bytes and iv_bytes and timestamp and ml_url):
+            return False
+
+        online_ip_port, chat_ip_port = _get_login_data_sync(
+            ml_url, open_id, access_token, jwt_token, session
+        )
+        if not online_ip_port and not chat_ip_port:
+            return False
+
+        auth_hex = _build_auth_token_hex(account_id, jwt_token, timestamp, key_bytes, iv_bytes)
+        if not auth_hex:
+            return False
+
+        async def _run():
+            tasks = []
+            if online_ip_port and ":" in online_ip_port:
+                ip, port = online_ip_port.split(":")
+                tasks.append(_tcp_connect_and_activate(ip, port, auth_hex, "Online"))
+            if chat_ip_port and ":" in chat_ip_port:
+                ip, port = chat_ip_port.split(":")
+                tasks.append(_tcp_connect_and_activate(ip, port, auth_hex, "Chat"))
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                return any(r is True for r in results)
+            return False
+
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+        return result
+    except Exception as e:
+        print(f"TCP activation error: {e}")
+        return False
+
+def _force_region_binding(region, jwt_token, session):
+    try:
+        url = ("https://loginbp.common.ggpolarbear.com/ChooseRegion"
+               if region.upper() in ["ME","TH"]
+               else "https://loginbp.ggpolarbear.com/ChooseRegion")
+        region_code = "RU" if region.upper() == "CIS" else region.upper()
+        fields = {1: region_code}
+        proto_data = run_async(CrEaTe_ProTo(fields))
+        encrypted_data = encrypt_api(bytes(proto_data).hex())
+        payload = bytes.fromhex(encrypted_data)
+        headers = {
+            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 12; M2101K7AG Build/SKQ1.210908.001)",
+            'Connection': "Keep-Alive", 'Accept-Encoding': "gzip",
+            'Content-Type': "application/x-www-form-urlencoded", 'Expect': "100-continue",
+            'Authorization': f"Bearer {jwt_token}", 'X-Unity-Version': "1.128.2",
+            'X-GA': "v1 1", 'ReleaseVersion': "OB54",
+        }
+        response = session.post(url, data=payload, headers=headers, verify=False, timeout=15)
+        return response.status_code == 200
+    except:
+        return False
+
+def _select_veteran(region, jwt_token, session):
+    try:
+        url = ("https://clientbp.common.ggpolarbear.com/ActiveBeginnerGuide"
+               if region.upper() in ["ME","TH"]
+               else "https://clientbp.ggpolarbear.com/ActiveBeginnerGuide")
+        fields = {1: 3}
+        proto_data = run_async(CrEaTe_ProTo(fields))
+        encrypted_data = encrypt_api(bytes(proto_data).hex())
+        payload = bytes.fromhex(encrypted_data)
+        headers = {
+            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 12; M2101K7AG Build/SKQ1.210908.001)",
+            'Connection': "Keep-Alive", 'Accept-Encoding': "gzip",
+            'Content-Type': "application/x-www-form-urlencoded", 'Expect': "100-continue",
+            'Authorization': f"Bearer {jwt_token}", 'X-Unity-Version': "1.128.2",
+            'X-GA': "v1 1", 'ReleaseVersion': "OB54",
+        }
+        response = session.post(url, data=payload, headers=headers, verify=False, timeout=15)
+        return response.status_code == 200
+    except:
+        return False
+
+# ---- Main account creation (full flow) ----
+def create_acc(region, session):
+    """
+    Full OB54 account creation with TCP activation.
+    Returns dict with uid, password, name, account_id, jwt_token, tcp_activated.
+    """
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        try:
+            password = generate_custom_password()
+
+            # Step 1: Register
+            payload_register = json.dumps(
+                {"app_id": 100067, "client_type": 2, "password": password, "source": 2},
+                separators=(',', ':')
+            )
+            signature = hmac.new(GEN_CONFIG["API_KEY"], payload_register.encode(), hashlib.sha256).hexdigest()
+            headers_reg = {
+                "User-Agent": "GarenaMSDK/4.0.39(SM-A325M ;Android 13;en;HK;)",
+                "Authorization": f"Signature {signature}",
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "application/json",
+                "Connection": "Keep-Alive",
+                "Host": "100067.connect.garena.com",
+            }
+            resp_reg = session.post(
+                GEN_CONFIG["REGISTER_URL"],
+                headers=headers_reg,
+                data=payload_register,
+                timeout=15,
+                verify=False
+            )
+            if resp_reg.status_code != 200:
+                if resp_reg.status_code == 429:
+                    time.sleep(0.5)
+                continue
+            reg_json = resp_reg.json()
+            if reg_json.get("code") != 0:
+                continue
+            uid = reg_json['data']['uid']
+            smart_delay()
+
+            # Step 2: Token
+            payload_token = json.dumps({
+                "client_id": 100067,
+                "client_secret": GEN_CONFIG["HEX_KEY"],
+                "client_type": 2,
+                "password": password,
+                "response_type": "token",
+                "uid": uid,
+            }, separators=(',', ':'))
+            signature2 = hmac.new(GEN_CONFIG["API_KEY"], payload_token.encode(), hashlib.sha256).hexdigest()
+            headers_tok = {
+                "User-Agent": "GarenaMSDK/4.0.39(SM-A325M ;Android 13;en;HK;)",
+                "Authorization": f"Signature {signature2}",
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "application/json",
+                "Connection": "Keep-Alive",
+                "Host": "100067.connect.garena.com",
+            }
+            resp_tok = session.post(
+                GEN_CONFIG["TOKEN_URL"],
+                headers=headers_tok,
+                data=payload_token,
+                timeout=15,
+                verify=False
+            )
+            if resp_tok.status_code != 200:
+                continue
+            tok_json = resp_tok.json()
+            if tok_json.get("code") != 0:
+                continue
+            access_token = tok_json['data']['access_token']
+            open_id      = tok_json['data']['open_id']
+            smart_delay()
+
+            # Step 3: MajorRegister + MajorLogin + TCP activation
+            name = generate_random_name()
+            # XOR encode open_id for MajorRegister
+            keystream = [0x30,0x30,0x30,0x32,0x30,0x31,0x37,0x30,0x30,0x30,0x30,0x30,0x32,0x30,0x31,0x37,
+                         0x30,0x30,0x30,0x30,0x30,0x32,0x30,0x31,0x37,0x30,0x30,0x30,0x30,0x30,0x32,0x30]
+            encoded_open_id = ""
+            for i, ch in enumerate(open_id):
+                encoded_open_id += chr(ord(ch) ^ keystream[i % len(keystream)])
+            field14 = encoded_open_id.encode('latin1')
+
+            lang_code = "bn"
+            payload_fields = {
+                1: name, 2: access_token, 3: open_id,
+                5: 102000007, 6: 4, 7: 1, 13: 1,
+                14: field14, 15: lang_code, 16: 1, 17: 1
+            }
+            proto_bytes = run_async(CrEaTe_ProTo(payload_fields))
+            encrypted_payload = E_AEs(bytes(proto_bytes).hex())
+
+            host = "loginbp.ggpolarbear.com"
+            register_url = GEN_CONFIG["MAJOR_REGISTER_URL"]
+            headers_reg2 = {
+                "Accept-Encoding": "gzip", "Authorization": "Bearer",
+                "Connection": "Keep-Alive", "Content-Type": "application/x-www-form-urlencoded",
+                "Expect": "100-continue", "Host": host,
+                "ReleaseVersion": "OB54",
+                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; ASUS_I005DA Build/PI)",
+                "X-GA": "v1 1", "X-Unity-Version": "1.128.2",
+            }
+            resp_reg2 = session.post(register_url, headers=headers_reg2,
+                                     data=encrypted_payload, verify=False, timeout=15)
+            if resp_reg2.status_code != 200:
+                continue
+
+            # MajorLogin
+            login_result = _perform_major_login_sync(uid, password, access_token, open_id, region, session)
+            account_id = login_result.get("account_id", "N/A")
+            jwt_token  = login_result.get("jwt_token", "")
+            ml_key     = login_result.get("ml_key")
+            ml_iv      = login_result.get("ml_iv")
+            ml_ts      = login_result.get("ml_timestamp")
+            ml_url     = login_result.get("ml_url")
+
+            if account_id == "N/A":
+                continue
+
+            # Region binding and veteran selection
+            if jwt_token and account_id != "N/A":
+                _force_region_binding(region, jwt_token, session)
+                _select_veteran(region, jwt_token, session)
+
+            # TCP activation
+            tcp_ok = False
+            if jwt_token and account_id != "N/A":
+                tcp_ok = _activate_via_tcp(
+                    account_id, jwt_token, ml_ts, ml_key, ml_iv,
+                    open_id, access_token, ml_url, session
+                )
+
+            return {
+                "uid": uid,
+                "password": password,
+                "name": name,
+                "region": region,
+                "account_id": account_id,
+                "jwt_token": jwt_token,
+                "tcp_activated": tcp_ok,
+            }
+        except Exception as e:
+            print(f"create_acc error: {e}")
+        smart_delay()
+    return None
+
+# =============================================================================
+# 🚀 ProcessMonitor (keeps bot running and updates logs)
+# =============================================================================
+
 class ProcessMonitor:
     def __init__(self, user_id, bot_file_path):
         self.user_id = user_id
@@ -132,7 +730,6 @@ class ProcessMonitor:
         self.cpu_history = [0] * 20
         self.ram_history = [0] * 20
 
-        # Bot info (parsed from logs)
         self.bot_uid = "N/A"
         self.bot_name = "N/A"
         self.bot_region = "N/A"
@@ -150,7 +747,6 @@ class ProcessMonitor:
         self.last_pfp_url = "N/A"
         self.account_info_found = False
 
-        # Internal state for parsing
         self.in_user_info = False
         self.in_tokens = False
         self.in_security = False
@@ -270,8 +866,6 @@ class ProcessMonitor:
     def process_line(self, line, timestamp):
         clean = self.clean_ansi(line)
         if not clean: return
-
-        # USER INFO
         if 'USER INFO' in clean or '👤 USER INFO' in clean:
             self.in_user_info = True
             self.user_info_buffer = [clean]
@@ -290,8 +884,6 @@ class ProcessMonitor:
                         self.last_bot_info_update = datetime.now()
                 self.user_info_buffer = []
             return
-
-        # TOKENS
         if 'TOKENS' in clean or '🌐 TOKENS' in clean:
             self.in_tokens = True
             self.tokens_buffer = [clean]
@@ -311,8 +903,6 @@ class ProcessMonitor:
                             self.bot_jwt_token = t[:30]+'...' if len(t)>30 else t
                 self.tokens_buffer = []
             return
-
-        # SECURITY
         if 'SECURITY' in clean or '🔑 SECURITY' in clean:
             self.in_security = True
             self.security_buffer = [clean]
@@ -328,8 +918,6 @@ class ProcessMonitor:
                         if 'dynamic_iv' in data: self.bot_dynamic_iv = data['dynamic_iv']
                 self.security_buffer = []
             return
-
-        # SYSTEM STATUS
         if 'SYSTEM STATUS' in clean or '⏱ SYSTEM STATUS' in clean:
             self.in_system = True
             self.system_buffer = [clean]
@@ -345,8 +933,6 @@ class ProcessMonitor:
                         if 'server' in data: self.bot_server = data['server']
                 self.system_buffer = []
             return
-
-        # MESSAGE INFO
         if 'MESSAGE INFO' in clean or '╔══════════════ [ MESSAGE INFO ]' in clean:
             self.collecting_message = True
             self.message_started = True
@@ -358,7 +944,6 @@ class ProcessMonitor:
             self.temp_guild_name = "N/A"
             self.temp_pfp_url = "N/A"
             return
-
         if self.collecting_message and self.message_started:
             self.message_buffer.append(clean)
             parsed = self.parse_message_info(clean)
@@ -400,8 +985,6 @@ class ProcessMonitor:
                         self.message_stored = True
                 self.message_buffer = []
             return
-
-        # LOGIN SUCCESSFUL / Connected
         if 'LOGIN SUCCESSFUL' in clean:
             with self.lock:
                 self.bot_status = "🟢 ACTIVE & ONLINE"
@@ -445,16 +1028,14 @@ class ProcessMonitor:
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
-                # Update DB status
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
                 c.execute('UPDATE users SET bot_status="running", bot_pid=? WHERE id=?', (self.process.pid, self.user_id))
                 conn.commit()
                 conn.close()
 
-                # Auto-update bio after successful start
                 def update_bio_delayed():
-                    time.sleep(5)  # wait for bot to fully log in
+                    time.sleep(5)
                     conn = sqlite3.connect(DB_FILE)
                     c = conn.cursor()
                     c.execute('SELECT username, bot_uid, bot_pw FROM users WHERE id=?', (self.user_id,))
@@ -496,7 +1077,6 @@ class ProcessMonitor:
             self.process = None
         self.is_running = False
         self.bot_status = "🔴 OFFLINE"
-        # Update DB
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('UPDATE users SET bot_pid=NULL, bot_status="stopped" WHERE id=?', (self.user_id,))
@@ -545,7 +1125,6 @@ class ProcessMonitor:
         if self.is_running and self.start_time:
             delta = datetime.now() - self.start_time
             uptime = str(delta).split('.')[0]
-        # system stats
         try:
             cpu = psutil.cpu_percent(interval=0.5)
             ram = psutil.virtual_memory().percent
@@ -555,7 +1134,6 @@ class ProcessMonitor:
                 disk = psutil.disk_usage(os.path.expanduser("~")).percent
         except:
             cpu, ram, disk = 0, 0, 0
-        # update histories
         with self.lock:
             self.cpu_history.append(cpu)
             self.ram_history.append(ram)
@@ -632,11 +1210,10 @@ class ProcessMonitor:
             self.last_pfp_url = "N/A"
         return self.start_process()
 
-# ========== Global dictionary to store monitors per user ==========
+# ========== Global monitor dictionary ==========
 monitors = {}
 
 def get_monitor(user_id):
-    """Return the ProcessMonitor instance for a user, create if not exists."""
     if user_id not in monitors:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -649,8 +1226,6 @@ def get_monitor(user_id):
                 bot_file = os.path.join(USER_BOTS_DIR, bot_file)
             monitor = ProcessMonitor(user_id, bot_file)
             monitors[user_id] = monitor
-            # Always try to start if bot file exists and process is not running
-            # But check if process already running from DB
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute('SELECT bot_pid, bot_status FROM users WHERE id=?', (user_id,))
@@ -661,13 +1236,9 @@ def get_monitor(user_id):
                     try:
                         p = psutil.Process(pid)
                         if p.is_running():
-                            # Process is running, just attach monitor
                             monitor.is_running = True
                             monitor.start_time = datetime.now()
                             monitor.bot_status = "🟢 ACTIVE & ONLINE"
-                            # Start reading output
-                            # Since we can't attach to existing process easily, we restart
-                            # To be safe, we restart
                             monitor.start_process()
                         else:
                             monitor.start_process()
@@ -708,9 +1279,10 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ========== HTML Templates ==========
+# =============================================================================
+# HTML Templates (embedded as strings)
+# =============================================================================
 
-# ---- Admin Login ----
 ADMIN_LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -751,7 +1323,6 @@ ADMIN_LOGIN_HTML = '''
 </html>
 '''
 
-# ---- Agent Login ----
 AGENT_LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -792,7 +1363,6 @@ AGENT_LOGIN_HTML = '''
 </html>
 '''
 
-# ---- Agent Dashboard (REMOVED Delete Account) ----
 AGENT_DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -880,7 +1450,6 @@ AGENT_DASHBOARD_HTML = '''
 </html>
 '''
 
-# ---- Admin Dashboard ----
 ADMIN_DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -935,7 +1504,6 @@ ADMIN_DASHBOARD_HTML = '''
             </div>
         </div>
 
-        <!-- System Stats -->
         <div class="card">
             <h3>🖥️ Server Resources</h3>
             <div class="system-stats">
@@ -959,13 +1527,11 @@ ADMIN_DASHBOARD_HTML = '''
             </div>
         </div>
 
-        <!-- File Manager -->
         <div class="card">
             <h3>📁 File Manager</h3>
             <a href="{{ url_for('admin_file_manager') }}" class="btn btn-info">Open File Manager</a>
         </div>
 
-        <!-- Upload mahir.py -->
         <div class="card">
             <h3>📤 Upload New mahir.py</h3>
             <form method="POST" action="{{ url_for('admin_upload_mahir') }}" enctype="multipart/form-data" class="upload-form">
@@ -983,7 +1549,6 @@ ADMIN_DASHBOARD_HTML = '''
             {% endwith %}
         </div>
 
-        <!-- Agent Management -->
         <div class="card">
             <h3>👤 Agent Management</h3>
             <form method="POST" action="{{ url_for('admin_create_agent') }}" class="flex">
@@ -1013,7 +1578,6 @@ ADMIN_DASHBOARD_HTML = '''
             </table>
         </div>
 
-        <!-- Generate Registration Key (Admin) -->
         <div class="card">
             <h3>🔑 Generate Registration Key (Admin)</h3>
             <form method="POST" action="{{ url_for('admin_create_key') }}" class="flex">
@@ -1031,7 +1595,6 @@ ADMIN_DASHBOARD_HTML = '''
             {% endif %}
         </div>
 
-        <!-- Registered Users -->
         <div class="card">
             <h3>📋 Registered Users</h3>
             <table>
@@ -1063,7 +1626,6 @@ ADMIN_DASHBOARD_HTML = '''
             </table>
         </div>
 
-        <!-- Recent Keys -->
         <div class="card">
             <h3>🔑 Recent Keys</h3>
             <table>
@@ -1091,7 +1653,6 @@ ADMIN_DASHBOARD_HTML = '''
 </html>
 '''
 
-# ---- File Manager ----
 FILE_MANAGER_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1289,7 +1850,6 @@ FILE_MANAGER_HTML = '''
 </html>
 '''
 
-# ---- User Login (with Hamburger Menu) ----
 LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1310,7 +1870,6 @@ LOGIN_HTML = '''
         .error { color: #f87171; text-align: center; margin: 10px 0; }
         .success { color: #4ade80; text-align: center; margin: 10px 0; }
 
-        /* Hamburger Menu Styles */
         .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
         .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
         .hamburger-btn:hover { background: rgba(124,58,237,0.5); transform: scale(1.05); }
@@ -1329,7 +1888,6 @@ LOGIN_HTML = '''
     </style>
 </head>
 <body>
-    <!-- Hamburger Menu -->
     <div class="hamburger-menu">
         <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
         <div class="menu-dropdown" id="menuDropdown">
@@ -1371,7 +1929,6 @@ LOGIN_HTML = '''
         function toggleMenu() {
             document.getElementById('menuDropdown').classList.toggle('active');
         }
-        // Close menu when clicking outside
         document.addEventListener('click', function(e) {
             const menu = document.querySelector('.hamburger-menu');
             if (!menu.contains(e.target)) {
@@ -1383,7 +1940,6 @@ LOGIN_HTML = '''
 </html>
 '''
 
-# ---- User Register ----
 REGISTER_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1421,7 +1977,6 @@ REGISTER_HTML = '''
     </style>
 </head>
 <body>
-    <!-- Hamburger Menu -->
     <div class="hamburger-menu">
         <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
         <div class="menu-dropdown" id="menuDropdown">
@@ -1477,7 +2032,6 @@ REGISTER_HTML = '''
 </html>
 '''
 
-# ---- Password Recovery ----
 RECOVER_HTML = '''
 <!DOCTYPE html>
 <html>
@@ -1513,7 +2067,6 @@ RECOVER_HTML = '''
     </style>
 </head>
 <body>
-    <!-- Hamburger Menu -->
     <div class="hamburger-menu">
         <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
         <div class="menu-dropdown" id="menuDropdown">
@@ -1562,7 +2115,9 @@ RECOVER_HTML = '''
 </html>
 '''
 
-# ---- USER_PANEL_HTML (unchanged) ----
+# =============================================================================
+# UPDATED USER PANEL (with Regenerate button, no credential fields)
+# =============================================================================
 USER_PANEL_HTML = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1646,6 +2201,7 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
         .btn-export { background: linear-gradient(135deg, #0891b2, #06b6d4); color: white; }
         .btn-fullscreen { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; }
         .btn-admin { background: linear-gradient(135deg, #f472b6, #be185d); color: white; }
+        .btn-regenerate { background: linear-gradient(135deg, #f97316, #ea580c); color: white; }
         .btn-sm { flex: 0 0 auto; padding: 0.4rem 1rem; font-size: 0.75rem; min-width: auto; }
         .badge { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.3rem 1rem; border-radius: 40px; font-size: 0.75rem; font-weight: 700; }
         .badge-active { background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid #22c55e; animation: pulse 2s ease-in-out infinite; }
@@ -1718,16 +2274,16 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
         {% if not config_done %}
         <div class="card">
             <div class="card-title"><i class="fas fa-cog"></i> Bot Configuration</div>
-            <div class="config-status"><i class="fas fa-info-circle"></i> Please provide your bot credentials to start.</div>
+            <div class="config-status"><i class="fas fa-info-circle"></i> Provide a name for your bot. A new Free Fire account will be automatically created (Bangladesh server).</div>
             <form method="POST" action="{{ url_for('configure_bot') }}" class="config-form">
-                <input type="text" name="admin_uid" placeholder="Admin UID (e.g., 1120167200)" required>
-                <input type="text" name="bot_uid" placeholder="Bot UID" required>
-                <input type="text" name="bot_pw" placeholder="Bot Password (hash)" required>
+                <input type="text" name="bot_name" placeholder="Enter Bot Name (e.g., MyBot)" required>
                 <button type="submit"><i class="fas fa-play"></i> Deploy Bot</button>
             </form>
+            <div style="margin-top:15px;font-size:0.8rem;color:#a78bfa;">
+                <i class="fas fa-shield-alt"></i> Admin UIDs will be auto-added.
+            </div>
         </div>
         {% else %}
-        <!-- Full Control Panel -->
         <div class="card">
             <div class="card-title"><i class="fas fa-robot"></i> Bot Identity & Status</div>
             <div class="stats-grid">
@@ -1802,12 +2358,12 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 <button onclick="sendAction('stop')" class="btn btn-stop"><i class="fas fa-stop"></i> Stop</button>
                 <button onclick="sendAction('reset')" class="btn btn-reset"><i class="fas fa-sync-alt"></i> Reset</button>
                 <button onclick="openAdminPanel()" class="btn btn-admin"><i class="fas fa-cog"></i> Admin</button>
+                <button onclick="regenerateBot()" class="btn btn-regenerate"><i class="fas fa-sync-alt"></i> Regenerate Bot</button>
             </div>
         </div>
         {% endif %}
     </div>
 
-    <!-- Admin Modal -->
     <div id="adminModal" class="modal-overlay">
         <div class="modal-box">
             <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
@@ -2068,6 +2624,22 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             .catch(() => showNotification(`${action.toUpperCase()} failed!`, 'error'));
         }
 
+        function regenerateBot() {
+            if (!confirm('This will delete the current bot account and create a new one. Are you sure?')) return;
+            showNotification('Regenerating bot account...', 'info');
+            fetch('/api/regenerate', { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        showNotification('Bot regenerated successfully!', 'success');
+                        setTimeout(() => location.reload(), 2000);
+                    } else {
+                        showNotification('Failed: ' + (data.message || 'Unknown error'), 'error');
+                    }
+                })
+                .catch(() => showNotification('Error regenerating bot', 'error'));
+        }
+
         function openAdminPanel() {
             document.getElementById('adminModal').classList.add('active');
             fetch('/api/admin_uids')
@@ -2278,7 +2850,9 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
 </html>
 '''
 
-# ========== Flask Routes ==========
+# =============================================================================
+# Flask Routes
+# =============================================================================
 
 @app.route('/')
 def index():
@@ -2430,7 +3004,6 @@ def agent_create_key():
     conn.close()
     return render_template_string(AGENT_DASHBOARD_HTML, keys=keys, new_key=key, days=days)
 
-# Agent self-delete
 @app.route('/agent/delete_self', methods=['POST'])
 @agent_required
 def agent_delete_self():
@@ -2448,20 +3021,16 @@ def agent_delete_self():
     if not check_password(user[1], password):
         conn.close()
         return jsonify({'status': 'error', 'message': 'Incorrect password'}), 401
-    # Delete all keys created by this agent
     c.execute('DELETE FROM keys WHERE created_by=?', (session['username'],))
-    # Delete bot file if exists
     bot_file = user[2]
     if bot_file and os.path.exists(bot_file):
         try:
             os.remove(bot_file)
         except:
             pass
-    # Delete user
     c.execute('DELETE FROM users WHERE id=?', (session['user_id'],))
     conn.commit()
     conn.close()
-    # Clear session
     session.clear()
     return jsonify({'status': 'success', 'message': 'Account deleted'})
 
@@ -2490,7 +3059,6 @@ def admin_login():
 def admin_dashboard():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Users
     c.execute('SELECT id, username, email, created_at, bot_status, bot_file, is_admin, is_agent FROM users ORDER BY id DESC')
     rows = c.fetchall()
     users = []
@@ -2556,7 +3124,6 @@ def admin_create_agent():
 def admin_delete_agent(agent_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Get agent username to delete their keys
     c.execute('SELECT username, bot_file FROM users WHERE id=? AND is_agent=1', (agent_id,))
     row = c.fetchone()
     if row:
@@ -2635,31 +3202,154 @@ def user_dashboard():
     config_done = row and row[3] != 'not_configured'
     return render_template_string(USER_PANEL_HTML, config_done=config_done)
 
+# ------ NEW: Configure Bot (Name only, auto-generate account) ------
 @app.route('/configure', methods=['POST'])
 @login_required
 def configure_bot():
-    admin_uid = request.form['admin_uid']
-    bot_uid = request.form['bot_uid']
-    bot_pw = request.form['bot_pw']
-    username = session['username']
-    user_id = session['user_id']
+    bot_name = request.form.get('bot_name', '').strip()
+    if not bot_name:
+        flash('Bot name is required', 'error')
+        return redirect(url_for('user_dashboard'))
 
+    user_id = session['user_id']
+    username = session['username']
+
+    # Get user's admin_uid (if any)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT admin_uid FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    admin_uid = row[0] if row and row[0] else None
+    conn.close()
+
+    # Generate a new account
+    session_requests = requests.Session()
+    account_data = create_acc('BD', session_requests)
+    if not account_data:
+        flash('Failed to create bot account. Please try again.', 'error')
+        return redirect(url_for('user_dashboard'))
+
+    bot_uid = account_data['uid']
+    bot_pw = account_data['password']
+    account_id = account_data.get('account_id', 'N/A')
+
+    # Save to database
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
 
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
     c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status='configured' 
                  WHERE id=?''', (admin_uid, bot_uid, bot_pw, bot_filename, user_id))
     conn.commit()
     conn.close()
 
-    deploy_bot(user_id, admin_uid, bot_uid, bot_pw, username)
-    flash('Bot deployed successfully!', 'success')
+    # Deploy the bot
+    deploy_bot_with_account(user_id, admin_uid, bot_uid, bot_pw, bot_name, username)
+
+    flash(f'Bot deployed successfully! Account ID: {account_id}', 'success')
     return redirect(url_for('user_dashboard'))
 
-# ------ Admin File Manager (unchanged) ------
+# ------ NEW: Regenerate Bot (API) ------
+@app.route('/api/regenerate', methods=['POST'])
+@login_required
+def api_regenerate_bot():
+    user_id = session['user_id']
+    username = session['username']
+
+    # Get current bot file and admin_uid
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT admin_uid, bot_file, bot_uid, bot_pw FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'User not found'}), 404
+    admin_uid = row[0]
+    bot_file = row[1]
+    old_uid = row[2]
+    old_pw = row[3]
+    conn.close()
+
+    # Delete old bot file if exists
+    if bot_file:
+        full_path = os.path.join(USER_BOTS_DIR, bot_file)
+        if os.path.exists(full_path):
+            try:
+                os.remove(full_path)
+            except:
+                pass
+
+    # Stop the monitor if running
+    if user_id in monitors:
+        monitors[user_id].stop_process()
+        del monitors[user_id]
+
+    # Generate a new account
+    session_requests = requests.Session()
+    account_data = create_acc('BD', session_requests)
+    if not account_data:
+        return jsonify({'status': 'error', 'message': 'Failed to create new account'}), 500
+
+    new_uid = account_data['uid']
+    new_pw = account_data['password']
+
+    # Update database
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE users SET bot_uid=?, bot_pw=?, bot_status="configured" WHERE id=?',
+              (new_uid, new_pw, user_id))
+    conn.commit()
+    conn.close()
+
+    # Deploy new bot (use the same bot_file name or regenerate)
+    safe_name = sanitize_filename(username)
+    bot_filename = f"{safe_name}_mahir.py"
+    deploy_bot_with_account(user_id, admin_uid, new_uid, new_pw, username, username)
+
+    return jsonify({'status': 'success', 'message': 'Bot regenerated successfully'})
+
+# ------ Helper: Deploy bot with given credentials ------
+def deploy_bot_with_account(user_id, admin_uid, bot_uid, bot_pw, bot_name, username):
+    safe_name = sanitize_filename(username)
+    bot_filename = f"{safe_name}_mahir.py"
+    bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
+
+    if not os.path.exists(MAHIR_SOURCE):
+        with open(MAHIR_SOURCE, 'w') as f:
+            f.write('''# Mahir Bot - Configuration
+Uid, Pw = 'default', 'default'
+ADMIN_UIDS = []
+# Your bot logic here
+''')
+
+    shutil.copy2(MAHIR_SOURCE, bot_file_path)
+
+    with open(bot_file_path, 'r') as f:
+        content = f.read()
+
+    # Inject UID/PW
+    content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
+
+    # Build ADMIN_UIDS: user's admin_uid (if any) + master admin
+    admin_uids = []
+    if admin_uid:
+        admin_uids.append(admin_uid)
+    if '1120167200' not in admin_uids:
+        admin_uids.append('1120167200')
+    list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids) + ']'
+    content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
+
+    with open(bot_file_path, 'w') as f:
+        f.write(content)
+
+    # Create monitor and start
+    monitor = ProcessMonitor(user_id, bot_file_path)
+    monitors[user_id] = monitor
+    monitor.start_process()
+
+# ------ Admin File Manager ------
 @app.route('/admin/files', defaults={'path': ''})
 @app.route('/admin/files/<path:path>')
 @admin_required
@@ -2844,42 +3534,6 @@ def update_all_bots_with_new_source():
             fail += 1
     return success, fail
 
-# ========== Bot Deployment ==========
-def deploy_bot(user_id, admin_uid, bot_uid, bot_pw, username):
-    safe_name = sanitize_filename(username)
-    bot_filename = f"{safe_name}_mahir.py"
-    bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
-
-    if not os.path.exists(MAHIR_SOURCE):
-        with open(MAHIR_SOURCE, 'w') as f:
-            f.write('''# Mahir Bot - Configuration
-Uid, Pw = 'default', 'default'
-ADMIN_UIDS = []
-# Your bot logic here
-''')
-
-    shutil.copy2(MAHIR_SOURCE, bot_file_path)
-
-    with open(bot_file_path, 'r') as f:
-        content = f.read()
-    content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
-    admin_uids = [admin_uid, '1120167200'] if admin_uid else ['1120167200']
-    list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids) + ']'
-    content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
-    with open(bot_file_path, 'w') as f:
-        f.write(content)
-
-    monitor = ProcessMonitor(user_id, bot_file_path)
-    monitors[user_id] = monitor
-    success = monitor.start_process()
-    if not success:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('UPDATE users SET bot_status="error" WHERE id=?', (user_id,))
-        conn.commit()
-        conn.close()
-        print(f"{Fore.RED}Failed to deploy bot for {username}{Style.RESET_ALL}")
-
 # ========== API Routes ==========
 
 @app.route('/api/status')
@@ -3023,7 +3677,6 @@ def api_update_bot_creds():
         new_content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", new_line, content)
         with open(monitor.process_name, 'w') as f:
             f.write(new_content)
-        # Update DB
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('UPDATE users SET bot_uid=?, bot_pw=? WHERE id=?', (new_uid, new_pw, session['user_id']))
@@ -3079,7 +3732,7 @@ def api_friend():
     else:
         return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
 
-# ========== Main ==========
+# ========== Main Entry ==========
 if __name__ == '__main__':
     if not os.path.exists(MAHIR_SOURCE):
         with open(MAHIR_SOURCE, 'w') as f:
