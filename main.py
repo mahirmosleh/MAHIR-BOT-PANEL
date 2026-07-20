@@ -165,13 +165,46 @@ def generate_custom_password():
     return ''.join(random.choice('0123456789ABCDEF') for _ in range(64))
 
 def generate_random_name(prefix="MAHIR"):
-    designs = ['▲','ℳ','☆','°','ℛ','『','ツ','◇','༺','◆','웃','꧁','彡','★','ン',
-               '•','乂','⍤','유','ヅ','Ø','♪','Ƹ','⌂','シ','⊹','·','∞','♡','✦',
-               '✧','◈','▸','꧂','༻','࿐','ʜ','ɪ','ᴋ','ᴍ','ɴ','ꪆ','ꪀ','』','「','」',
-               '〖','〗','【','】','《','》','ッ','ジ','ヅ','亗','ℳ','ℛ','Ɽ','Ƈ','Ƨ',
-               'Ƴ','Ʀ','Ƶ','⋆','⋈']
-    count = random.randint(3, 4)
-    suffix = ''.join(random.choices(designs, k=count))
+    # সুপারস্ক্রিপ্ট নাম্বার
+    superscript_numbers = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹']
+    
+    # ডিজাইন/সিম্বল
+    designs = [
+        '▲','ℳ','☆','°','ℛ','『','ツ','◇','༺','◆','웃','꧁','彡','★','ン',
+        '•','乂','⍤','유','ヅ','Ø','♪','Ƹ','⌂','シ','⊹','·','∞','♡','✦',
+        '✧','◈','▸','꧂','༻','࿐','ʜ','ɪ','ᴋ','ᴍ','ɴ','ꪆ','ꪀ','』','「','」',
+        '〖','〗','【','】','《','》','ッ','ジ','ヅ','亗','ℳ','ℛ','Ɽ','Ƈ','Ƨ',
+        'Ƴ','Ʀ','Ƶ','⋆','⋈','✪','✫','✬','✭','✮','✯','✰','✱','✲','✳',
+        '✴','✵','✶','✷','✸','✹','◉','◎','●','○','◌','◍','◐','◑','◒','◓',
+        '◔','◕','◖','◗','◘','◙','◚','➤','➥','➦','➧','➨','➩','➪','➫','➬','➭',
+        '➮','➯','➲','➳','➵','➸','➺','➻','➼','➽','♥','❥','❣','❤','💙','💜',
+        '💛','🖤','🤍','❀','✿','❁','❃','❋','✾','✽','✼','⚘','⚜','〈','〉',
+        '〔','〕','⟦','⟧','⟨','⟩','❮','❯','ッ','㇏','㇀','㇁','㇂','么','乛',
+        '乄','々','〆','〄','ゞ','ゝ','゛','゜','ㅤ','ㅎ','ㅋ','ㄱ','ㄴ','ㄹ',
+        'ㅁ','ㅇ','º','¤','※','§','¶','♫','♬','♩','♭','♯','✓','✔','✕',
+        '✖','☠','☢','☣','☯','☮','☾','☽','⚡','⚔','⎝','⎠','⌁','⌘','⌬',
+        '⌖','⍟','⍣','⍢','◥','◤','◣','◢','◭','◮','◰','◱','◲','◳','ˣ',
+        'ˢ','ˡ','ᴊ','ʟ','ᴏ','ᴘ','ǫ','s','ᴛ','ᴜ','ᴠ','ᴡ','ʏ','ᴢ','ℋ',
+        'ℒ','ℱ','ℰ','ℭ','ℬ','ℕ','ℙ','ℚ','ℜ','ℨ','ℤ','℠','ℓ','℮','ℴ',
+        'Ɓ','Ɗ','Ƒ','Ɠ','Ƙ','Ɯ','Ɲ','Ƥ','Ƭ','Ʋ','Ⱥ','Ƀ','Ʉ','Ɍ','Ɱ',
+        'Ⱨ','♔','♕','♚','♛','♜','♝','♞','♟','⚝','⚞','⚟','⚚','⚛','⚘',
+        '⚖','⚙','⚕','☘','☀','☁','☂','☃','☄','╭','╮','╯','╰','┊','┋',
+        '┃','ꨄ','ꕤ','ꕥ','ꕦ','ꕧ','ꕨ','ꕩ','ꕪ','༒','༄','༆','༇','༈','༉','༊'
+    ]
+    
+    # ২-৩টি ডিজাইন বেছে নেওয়া
+    design_count = random.randint(2, 3)
+    selected_designs = random.choices(designs, k=design_count)
+    
+    # ১-২টি সুপারস্ক্রিপ্ট নাম্বার বেছে নেওয়া
+    number_count = random.randint(1, 2)
+    selected_numbers = random.choices(superscript_numbers, k=number_count)
+    
+    # সবগুলো একত্রিত করে শাফল করা
+    suffix_parts = selected_designs + selected_numbers
+    random.shuffle(suffix_parts)
+    
+    suffix = ''.join(suffix_parts)
     return f"{prefix}{suffix}"
 
 def smart_delay():
@@ -258,50 +291,71 @@ def _encrypt_major_login_proto(open_id, access_token):
         major_login = MajoRLoGinrEq_pb2.MajorLogin()
         major_login.event_time = str(datetime.now())[:-7]
         major_login.game_name = "free fire"
-        major_login.platform_id = 2
-        major_login.client_version = "1.128.2"
-        major_login.client_version_code = "2024010012"
-        major_login.system_software = "Android OS 11 / API-30 (RQ3A.210805.001)"
-        major_login.system_hardware = "Handheld"
-        major_login.device_type = "Handheld"
-        major_login.telecom_operator = "Verizon"
-        major_login.network_operator_a = "Verizon"
+    
+        # --- ফোন প্ল্যাটফর্ম কনফিগারেশন (একটি লাইনও রিমুভ করা হয়নি) ---
+        major_login.platform_id = 2             # Android (Phone Logo)
+        major_login.platform_sdk_id = 2         # Android SDK
+        major_login.device_type = "Handheld"    # মোবাইল হ্যান্ডসেট
+        major_login.system_hardware = "qcom"    # Snapdragon Processor
+        major_login.system_software = "Android OS 13 / API-33 (TP1A.220624.014)" # Latest Android
+    
+        major_login.client_version = version 
+        major_login.client_version_code = "2024010012" # আপনার এলাকার লেটেস্ট ভার্সন কোড দিন
+    
+        # --- নেটওয়ার্ক (রিয়েল সিম কার্ড সিমুলেশন) ---
+        major_login.telecom_operator = "Grameenphone" # আপনার অপারেটর অনুযায়ী দিতে পারেন
+        major_login.network_operator_a = "46001"      # Network MCC/MNC
         major_login.network_type = "WIFI"
         major_login.network_type_a = "WIFI"
+    
+        # --- রিয়েল ডিসপ্লে রেজোলিউশন (Samsung S22 Ultra Style) ---
         major_login.screen_width = 1080
-        major_login.screen_height = 2400
-        major_login.screen_dpi = "440"
-        major_login.processor_details = "ARMv8"
-        major_login.memory = 6144
-        major_login.gpu_renderer = "Adreno (TM) 650"
-        major_login.gpu_version = "OpenGL ES 3.2 V@1.50"
+        major_login.screen_height = 2316
+        major_login.screen_dpi = "480"
+    
+        # --- হার্ডওয়্যার ডিটেইলস (Snapdragon 8 Gen 1) ---
+        major_login.processor_details = "Qualcomm Technologies, Inc SM8450"
+        major_login.memory = 12288              # 12GB RAM
+        major_login.gpu_renderer = "Adreno (TM) 730"
+        major_login.gpu_version = "OpenGL ES 3.2 V@0548.0"
         major_login.graphics_api = "OpenGLES3"
-        major_login.unique_device_id = "Google|34a7dcdf-a7d5-4cb6-8d7e-3b0e448a0c57"
+    
+        # --- ইউনিক ডিভাইস আইডি (ব্যান এড়ানোর জন্য প্রতিবার নতুন আইডি) ---
+        # এটি সবচেয়ে গুরুত্বপূর্ণ। প্রতিবার লগইনে এটি নতুন রিয়েল আইডি জেনারেট করবে।
+        major_login.unique_device_id = "f" + str(uuid.uuid4())[:15] 
+    
         major_login.language = "en"
         major_login.open_id = open_id
         major_login.open_id_type = "4"
         major_login.login_open_id_type = 4
         major_login.access_token = access_token
         major_login.login_by = 3
-        major_login.platform_sdk_id = 2
         major_login.origin_platform_type = "4"
         major_login.primary_platform_type = "4"
-        major_login.memory_available.version = 55
-        major_login.memory_available.hidden_value = 81
-        major_login.external_storage_total = 128512
-        major_login.external_storage_available = random.randint(38000, 52000)
-        major_login.internal_storage_total = 110731
-        major_login.internal_storage_available = random.randint(18000, 32000)
-        major_login.game_disk_storage_total = 26628
-        major_login.game_disk_storage_available = random.randint(18000, 25000)
-        major_login.external_sdcard_total_storage = 119234
-        major_login.external_sdcard_avail_storage = random.randint(25000, 60000)
+    
+        memory_available = major_login.memory_available
+        memory_available.version = 55
+        memory_available.hidden_value = 81
+    
+    # --- স্টোরেজ ডাটা ---
+        major_login.external_storage_total = 256000 # 256GB Storage
+        major_login.external_storage_available = random.randint(50000, 150000)
+        major_login.internal_storage_total = 256000
+        major_login.internal_storage_available = random.randint(40000, 100000)
+        major_login.game_disk_storage_total = 32000
+        major_login.game_disk_storage_available = random.randint(10000, 20000)
+        major_login.external_sdcard_total_storage = 0
+        major_login.external_sdcard_avail_storage = 0
+    
+        # --- ফাইল পাথ (রিয়েল অ্যান্ড্রয়েড ফরম্যাট) ---
         major_login.library_path = "/data/app/com.dts.freefireth/base.apk"
-        major_login.library_token = "5b892aaabd688e571f688053118a162b|/data/app/com.dts.freefireth/base.apk"
+        major_login.library_token = "hash|base.apk"
+    
         major_login.client_using_version = "7428b253defc164018c604a1ebbfebdf"
         major_login.supported_astc_bitset = 16383
         major_login.analytics_detail = b"FwQVTgUPX1UaUllDDwcWCRBpWAUOUgsvA1snWlBaO1kFYg=="
-        major_login.loading_time = random.randint(9000, 18000)
+        major_login.loading_time = random.randint(8000, 15000)
+    
         major_login.release_channel = "android"
         major_login.if_push = 1
         major_login.is_vpn = 0
