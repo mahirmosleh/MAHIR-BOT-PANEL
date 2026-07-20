@@ -1936,6 +1936,7 @@ LOGIN_HTML = '''
 <html>
 <head>
     <title>MAHIR Bot Deployer - Login</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         * { margin:0; padding:0; box-sizing:border-box; }
         body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
@@ -1950,7 +1951,18 @@ LOGIN_HTML = '''
         button:hover { transform: scale(1.02); }
         .error { color: #f87171; text-align: center; margin: 10px 0; }
         .success { color: #4ade80; text-align: center; margin: 10px 0; }
-
+        .btn-download { display: block; width: 100%; padding: 12px; margin: 15px 0; background: linear-gradient(135deg, #f59e0b, #ef4444, #ec4899); background-size: 300% 300%; animation: gradShift 3s ease infinite; border: none; border-radius: 50px; color: #fff; font-weight: 700; font-size: 0.95rem; cursor: pointer; text-decoration: none; text-align: center; position: relative; overflow: hidden; box-shadow: 0 0 30px rgba(239,68,68,0.3); transition: 0.3s; }
+        .btn-download:hover { transform: translateY(-3px) scale(1.02); box-shadow: 0 15px 40px rgba(239,68,68,0.4); }
+        .btn-download::after { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%); animation: shine 4s linear infinite; }
+        @keyframes gradShift { 0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%} }
+        @keyframes shine { 0%{transform:rotate(0deg)}100%{transform:rotate(360deg)} }
+        .btn-download i { animation: bounce 1.5s ease infinite; margin-right: 8px; }
+        @keyframes bounce { 0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)} }
+        .badge { position: absolute; top: -8px; right: -8px; background: #34d399; color: #0a0a1a; font-size: 0.5rem; font-weight: 800; padding: 2px 10px; border-radius: 40px; border: 2px solid #0a0a1a; animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{transform:scale(1)}50%{transform:scale(1.1)} }
+        .or-divider { display: flex; align-items: center; gap: 12px; margin: 10px 0 5px 0; }
+        .or-divider .line { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, rgba(124,58,237,0.4), transparent); }
+        .or-divider .text { color: #a78bfa; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; white-space: nowrap; }
         .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
         .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
         .hamburger-btn:hover { background: rgba(124,58,237,0.5); transform: scale(1.05); }
@@ -1962,7 +1974,6 @@ LOGIN_HTML = '''
         .menu-item i { width: 24px; margin-right: 12px; color: #a78bfa; }
         .menu-divider { border-top: 1px solid #302b63; margin: 6px 12px; }
         .menu-title { padding: 8px 24px; color: #a78bfa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; }
-
         .link { text-align: center; margin-top: 15px; }
         .link a { color: #c084fc; text-decoration: none; }
         .link a:hover { text-decoration: underline; }
@@ -1998,11 +2009,18 @@ LOGIN_HTML = '''
                     {% endfor %}
                 {% endif %}
             {% endwith %}
+            
+            <!-- ====== 3 LINE DOWNLOAD BUTTON ====== -->
+            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="btn-download"><span class="badge">NEW</span><i class="fas fa-download"></i> <i class="fab fa-android"></i> Download APK <small style="opacity:0.7;font-size:0.6rem;">• 18.4 MB</small></a>
+            <div class="or-divider"><span class="line"></span><span class="text"><i class="fas fa-lock"></i> Login</span><span class="line"></span></div>
+            <!-- ====== END ====== -->
+
             <form method="POST">
                 <input type="text" name="username" placeholder="Username" required>
                 <input type="password" name="password" placeholder="Password" required>
                 <button type="submit">Login</button>
             </form>
+            <div class="link"><a href="{{ url_for('register') }}">Don't have account? Register</a></div>
         </div>
     </div>
 
@@ -2283,6 +2301,324 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
         .btn-fullscreen { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; }
         .btn-admin { background: linear-gradient(135deg, #f472b6, #be185d); color: white; }
         .btn-regenerate { background: linear-gradient(135deg, #f97316, #ea580c); color: white; }
+
+        /* ============================================
+           CUSTOM REGENERATE MODAL STYLING
+           ============================================ */
+        .regen-modal-box {
+            background: linear-gradient(135deg, #1e1b4b 0%, #111827 100%);
+            border-radius: 28px;
+            padding: 2.5rem;
+            max-width: 500px;
+            width: 90%;
+            border: 2px solid #7c3aed;
+            box-shadow: 0 0 50px rgba(124, 58, 237, 0.4);
+            position: relative;
+            animation: regenSlideUp 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        @keyframes regenSlideUp {
+            from { transform: translateY(100px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+
+        .regen-title {
+            font-size: 1.5rem;
+            font-weight: 800;
+            color: #c084fc;
+            text-align: center;
+            margin-bottom: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .regen-title i {
+            font-size: 2.5rem;
+            filter: drop-shadow(0 0 10px #7c3aed);
+            animation: pulseIcon 2s infinite;
+        }
+
+        @keyframes pulseIcon {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+        .regen-input-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .regen-input-group input {
+            width: 100%;
+            padding: 16px 20px;
+            background: rgba(0,0,0,0.5);
+            border: 2px solid #302b63;
+            border-radius: 15px;
+            color: #fff;
+            font-size: 1.1rem;
+            transition: all 0.3s ease;
+            text-align: center;
+        }
+
+        .regen-input-group input:focus {
+            outline: none;
+            border-color: #c084fc;
+            box-shadow: 0 0 20px rgba(192, 132, 252, 0.3);
+            background: rgba(0,0,0,0.8);
+        }
+
+        .regen-btn-group {
+            display: flex;
+            gap: 12px;
+        }
+
+        .regen-btn-confirm {
+            flex: 2;
+            background: linear-gradient(135deg, #7c3aed, #2563eb);
+            padding: 14px;
+            border-radius: 15px;
+            font-weight: 800;
+            color: #fff;
+            border: none;
+            cursor: pointer;
+            transition: 0.3s;
+        }
+
+        .regen-btn-cancel {
+            flex: 1;
+            background: rgba(255,255,255,0.05);
+            padding: 14px;
+            border-radius: 15px;
+            font-weight: 700;
+            color: #94a3b8;
+            border: 1px solid #302b63;
+            cursor: pointer;
+        }
+
+        .regen-btn-confirm:hover { transform: translateY(-3px); box-shadow: 0 10px 20px rgba(124, 58, 237, 0.4); }
+        .regen-btn-cancel:hover { background: rgba(239, 68, 68, 0.1); color: #f87171; }
+
+        /* ============================================
+           DOWNLOAD APK BUTTON - Premium Design
+           ============================================ */
+        .btn-download-apk {
+            background: linear-gradient(135deg, #f59e0b, #ef4444, #ec4899);
+            background-size: 300% 300%;
+            animation: gradientShift 3s ease infinite;
+            color: white;
+            border: 2px solid rgba(255,255,255,0.2);
+            box-shadow: 0 0 30px rgba(239,68,68,0.3), inset 0 0 30px rgba(255,255,255,0.05);
+            position: relative;
+            overflow: hidden;
+            min-width: 180px;
+            padding: 0.85rem 2rem;
+            font-size: 0.9rem;
+            letter-spacing: 0.5px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+
+        .btn-download-apk::after {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+            animation: shineRotate 4s linear infinite;
+        }
+
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        @keyframes shineRotate {
+            0% { transform: rotate(0deg) scale(1); }
+            100% { transform: rotate(360deg) scale(1.2); }
+        }
+
+        .btn-download-apk .icon-wrapper {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            animation: bounceIcon 1.5s ease infinite;
+            font-size: 1.3rem;
+        }
+
+        @keyframes bounceIcon {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-5px); }
+        }
+
+        .btn-download-apk .text-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            line-height: 1.2;
+        }
+
+        .btn-download-apk .text-wrapper .main-text {
+            font-weight: 800;
+            font-size: 1rem;
+        }
+
+        .btn-download-apk .text-wrapper .sub-text {
+            font-size: 0.6rem;
+            opacity: 0.8;
+            font-weight: 400;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-download-apk .badge-new {
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            background: linear-gradient(135deg, #34d399, #10b981);
+            color: #0a0a1a;
+            font-size: 0.55rem;
+            font-weight: 800;
+            padding: 2px 10px;
+            border-radius: 40px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            animation: pulseBadge 2s ease infinite;
+            border: 2px solid #0a0a1a;
+        }
+
+        @keyframes pulseBadge {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+        .btn-download-apk:hover {
+            transform: translateY(-4px) scale(1.02);
+            box-shadow: 0 15px 40px rgba(239,68,68,0.4), 0 0 60px rgba(236,72,153,0.2);
+            border-color: rgba(255,255,255,0.4);
+        }
+
+        .btn-download-apk:active {
+            transform: scale(0.95);
+        }
+
+        .btn-download-apk .ripple {
+            position: absolute;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.3);
+            transform: scale(0);
+            animation: rippleEffect 0.6s ease-out;
+            pointer-events: none;
+        }
+
+        @keyframes rippleEffect {
+            to { transform: scale(4); opacity: 0; }
+        }
+
+        /* Download card style */
+        .download-card {
+            background: linear-gradient(135deg, rgba(15,12,41,0.8), rgba(30,17,60,0.6));
+            border: 1px solid rgba(239,68,68,0.3);
+            border-radius: 24px;
+            padding: 1.8rem;
+            margin-bottom: 1.5rem;
+            backdrop-filter: blur(20px);
+            position: relative;
+            overflow: hidden;
+            transition: all 0.4s ease;
+        }
+
+        .download-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: conic-gradient(from 0deg, transparent, rgba(239,68,68,0.05), transparent, rgba(236,72,153,0.05), transparent);
+            animation: rotateBg 10s linear infinite;
+        }
+
+        @keyframes rotateBg {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .download-card .content {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+        }
+
+        .download-card .info-section {
+            display: flex;
+            align-items: center;
+            gap: 1.2rem;
+        }
+
+        .download-card .info-section .android-icon {
+            font-size: 3rem;
+            color: #34d399;
+            background: rgba(52,211,153,0.15);
+            padding: 12px;
+            border-radius: 18px;
+            border: 1px solid rgba(52,211,153,0.3);
+            animation: floatIcon 3s ease-in-out infinite;
+        }
+
+        @keyframes floatIcon {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-8px); }
+        }
+
+        .download-card .info-section .text-area h3 {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #e2e8f0;
+            margin-bottom: 4px;
+        }
+
+        .download-card .info-section .text-area p {
+            font-size: 0.85rem;
+            color: #a78bfa;
+            opacity: 0.8;
+        }
+
+        .download-card .info-section .text-area .version-tag {
+            display: inline-block;
+            background: rgba(124,58,237,0.2);
+            color: #c084fc;
+            padding: 2px 12px;
+            border-radius: 40px;
+            font-size: 0.65rem;
+            font-weight: 600;
+            margin-top: 4px;
+        }
+
+        @media (max-width: 768px) {
+            .download-card .content {
+                flex-direction: column;
+                align-items: stretch;
+                text-align: center;
+            }
+            .download-card .info-section {
+                flex-direction: column;
+                text-align: center;
+            }
+            .btn-download-apk {
+                width: 100%;
+                justify-content: center;
+            }
+        }
+
         .btn-sm { flex: 0 0 auto; padding: 0.4rem 1rem; font-size: 0.75rem; min-width: auto; }
         .badge { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.3rem 1rem; border-radius: 40px; font-size: 0.75rem; font-weight: 700; }
         .badge-active { background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid #22c55e; animation: pulse 2s ease-in-out infinite; }
@@ -2365,6 +2701,41 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             </div>
         </div>
         {% else %}
+
+        <!-- ============================================
+             DOWNLOAD APK CARD
+             ============================================ -->
+        <div class="download-card">
+            <div class="content">
+                <div class="info-section">
+                    <div class="android-icon">
+                        <i class="fab fa-android"></i>
+                    </div>
+                    <div class="text-area">
+                        <h3><i class="fas fa-mobile-alt" style="color:#c084fc;margin-right:8px;"></i> MAHIR TCP Bot</h3>
+                        <p>Download the official Android app to control your bot on the go</p>
+                        <span class="version-tag"><i class="fas fa-tag"></i> v2.0.1</span>
+                        <span class="version-tag" style="background:rgba(52,211,153,0.2);color:#34d399;margin-left:6px;">
+                            <i class="fas fa-check-circle"></i> Latest
+                        </span>
+                    </div>
+                </div>
+                <div style="display:flex;align-items:center;">
+                    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" 
+                       target="_blank" 
+                       class="btn btn-download-apk"
+                       onclick="handleDownloadClick(event)">
+                        <span class="badge-new"><i class="fas fa-bolt"></i> NEW</span>
+                        <span class="icon-wrapper"><i class="fas fa-download"></i></span>
+                        <span class="text-wrapper">
+                            <span class="main-text">Download APK</span>
+                            <span class="sub-text"><i class="fas fa-arrow-right"></i> MediaFire • 18.4 MB</span>
+                        </span>
+                    </a>
+                </div>
+            </div>
+        </div>
+
         <div class="card">
             <div class="card-title"><i class="fas fa-robot"></i> Bot Identity & Status</div>
             <div class="stats-grid">
@@ -2445,6 +2816,28 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
         {% endif %}
     </div>
 
+    <!-- ============================================
+         BEAUTIFUL REGENERATE BOT MODAL
+         ============================================ -->
+    <div id="regenModal" class="modal-overlay">
+        <div class="regen-modal-box">
+            <div class="regen-title">
+                <i class="fas fa-robot"></i>
+                <span>Regenerate Bot Identity</span>
+            </div>
+            <p style="color: #a78bfa; text-align: center; margin-bottom: 20px; font-size: 0.9rem;">
+                বটের জন্য একটি সুন্দর নাম দিন। এটি আপনার ফ্রি ফায়ার একাউন্টের নাম হিসেবে সেট হবে।
+            </p>
+            <div class="regen-input-group">
+                <input type="text" id="newBotNameInput" placeholder="Enter new name..." maxlength="15">
+            </div>
+            <div class="regen-btn-group">
+                <button class="regen-btn-cancel" onclick="closeRegenModal()">Cancel</button>
+                <button class="regen-btn-confirm" onclick="submitRegeneration()">✨ Confirm & Deploy</button>
+            </div>
+        </div>
+    </div>
+
     <div id="adminModal" class="modal-overlay">
         <div class="modal-box">
             <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
@@ -2492,6 +2885,68 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
         let updateInterval = null;
         let fullscreenActive = false;
         let fsAutoScroll = true;
+
+        // ============================================
+        // DOWNLOAD BUTTON RIPPLE EFFECT
+        // ============================================
+        function handleDownloadClick(e) {
+            const btn = e.currentTarget;
+            const ripple = document.createElement('span');
+            ripple.className = 'ripple';
+            const rect = btn.getBoundingClientRect();
+            const size = Math.max(rect.width, rect.height);
+            ripple.style.width = ripple.style.height = size + 'px';
+            ripple.style.left = (e.clientX - rect.left - size/2) + 'px';
+            ripple.style.top = (e.clientY - rect.top - size/2) + 'px';
+            btn.appendChild(ripple);
+            setTimeout(() => ripple.remove(), 600);
+
+            // Show notification
+            setTimeout(() => {
+                showNotification('📱 Downloading MAHIR TCP APK...', 'success');
+            }, 200);
+        }
+
+        // ============================================
+        // REGENERATE MODAL FUNCTIONS
+        // ============================================
+        function regenerateBot() {
+            // পপ-আপ ওপেন করা
+            document.getElementById('regenModal').classList.add('active');
+            document.getElementById('newBotNameInput').focus();
+        }
+
+        function closeRegenModal() {
+            document.getElementById('regenModal').classList.remove('active');
+        }
+
+        function submitRegeneration() {
+            const newName = document.getElementById('newBotNameInput').value.trim();
+            
+            if (newName === "") {
+                showNotification('Please enter a name!', 'error');
+                return;
+            }
+
+            closeRegenModal();
+            showNotification('🔄 Requesting bot regeneration...', 'info');
+
+            fetch('/api/regenerate', { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ bot_name: newName }) 
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    showNotification('✅ Bot regenerated as ' + newName, 'success');
+                    setTimeout(() => location.reload(), 2000);
+                } else {
+                    showNotification('❌ Failed: ' + (data.message || 'Unknown error'), 'error');
+                }
+            })
+            .catch(() => showNotification('❌ Error communicating with server', 'error'));
+        }
 
         function createParticles() {
             const container = document.getElementById('particles');
@@ -2705,22 +3160,6 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             .catch(() => showNotification(`${action.toUpperCase()} failed!`, 'error'));
         }
 
-        function regenerateBot() {
-            if (!confirm('This will delete the current bot account and create a new one. Are you sure?')) return;
-            showNotification('Regenerating bot account...', 'info');
-            fetch('/api/regenerate', { method: 'POST' })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        showNotification('Bot regenerated successfully!', 'success');
-                        setTimeout(() => location.reload(), 2000);
-                    } else {
-                        showNotification('Failed: ' + (data.message || 'Unknown error'), 'error');
-                    }
-                })
-                .catch(() => showNotification('Error regenerating bot', 'error'));
-        }
-
         function openAdminPanel() {
             document.getElementById('adminModal').classList.add('active');
             fetch('/api/admin_uids')
@@ -2921,6 +3360,14 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 })
                 .catch(err => console.error('Update error:', err));
         }
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeRegenModal();
+                closeAdminPanel();
+            }
+        });
 
         createParticles();
         if (typeof Chart !== 'undefined') initChart();
@@ -3364,10 +3811,17 @@ def api_regenerate_bot():
     user_id = session['user_id']
     username = session['username']
 
-    # Get current bot file and admin_uid
+    # ইউজার থেকে পাঠানো নাম গ্রহণ করা
+    data = request.json
+    bot_name = data.get('bot_name', '').strip()
+    
+    if not bot_name:
+        return jsonify({'status': 'error', 'message': 'Bot name is required'}), 400
+
+    # বর্তমান বটের তথ্য নেওয়া
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT admin_uid, bot_file, bot_uid, bot_pw FROM users WHERE id=?', (user_id,))
+    c.execute('SELECT admin_uid, bot_file FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
     if not row:
         conn.close()
@@ -3376,7 +3830,7 @@ def api_regenerate_bot():
     bot_file = row[1]
     conn.close()
 
-    # Delete old bot file if exists
+    # পুরনো বট ফাইল ডিলিট করা
     if bot_file:
         full_path = os.path.join(USER_BOTS_DIR, bot_file)
         if os.path.exists(full_path):
@@ -3385,40 +3839,40 @@ def api_regenerate_bot():
             except:
                 pass
 
-    # Stop the monitor if running
+    # পুরনো মনিটর বন্ধ করা
     if user_id in monitors:
         monitors[user_id].stop_process()
         del monitors[user_id]
 
-    # Try multiple times to create account
+    # নতুন একাউন্ট তৈরির চেষ্টা (ইউজারের দেওয়া নাম দিয়ে)
     max_global_attempts = 3
     account_data = None
     session_requests = requests.Session()
-    bot_name = f"{username}_BOT"
+    
+    current_attempt_name = bot_name
     
     for global_attempt in range(max_global_attempts):
-        print(f"🔄 Regeneration attempt {global_attempt+1}/{max_global_attempts}")
+        print(f"🔄 Regeneration attempt {global_attempt+1}/{max_global_attempts} for name: {current_attempt_name}")
         
-        account_data = create_acc('BD', session_requests, custom_name=bot_name)
+        account_data = create_acc('BD', session_requests, custom_name=current_attempt_name)
         
         if account_data:
             break
         
-        # If fails, try with variation
+        # যদি নাম আগে থেকে থেকে থাকে তবে র‍্যান্ডম সংখ্যা যোগ করে ট্রাই করা
         if global_attempt < max_global_attempts - 1:
-            bot_name = f"{username}_{random.randint(100, 999)}"
-            print(f"🔄 Trying variation: {bot_name}")
+            current_attempt_name = f"{bot_name}{random.randint(10, 99)}"
             session_requests = requests.Session()
             time.sleep(2)
 
     if not account_data:
-        return jsonify({'status': 'error', 'message': 'Failed to create new account after multiple attempts'}), 500
+        return jsonify({'status': 'error', 'message': 'Failed to create new account. Try a different name.'}), 500
 
     new_uid = account_data['uid']
     new_pw = account_data['password']
-    actual_bot_name = account_data.get('name', bot_name)
+    actual_bot_name = account_data.get('name', current_attempt_name)
 
-    # Update database
+    # ডাটাবেস আপডেট
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('UPDATE users SET bot_uid=?, bot_pw=?, bot_status="configured" WHERE id=?',
@@ -3426,12 +3880,10 @@ def api_regenerate_bot():
     conn.commit()
     conn.close()
 
-    # Deploy new bot
-    safe_name = sanitize_filename(username)
-    bot_filename = f"{safe_name}_mahir.py"
+    # নতুন বট ফাইল তৈরি ও ডেপ্লয় করা
     deploy_bot_with_account(user_id, admin_uid, new_uid, new_pw, actual_bot_name, username)
 
-    return jsonify({'status': 'success', 'message': 'Bot regenerated successfully'})
+    return jsonify({'status': 'success', 'message': f'Bot regenerated as {actual_bot_name}'})
 
 # ------ Helper: Deploy bot with given credentials ------
 def deploy_bot_with_account(user_id, admin_uid, bot_uid, bot_pw, bot_name, username):
