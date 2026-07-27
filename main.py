@@ -124,7 +124,7 @@ def debug_print(msg):
 # ========== Bio Update (via MAHIR API) ==========
 def update_bot_bio(uid, password, username):
     """Update bot bio via MAHIR long-bio API."""
-    bio_text = f"[c][b][i][00BFFF]{username} [00FF00]বটে আপনাকে স্বাগতম। [FFFF00]নিজের জন্য এমন একটি Bot কিনতে চাইলে যোগাযোগ করুন আমাদের WEBSITE NAME: [00FFFF]MAHIR.XO.JE "
+    bio_text = f"[c][b][i]USER [00BFFF]{username}[00FF7F] / [FFFF00]নিজের জন্য এমন একটি Bot কিনতে চাইলে যোগাযোগ করুন আমাদের [FF00FF]WEBSITE NAME: [00FFFF]MAHIR.XO.JE / [00BFFF]TG : MAHIR0208 /[7CFC00] uid : 1120167200 "
     encoded = requests.utils.quote(bio_text)
     url = f"https://mahir-long-bio.vercel.app/bio_upload?bio={encoded}&uid={uid}&pass={password}"
     try:
