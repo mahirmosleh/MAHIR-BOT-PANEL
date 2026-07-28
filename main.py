@@ -1486,6 +1486,34 @@ AGENT_DASHBOARD_HTML = '''
             </div>
         </div>
 
+        <!-- Database Management Card -->
+        <div class="card">
+            <h3>📂 Database Management (users.db)</h3>
+            <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: center;">
+                <!-- Download Button -->
+                <a href="{{ url_for('agent_download_db') }}" class="btn btn-primary" style="text-decoration:none;">
+                    <i class="fas fa-download"></i> Download users.db
+                </a>
+
+                <!-- Upload Form -->
+                <form method="POST" action="{{ url_for('agent_upload_db') }}" enctype="multipart/form-data" style="display: flex; gap: 10px; align-items: center;">
+                    <input type="file" name="db_file" accept=".db" required style="padding: 5px; background: #1a1a3e; border-radius: 8px; border: 1px solid #302b63; color: #fff;">
+                    <button type="submit" class="btn btn-warning" onclick="return confirm('এটি আপলোড করলে বর্তমান ডাটাবেস রিপ্লেস হয়ে যাবে। আপনি কি নিশ্চিত?')">
+                        <i class="fas fa-upload"></i> Upload & Replace
+                    </button>
+                </form>
+            </div>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div style="margin-top:10px; color: {{ 'green' if category=='success' else 'red' }}; font-size: 0.9rem;">
+                            {{ message }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+        </div>
+
         <div class="card">
             <h3>📊 Your Key Stats</h3>
             <p>Total Keys Created: <span class="stat-box">{{ keys|length }}</span></p>
@@ -1951,22 +1979,11 @@ LOGIN_HTML = '''
         button:hover { transform: scale(1.02); }
         .error { color: #f87171; text-align: center; margin: 10px 0; }
         .success { color: #4ade80; text-align: center; margin: 10px 0; }
-        .btn-download { display: block; width: 100%; padding: 12px; margin: 15px 0; background: linear-gradient(135deg, #f59e0b, #ef4444, #ec4899); background-size: 300% 300%; animation: gradShift 3s ease infinite; border: none; border-radius: 50px; color: #fff; font-weight: 700; font-size: 0.95rem; cursor: pointer; text-decoration: none; text-align: center; position: relative; overflow: hidden; box-shadow: 0 0 30px rgba(239,68,68,0.3); transition: 0.3s; }
-        .btn-download:hover { transform: translateY(-3px) scale(1.02); box-shadow: 0 15px 40px rgba(239,68,68,0.4); }
-        .btn-download::after { content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%; background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%); animation: shine 4s linear infinite; }
-        @keyframes gradShift { 0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%} }
-        @keyframes shine { 0%{transform:rotate(0deg)}100%{transform:rotate(360deg)} }
-        .btn-download i { animation: bounce 1.5s ease infinite; margin-right: 8px; }
-        @keyframes bounce { 0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)} }
-        .badge { position: absolute; top: -8px; right: -8px; background: #34d399; color: #0a0a1a; font-size: 0.5rem; font-weight: 800; padding: 2px 10px; border-radius: 40px; border: 2px solid #0a0a1a; animation: pulse 2s infinite; }
-        @keyframes pulse { 0%,100%{transform:scale(1)}50%{transform:scale(1.1)} }
-        .or-divider { display: flex; align-items: center; gap: 12px; margin: 10px 0 5px 0; }
-        .or-divider .line { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, rgba(124,58,237,0.4), transparent); }
-        .or-divider .text { color: #a78bfa; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; white-space: nowrap; }
+        
+        /* Sidebar Styles */
         .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
         .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
-        .hamburger-btn:hover { background: rgba(124,58,237,0.5); transform: scale(1.05); }
-        .menu-dropdown { display: none; position: absolute; top: 70px; left: 0; background: rgba(15,12,41,0.95); backdrop-filter: blur(20px); border: 1px solid #7c3aed; border-radius: 16px; padding: 12px 0; min-width: 220px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+        .menu-dropdown { display: none; position: absolute; top: 70px; left: 0; background: rgba(15,12,41,0.95); backdrop-filter: blur(20px); border: 1px solid #7c3aed; border-radius: 16px; padding: 12px 0; min-width: 250px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
         .menu-dropdown.active { display: block; animation: slideDown 0.3s ease; }
         @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
         .menu-item { display: block; padding: 12px 24px; color: #e2e8f0; text-decoration: none; transition: 0.3s; font-size: 0.95rem; border-left: 3px solid transparent; }
@@ -1974,25 +1991,51 @@ LOGIN_HTML = '''
         .menu-item i { width: 24px; margin-right: 12px; color: #a78bfa; }
         .menu-divider { border-top: 1px solid #302b63; margin: 6px 12px; }
         .menu-title { padding: 8px 24px; color: #a78bfa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; }
+        
+        /* Premium Download Button in Sidebar */
+        .sidebar-download { 
+            margin: 10px 15px;
+            padding: 12px;
+            background: linear-gradient(135deg, #f59e0b, #ef4444);
+            border-radius: 12px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 0.85rem;
+            color: #fff !important;
+            display: block;
+            text-decoration: none;
+            box-shadow: 0 5px 15px rgba(239,68,68,0.3);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.03); } 100% { transform: scale(1); } }
+        
         .link { text-align: center; margin-top: 15px; }
         .link a { color: #c084fc; text-decoration: none; }
-        .link a:hover { text-decoration: underline; }
     </style>
 </head>
 <body>
     <div class="hamburger-menu">
         <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
         <div class="menu-dropdown" id="menuDropdown">
+            <div class="menu-title">🚀 Premium App</div>
+            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download">
+                <i class="fas fa-download"></i> DOWNLOAD APK
+            </a>
+            
+            <div class="menu-divider"></div>
             <div class="menu-title">🔐 Authentication</div>
             <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
             <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
-            <a href="{{ url_for('recover') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+            
+            <div class="menu-divider"></div>
+            <div class="menu-title">📱 Social Connect</div>
+            <a href="https://t.me/MAHIR0208" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram (Admin)</a>
+            <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok Profile</a>
+            
             <div class="menu-divider"></div>
             <div class="menu-title">👥 Roles</div>
             <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
             <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
-            <div class="menu-divider"></div>
-            <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
         </div>
     </div>
 
@@ -2005,16 +2048,11 @@ LOGIN_HTML = '''
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
-                        <div class="{{ category }}">{{ message }}</div>
+                        <div class="error">{{ message }}</div>
                     {% endfor %}
                 {% endif %}
             {% endwith %}
             
-            <!-- ====== 3 LINE DOWNLOAD BUTTON ====== -->
-            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="btn-download"><span class="badge">NEW</span><i class="fas fa-download"></i> <i class="fab fa-android"></i> Download APK <small style="opacity:0.7;font-size:0.6rem;">• 18.4 MB</small></a>
-            <div class="or-divider"><span class="line"></span><span class="text"><i class="fas fa-lock"></i> Login</span><span class="line"></span></div>
-            <!-- ====== END ====== -->
-
             <form method="POST">
                 <input type="text" name="username" placeholder="Username" required>
                 <input type="password" name="password" placeholder="Password" required>
@@ -2079,6 +2117,9 @@ REGISTER_HTML = '''
     <div class="hamburger-menu">
         <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
         <div class="menu-dropdown" id="menuDropdown">
+            <div class="menu-title">🚀 Premium App</div>
+            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="menu-item"><i class="fas fa-download"></i> Download APK</a>
+            <div class="menu-divider"></div>
             <div class="menu-title">🔐 Authentication</div>
             <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
             <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
@@ -2087,6 +2128,10 @@ REGISTER_HTML = '''
             <div class="menu-title">👥 Roles</div>
             <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
             <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+            <div class="menu-divider"></div>
+            <div class="menu-title">📱 Social Connect</div>
+            <a href="https://t.me/MAHIR0208" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram ID</a>
+            <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok ID</a>
             <div class="menu-divider"></div>
             <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
         </div>
@@ -2169,6 +2214,9 @@ RECOVER_HTML = '''
     <div class="hamburger-menu">
         <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
         <div class="menu-dropdown" id="menuDropdown">
+            <div class="menu-title">🚀 Premium App</div>
+            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="menu-item"><i class="fas fa-download"></i> Download APK</a>
+            <div class="menu-divider"></div>
             <div class="menu-title">🔐 Authentication</div>
             <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
             <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
@@ -2177,6 +2225,10 @@ RECOVER_HTML = '''
             <div class="menu-title">👥 Roles</div>
             <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
             <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+            <div class="menu-divider"></div>
+            <div class="menu-title">📱 Social Connect</div>
+            <a href="https://t.me/MAHIR0208" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram ID</a>
+            <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok ID</a>
             <div class="menu-divider"></div>
             <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
         </div>
@@ -3567,6 +3619,45 @@ def agent_logout():
     session.clear()
     return redirect(url_for('agent_login'))
 
+# ------ Agent Database Routes ------
+
+@app.route('/agent/download_db')
+@agent_required
+def agent_download_db():
+    if os.path.exists(DB_FILE):
+        return send_file(DB_FILE, as_attachment=True)
+    flash('Database file not found!', 'error')
+    return redirect(url_for('agent_dashboard'))
+
+@app.route('/agent/upload_db', methods=['POST'])
+@agent_required
+def agent_upload_db():
+    if 'db_file' not in request.files:
+        flash('No file selected', 'error')
+        return redirect(url_for('agent_dashboard'))
+    
+    file = request.files['db_file']
+    
+    if file.filename == '':
+        flash('No file selected', 'error')
+        return redirect(url_for('agent_dashboard'))
+
+    if file.filename != 'users.db':
+        flash('Error: Only "users.db" file is allowed!', 'error')
+        return redirect(url_for('agent_dashboard'))
+
+    try:
+        # ব্যাকআপ রাখা (নিরাপত্তার জন্য)
+        if os.path.exists(DB_FILE):
+            shutil.copy2(DB_FILE, DB_FILE + ".bak")
+        
+        file.save(DB_FILE)
+        flash('Database (users.db) uploaded and updated successfully!', 'success')
+    except Exception as e:
+        flash(f'Error uploading database: {e}', 'error')
+        
+    return redirect(url_for('agent_dashboard'))
+
 # ------ Admin Routes ------
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
@@ -3891,6 +3982,7 @@ def deploy_bot_with_account(user_id, admin_uid, bot_uid, bot_pw, bot_name, usern
     bot_filename = f"{safe_name}_mahir.py"
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
 
+    # যদি মূল mahir.py না থাকে তবে একটি ডিফল্ট ফাইল তৈরি করা
     if not os.path.exists(MAHIR_SOURCE):
         with open(MAHIR_SOURCE, 'w') as f:
             f.write('''# Mahir Bot - Configuration
@@ -3899,27 +3991,43 @@ ADMIN_UIDS = []
 # Your bot logic here
 ''')
 
+    # সোর্স ফাইলটি কপি করে ইউজারের নতুন ফাইল বানানো
     shutil.copy2(MAHIR_SOURCE, bot_file_path)
 
     with open(bot_file_path, 'r') as f:
         content = f.read()
 
-    # Inject UID/PW
+    # ১. বটের UID এবং Password ইনজেক্ট করা
     content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
 
-    # Build ADMIN_UIDS: user's admin_uid (if any) + master admin
-    admin_uids = []
+    # ২. অ্যাডমিন ইউআইডি হ্যান্ডেল করা (একাধিক ইউআইডি সাপোর্ট করার জন্য)
+    admin_uids_list = []
+    
     if admin_uid:
-        admin_uids.append(admin_uid)
-    if '1120167200' not in admin_uids:
-        admin_uids.append('1120167200')
-    list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids) + ']'
+        # যদি ডাটাবেসে কমা দিয়ে অনেকগুলো আইডি থাকে (যেমন: "1122, 3344")
+        # তবে সেগুলোকে আলাদা করে লিস্টে নেওয়া
+        parts = str(admin_uid).split(',')
+        for p in parts:
+            uid_clean = p.strip()
+            if uid_clean:
+                admin_uids_list.append(uid_clean)
+
+    # ৩. মাস্টার অ্যাডমিন আইডি (1120167200) নিশ্চিত করা
+    master_id = '1120167200'
+    if master_id not in admin_uids_list:
+        admin_uids_list.insert(0, master_id)
+
+    # ৪. পাইথন লিস্ট ফরম্যাটে রূপান্তর করা: ['id1', 'id2', 'id3']
+    list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids_list) + ']'
+    
+    # ৫. ফাইলের ADMIN_UIDS = [] লাইনটি রিপ্লেস করা
     content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
 
+    # ফাইলটি সেভ করা
     with open(bot_file_path, 'w') as f:
         f.write(content)
 
-    # Create monitor and start
+    # প্রসেস মনিটর চালু করা
     monitor = ProcessMonitor(user_id, bot_file_path)
     monitors[user_id] = monitor
     monitor.start_process()
@@ -4116,7 +4224,46 @@ def update_all_bots_with_new_source():
 def api_status():
     monitor = get_monitor(session['user_id'])
     if monitor:
-        return jsonify(monitor.get_status())
+        status_data = monitor.get_status()
+        
+        # --- রেজিস্ট্রেশন কি-এর আসল মেয়াদ চেক করার লজিক ---
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            # ১. ইউজারের রেজিস্ট্রেশন কি বের করা
+            c.execute('SELECT registration_key FROM users WHERE id=?', (session['user_id'],))
+            user_key_row = c.fetchone()
+            
+            if user_key_row and user_key_row[0]:
+                reg_key = user_key_row[0]
+                # ২. কি (Key) টেবিল থেকে মেয়াদ (expiry_date) বের করা
+                c.execute('SELECT expiry_date FROM keys WHERE key=?', (reg_key,))
+                key_row = c.fetchone()
+                
+                if key_row and key_row[0]:
+                    expiry_str = key_row[0]
+                    expiry_dt = datetime.fromisoformat(expiry_str)
+                    now = datetime.now()
+                    
+                    if expiry_dt > now:
+                        # কতদিন কত ঘণ্টা বাকি আছে তা হিসেব করা
+                        diff = expiry_dt - now
+                        days = diff.days
+                        hours = diff.seconds // 3600
+                        # সুন্দর ফরম্যাটে সাজানো
+                        status_data['script_remaining'] = f"{expiry_dt.strftime('%d %b, %Y')} ({days}d {hours}h left)"
+                    else:
+                        status_data['script_remaining'] = '<span style="color:#ef4444;">Expired</span>'
+                else:
+                    status_data['script_remaining'] = "Lifetime / No Limit"
+            else:
+                status_data['script_remaining'] = "N/A"
+            conn.close()
+        except Exception as e:
+            status_data['script_remaining'] = "Check Error"
+        # ----------------------------------------------
+        
+        return jsonify(status_data)
     else:
         return jsonify({'error': 'Bot not configured'}), 400
 
@@ -4189,10 +4336,11 @@ def api_admin_uids():
     try:
         with open(monitor.process_name, 'r') as f:
             content = f.read()
-        match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]+)\]", content)
+        match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]*)\]", content)
         if match:
             list_str = match.group(1)
-            uids = re.findall(r'"([^"]+)"', list_str)
+            # সিঙ্গেল (') অথবা ডাবল (") দুই ধরণের কোটেশন থেকেই আইডি খুঁজে বের করবে
+            uids = re.findall(r"['\"]([^'\"]+)['\"]", list_str)
             return jsonify({'uids': uids})
         return jsonify({'uids': []})
     except:
@@ -4203,18 +4351,35 @@ def api_admin_uids():
 def api_update_admin_uids():
     data = request.json
     new_uids = data.get('uids', [])
+    
+    # মাস্টার ইউআইডি নিশ্চিত করা
     if '1120167200' not in new_uids:
-        new_uids.append('1120167200')
+        new_uids.insert(0, '1120167200')
+    
     monitor = get_monitor(session['user_id'])
     if not monitor:
         return jsonify({'status': 'error', 'message': 'Bot not configured'}), 400
+        
     try:
+        # ১. ডাটাবেসে সেভ করা (যাতে পারমানেন্ট থাকে)
+        uid_string = ', '.join(new_uids)
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('UPDATE users SET admin_uid=? WHERE id=?', (uid_string, session['user_id']))
+        conn.commit()
+        conn.close()
+
+        # ২. ফাইল আপডেট করা
         with open(monitor.process_name, 'r') as f:
             content = f.read()
-        list_str = '[' + ', '.join(f'"{uid}"' for uid in new_uids) + ']'
+        
+        # এখানে আমরা সিঙ্গেল কোট ব্যবহার করছি যা সব জায়গায় ইউনিফর্ম থাকবে
+        list_str = '[' + ', '.join(f"'{uid}'" for uid in new_uids) + ']'
         new_content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
+        
         with open(monitor.process_name, 'w') as f:
             f.write(new_content)
+            
         monitor.restart_logic()
         return jsonify({'status': 'success'})
     except Exception as e:
