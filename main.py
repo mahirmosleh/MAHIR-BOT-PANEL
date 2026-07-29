@@ -164,11 +164,10 @@ GEN_CONFIG = {
 def generate_custom_password():
     return ''.join(random.choice('0123456789ABCDEF') for _ in range(64))
 
-def generate_random_name(prefix="MAHIR"):
-    # সুপারস্ক্রিপ্ট নাম্বার
-    superscript_numbers = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹']
-    
-    # ডিজাইন/সিম্বল
+def generate_random_name(prefix="ᎷAH!Ꮢ"):
+    # সুপারস্ক্রিপ্ট নাম্বার এবং ছোট অক্ষর
+    superscripts = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹', 'ˡ', 'ˣ', 'ˢ', 'ᴊ', 'ʟ', 'ᵒ', 'ᵖ', 'ᵛ']
+    # স্পেশাল ডিজাইন/সিম্বল
     designs = [
         '▲','ℳ','☆','°','ℛ','『','ツ','◇','༺','◆','웃','꧁','彡','★','ン',
         '•','乂','⍤','유','ヅ','Ø','♪','Ƹ','⌂','シ','⊹','·','∞','♡','✦',
@@ -192,19 +191,19 @@ def generate_random_name(prefix="MAHIR"):
         '┃','ꨄ','ꕤ','ꕥ','ꕦ','ꕧ','ꕨ','ꕩ','ꕪ','༒','༄','༆','༇','༈','༉','༊'
     ]
     
-    # ২-৩টি ডিজাইন বেছে নেওয়া
-    design_count = random.randint(2, 3)
-    selected_designs = random.choices(designs, k=design_count)
+    # ২-৩ ধরণের সাফিক্স স্টাইল তৈরি করা
+    choice = random.randint(1, 3)
     
-    # ১-২টি সুপারস্ক্রিপ্ট নাম্বার বেছে নেওয়া
-    number_count = random.randint(1, 2)
-    selected_numbers = random.choices(superscript_numbers, k=number_count)
-    
-    # সবগুলো একত্রিত করে শাফল করা
-    suffix_parts = selected_designs + selected_numbers
-    random.shuffle(suffix_parts)
-    
-    suffix = ''.join(suffix_parts)
+    if choice == 1:
+        # স্টাইল: ᎷAH!Ꮢ⁰²⁵⁶ꕩ (৪টি নাম্বার + ১টি ডিজাইন)
+        suffix = "".join(random.choices(superscripts, k=4)) + random.choice(designs)
+    elif choice == 2:
+        # স্টাইল: ᎷAH!Ꮢ⁶²¹ˡ⁵ (৫টি মিক্সড সুপারস্ক্রিপ্ট)
+        suffix = "".join(random.choices(superscripts, k=5))
+    else:
+        # স্টাইল: ᎷAH!Ꮢꕩ⁰⁸⁴⁹ (১টি ডিজাইন + ৪টি নাম্বার)
+        suffix = random.choice(designs) + "".join(random.choices(superscripts, k=4))
+        
     return f"{prefix}{suffix}"
 
 def smart_delay():
@@ -616,15 +615,16 @@ def _select_veteran(region, jwt_token, session):
         return False
 
 # ---- Main account creation (full flow) ----
-def create_acc(region, session, custom_name=None):
+def create_acc(region, session, username, custom_name=None):
     """
     Full OB54 account creation with TCP activation.
     Returns dict with uid, password, name, account_id, jwt_token, tcp_activated.
     """
-    max_attempts = 10  # Increased from 5 to 10 for better chance
+    max_attempts = 1  # Increased from 5 to 10 for better chance
     for attempt in range(max_attempts):
         try:
-            password = generate_custom_password()
+            # আপনার চাহিদা অনুযায়ী ফিক্সড পাসওয়ার্ড লজিক
+            password = f"MAHIR_TCP_BOT_USER_{username}"
 
             # Step 1: Register
             payload_register = json.dumps(
@@ -1368,38 +1368,795 @@ ADMIN_LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Admin Login - MAHIR</title>
+    <title>Admin Login - MAHIR PREMIUM</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; display: flex; justify-content: center; align-items: center; height: 100vh; }
-        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; width: 400px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
-        h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
-        input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
-        input:focus { outline: none; border-color: #7c3aed; }
-        button { width: 100%; padding: 14px; background: linear-gradient(135deg, #7c3aed, #2563eb); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
-        button:hover { transform: scale(1.02); }
-        .error { color: #f87171; text-align: center; margin: 10px 0; }
+        /* ─── RESET & BASE ─── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #080816;
+            color: #e8e8f8;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        /* ─── PREMIUM LUXE THEME ─── */
+        :root {
+            --gold: #F5C842;
+            --gold-light: #FFE28A;
+            --gold-dark: #C99A1A;
+            --gold-glow: 0 0 40px rgba(245, 200, 66, 0.35), 0 0 80px rgba(245, 200, 66, 0.12);
+
+            --royal-purple: #8540F5;
+            --royal-purple-light: #B388FF;
+            --electric-blue: #3B8CFF;
+            --crimson: #D42A3A;
+
+            --card-bg: rgba(8, 8, 22, 0.92);
+            --border-glow: 0 0 40px rgba(245, 200, 66, 0.08), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+
+        /* ─── BACKGROUND ANIMATION ─── */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .bg-animation .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.14;
+            animation: orbFloat 30s infinite ease-in-out;
+        }
+        .bg-animation .orb:nth-child(1) {
+            width: 700px;
+            height: 700px;
+            background: #F5C842;
+            top: -20%;
+            left: -20%;
+            animation-delay: 0s;
+        }
+        .bg-animation .orb:nth-child(2) {
+            width: 600px;
+            height: 600px;
+            background: #8540F5;
+            bottom: -20%;
+            right: -20%;
+            animation-delay: -10s;
+        }
+        .bg-animation .orb:nth-child(3) {
+            width: 500px;
+            height: 500px;
+            background: #3B8CFF;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -18s;
+        }
+        .bg-animation .orb:nth-child(4) {
+            width: 400px;
+            height: 400px;
+            background: #D42A3A;
+            top: 15%;
+            left: 70%;
+            animation-delay: -7s;
+            opacity: 0.10;
+        }
+        @keyframes orbFloat {
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+            25% {
+                transform: translate(80px, -120px) scale(1.15);
+            }
+            50% {
+                transform: translate(-60px, 100px) scale(0.85);
+            }
+            75% {
+                transform: translate(120px, 60px) scale(1.08);
+            }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: rgba(245, 200, 66, 0.10);
+            border-radius: 50%;
+            animation: particleFloat 20s infinite ease-in-out;
+        }
+        .particle:nth-child(odd) {
+            background: rgba(133, 64, 245, 0.08);
+        }
+        .particle:nth-child(3n) {
+            background: rgba(59, 140, 255, 0.06);
+        }
+        @keyframes particleFloat {
+            0%,
+            100% {
+                transform: translateY(0px) translateX(0px);
+                opacity: 0.1;
+            }
+            25% {
+                transform: translateY(-260px) translateX(80px);
+                opacity: 0.6;
+            }
+            50% {
+                transform: translateY(-140px) translateX(140px);
+                opacity: 0.3;
+            }
+            75% {
+                transform: translateY(80px) translateX(80px);
+                opacity: 0.7;
+            }
+        }
+
+        /* ─── MAIN CONTAINER ─── */
+        .main-container {
+            width: 100%;
+            max-width: 480px;
+            padding: 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ─── LOGO SECTION ─── */
+        .logo-container {
+            text-align: center;
+            margin-bottom: 24px;
+            position: relative;
+        }
+
+        .logo-wrapper {
+            display: inline-block;
+            position: relative;
+            padding: 8px;
+            border-radius: 24px;
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.08), rgba(133, 64, 245, 0.06));
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            transition: all 0.4s ease;
+        }
+        .logo-wrapper:hover {
+            transform: scale(1.02);
+            border-color: rgba(245, 200, 66, 0.2);
+            box-shadow: 0 10px 60px rgba(245, 200, 66, 0.08), 0 0 80px rgba(245, 200, 66, 0.04);
+        }
+
+        .logo-wrapper img {
+            display: block;
+            height: 95px;
+            width: auto;
+            border-radius: 18px;
+            transition: all 0.4s ease;
+            animation: logoGlow 4s ease-in-out infinite;
+        }
+
+        @keyframes logoGlow {
+            0%,
+            100% {
+                filter: drop-shadow(0 0 15px rgba(245, 200, 66, 0.12));
+            }
+            50% {
+                filter: drop-shadow(0 0 40px rgba(245, 200, 66, 0.30)) drop-shadow(0 0 80px rgba(133, 64, 245, 0.08));
+            }
+        }
+
+        .brand-text {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.15);
+            transition: 0.3s;
+        }
+        .brand-text span {
+            color: #F5C842;
+            opacity: 0.6;
+        }
+        .logo-container:hover .brand-text {
+            color: rgba(255, 255, 255, 0.25);
+        }
+        .logo-container:hover .brand-text span {
+            opacity: 1;
+        }
+
+        /* ─── CARD ─── */
+        .container {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            padding: 44px 40px 40px;
+            border-radius: 32px;
+            border: 1px solid rgba(245, 200, 66, 0.10);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), var(--border-glow), 0 0 60px rgba(245, 200, 66, 0.03);
+            position: relative;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(50px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        /* ─── ICON ─── */
+        .icon-circle {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.12), rgba(133, 64, 245, 0.08));
+            border: 2px solid rgba(245, 200, 66, 0.15);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            box-shadow: 0 0 50px rgba(245, 200, 66, 0.06);
+        }
+        .icon-circle i {
+            font-size: 2.2rem;
+            color: #F5C842;
+            filter: drop-shadow(0 0 20px rgba(245, 200, 66, 0.15));
+        }
+
+        /* ─── HEADINGS ─── */
+        h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #FFE28A, #8540F5, #3B8CFF);
+            background-size: 300% 300%;
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            margin-bottom: 6px;
+            animation: shimmer 6s ease infinite;
+            letter-spacing: -0.5px;
+        }
+        @keyframes shimmer {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .subtitle {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.85rem;
+            font-weight: 300;
+            margin-bottom: 24px;
+            letter-spacing: 0.5px;
+        }
+
+        /* ─── FLASH MESSAGES ─── */
+        .error,
+        .success {
+            text-align: center;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin: 8px 0 16px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            backdrop-filter: blur(8px);
+        }
+        .error {
+            background: rgba(212, 42, 58, 0.12);
+            color: #FF5A6A;
+            border: 1px solid rgba(212, 42, 58, 0.15);
+            box-shadow: 0 0 30px rgba(212, 42, 58, 0.04);
+        }
+        .success {
+            background: rgba(59, 140, 255, 0.10);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.12);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+
+        /* ─── FORM ─── */
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .input-group {
+            position: relative;
+        }
+        .input-group i {
+            position: absolute;
+            left: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: rgba(255, 255, 255, 0.20);
+            font-size: 1rem;
+            transition: 0.3s;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 16px 16px 16px 48px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.18);
+            font-weight: 300;
+        }
+        .input-group input:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input:focus+i {
+            color: #F5C842;
+        }
+
+        /* ─── BUTTON ─── */
+        .btn-login {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            border: none;
+            border-radius: 14px;
+            color: #080816;
+            font-weight: 800;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2), 0 0 40px rgba(245, 200, 66, 0.04);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 4px;
+        }
+        @keyframes regenGradient {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .btn-login:hover:not(:disabled) {
+            transform: scale(1.02);
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.12), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+        .btn-login:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .btn-login .spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2.5px solid rgba(8, 8, 22, 0.2);
+            border-top-color: #080816;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ─── LINKS ─── */
+        .link {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        .link a {
+            color: #FFE28A;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .link a:hover {
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.15);
+            transform: translateX(-3px);
+        }
+        .link a i {
+            font-size: 0.8rem;
+            transition: 0.3s;
+        }
+        .link a:hover i {
+            transform: translateX(-4px);
+        }
+
+        /* ─── HAMBURGER MENU ─── */
+        .hamburger-menu {
+            position: fixed;
+            top: 24px;
+            left: 24px;
+            z-index: 1000;
+        }
+        .hamburger-btn {
+            background: rgba(245, 200, 66, 0.06);
+            border: 1px solid rgba(245, 200, 66, 0.12);
+            color: #F5C842;
+            padding: 12px 18px;
+            border-radius: 14px;
+            cursor: pointer;
+            font-size: 1.5rem;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+            line-height: 1;
+        }
+        .hamburger-btn:hover {
+            background: rgba(245, 200, 66, 0.10);
+            border-color: rgba(245, 200, 66, 0.25);
+            transform: scale(1.05);
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.06);
+        }
+
+        .menu-dropdown {
+            display: none;
+            position: absolute;
+            top: 76px;
+            left: 0;
+            background: rgba(8, 8, 22, 0.96);
+            backdrop-filter: blur(24px);
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            border-radius: 18px;
+            padding: 10px 0;
+            min-width: 250px;
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.7), 0 0 60px rgba(245, 200, 66, 0.02);
+        }
+        .menu-dropdown.active {
+            display: block;
+            animation: slideDown 0.3s ease;
+        }
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .menu-title {
+            padding: 8px 24px 4px;
+            color: rgba(255, 255, 255, 0.25);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 2.5px;
+            font-weight: 700;
+        }
+        .menu-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 24px;
+            color: rgba(255, 255, 255, 0.7);
+            text-decoration: none;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+            border-left: 3px solid transparent;
+            gap: 12px;
+        }
+        .menu-item:hover {
+            background: rgba(245, 200, 66, 0.04);
+            border-left-color: #F5C842;
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.05);
+        }
+        .menu-item i {
+            width: 20px;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.2);
+            transition: 0.3s;
+            font-size: 0.9rem;
+        }
+        .menu-item:hover i {
+            color: #F5C842;
+        }
+        .menu-divider {
+            border-top: 1px solid rgba(245, 200, 66, 0.04);
+            margin: 6px 16px;
+        }
+
+        /* ─── SIDEBAR DOWNLOAD BUTTON ─── */
+        .sidebar-download {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin: 10px 16px;
+            padding: 12px 16px;
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 4s ease infinite;
+            border-radius: 14px;
+            text-align: center;
+            font-weight: 800;
+            font-size: 0.85rem;
+            color: #080816 !important;
+            text-decoration: none;
+            box-shadow: 0 5px 30px rgba(245, 200, 66, 0.12);
+            transition: all 0.3s ease;
+            border-left: none !important;
+        }
+        .sidebar-download:hover {
+            transform: scale(1.03);
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.20);
+            color: #080816 !important;
+            background: linear-gradient(135deg, #FFE28A, #9B6BFF, #5A9CFF);
+        }
+        .sidebar-download i {
+            font-size: 1.1rem;
+            color: #080816 !important;
+        }
+
+        /* ─── RESPONSIVE ─── */
+        @media (max-width: 500px) {
+            .main-container {
+                padding: 12px;
+            }
+            .container {
+                padding: 32px 24px 28px;
+            }
+            h2 {
+                font-size: 1.4rem;
+            }
+            .icon-circle {
+                width: 60px;
+                height: 60px;
+            }
+            .icon-circle i {
+                font-size: 1.8rem;
+            }
+            .input-group input {
+                padding: 14px 14px 14px 44px;
+                font-size: 0.95rem;
+            }
+            .btn-login {
+                padding: 14px;
+                font-size: 0.95rem;
+            }
+            .logo-wrapper img {
+                height: 72px;
+            }
+            .brand-text {
+                font-size: 0.6rem;
+                letter-spacing: 3px;
+            }
+            .hamburger-btn {
+                padding: 10px 14px;
+                font-size: 1.3rem;
+            }
+            .menu-dropdown {
+                min-width: 200px;
+                left: -8px;
+            }
+            .menu-item {
+                padding: 8px 18px;
+                font-size: 0.85rem;
+            }
+            .sidebar-download {
+                padding: 10px 14px;
+                font-size: 0.8rem;
+                margin: 8px 12px;
+            }
+        }
+        @media (max-width: 380px) {
+            .container {
+                padding: 24px 16px 20px;
+            }
+            .input-group input {
+                padding: 12px 12px 12px 38px;
+                font-size: 0.9rem;
+            }
+            .logo-wrapper img {
+                height: 60px;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h2>🔐 Admin Login</h2>
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, message in messages %}
-                    <div class="error">{{ message }}</div>
-                {% endfor %}
-            {% endif %}
-        {% endwith %}
-        <form method="POST">
-            <input type="text" name="username" placeholder="Admin Username" required>
-            <input type="password" name="password" placeholder="Password" required>
-            <button type="submit">Login</button>
-        </form>
-        <div style="text-align:center;margin-top:15px;">
-            <a href="{{ url_for('login') }}" style="color:#c084fc;text-decoration:none;">← Back to Main</a>
+
+    <!-- ─── BACKGROUND ANIMATION ─── -->
+    <div class="bg-animation">
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+    </div>
+    <div class="particles" id="particles"></div>
+
+    <!-- ─── HAMBURGER MENU ─── -->
+    <div class="hamburger-menu">
+        <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Toggle menu">
+            <i class="fas fa-bars"></i>
+        </button>
+        <div class="menu-dropdown" id="menuDropdown">
+            <div class="menu-title">🚀 Premium App</div>
+            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download">
+                <i class="fas fa-download"></i> DOWNLOAD APK
+            </a>
+            
+            <!-- নতুন ভিডিও লিঙ্ক অপশন এখানে -->
+            <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item">
+                <i class="fas fa-play-circle" style="color: #00FF7F;"></i> Watch Video
+            </a>
+
+            <div class="menu-divider"></div>
+            <div class="menu-title">🔐 Authentication</div>
+            <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
+            <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
+            <a href="{{ url_for('recover') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+
+            <div class="menu-divider"></div>
+            <div class="menu-title">👥 Roles</div>
+            <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
+            <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+
+            <div class="menu-divider"></div>
+            <div class="menu-title">📱 Social Connect</div>
+            <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram ID</a>
+            <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok ID</a>
+
+            <div class="menu-divider"></div>
+            <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
         </div>
     </div>
+
+    <!-- ─── MAIN CARD ─── -->
+    <div class="main-container">
+
+        <!-- ─── LOGO SECTION ─── -->
+        <div class="logo-container">
+            <div class="logo-wrapper">
+                <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo" />
+            </div>
+            <div class="brand-text">MAHIR <span>PREMIUM</span></div>
+        </div>
+
+        <div class="container">
+
+            <!-- Icon -->
+            <div class="icon-circle">
+                <i class="fas fa-shield-alt"></i>
+            </div>
+
+            <h2>Admin Access</h2>
+            <p class="subtitle">Secure admin panel login</p>
+
+            <!-- Flash Messages -->
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="{{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+
+            <!-- Form -->
+            <form method="POST" id="adminLoginForm">
+                <div class="input-group">
+                    <i class="fas fa-user-shield"></i>
+                    <input type="text" name="username" placeholder="Admin Username" required autocomplete="username" />
+                </div>
+                <div class="input-group">
+                    <i class="fas fa-lock"></i>
+                    <input type="password" name="password" placeholder="Password" required autocomplete="current-password" />
+                </div>
+                <button type="submit" class="btn-login" id="loginBtn">
+                    <i class="fas fa-sign-in-alt"></i> Login
+                </button>
+            </form>
+
+            <div class="link">
+                <a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Back to Main Site</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- ─── JAVASCRIPT ─── -->
+    <script>
+        // ─── PARTICLES ───
+        (function createParticles() {
+            const container = document.getElementById('particles');
+            if (!container) return;
+            for (let i = 0; i < 50; i++) {
+                const p = document.createElement('div');
+                p.className = 'particle';
+                const s = Math.random() * 4 + 2;
+                p.style.width = s + 'px';
+                p.style.height = s + 'px';
+                p.style.left = Math.random() * 100 + '%';
+                p.style.top = Math.random() * 100 + '%';
+                p.style.animationDelay = Math.random() * 20 + 's';
+                p.style.animationDuration = Math.random() * 20 + 12 + 's';
+                container.appendChild(p);
+            }
+        })();
+
+        // ─── HAMBURGER MENU ───
+        function toggleMenu() {
+            document.getElementById('menuDropdown').classList.toggle('active');
+        }
+
+        document.addEventListener('click', function(e) {
+            const menu = document.querySelector('.hamburger-menu');
+            if (menu && !menu.contains(e.target)) {
+                document.getElementById('menuDropdown').classList.remove('active');
+            }
+        });
+
+        // ─── FORM LOADING STATE ───
+        document.getElementById('adminLoginForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('loginBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Authenticating...';
+            }
+        });
+
+        // ─── CLOSE MENU ON ESC ───
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                document.getElementById('menuDropdown').classList.remove('active');
+            }
+        });
+    </script>
+
 </body>
 </html>
 '''
@@ -1448,57 +2205,730 @@ AGENT_DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Agent Dashboard - MAHIR</title>
+    <title>Agent Dashboard - MAHIR PREMIUM</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; padding: 20px; }
-        .container { max-width: 900px; margin: 0 auto; }
-        .header { display: flex; justify-content: space-between; align-items: center; padding: 20px; background: rgba(15,12,41,0.8); border-radius: 20px; margin-bottom: 30px; }
-        .header h1 { color: #c084fc; }
-        .btn { padding: 10px 20px; border-radius: 30px; border: none; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .btn-danger { background: #ef4444; color: #fff; }
-        .btn-success { background: #10b981; color: #fff; }
-        .btn-primary { background: #2563eb; color: #fff; }
-        .btn-warning { background: #f59e0b; color: #fff; }
-        .card { background: rgba(15,12,41,0.7); padding: 25px; border-radius: 20px; border: 1px solid #302b63; margin-bottom: 20px; }
-        .card h3 { color: #c084fc; margin-top: 0; }
-        .input-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        .input-group input { padding: 10px 16px; border-radius: 30px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; flex: 1; min-width: 180px; }
-        .badge { padding: 3px 12px; border-radius: 20px; font-size: 12px; }
-        .badge-used { background: #10b98120; color: #10b981; border: 1px solid #10b981; }
-        .badge-unused { background: #fbbf2420; color: #fbbf24; border: 1px solid #fbbf24; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #302b63; }
-        th { color: #c084fc; }
-        code { background: #1a1a3e; padding: 3px 8px; border-radius: 6px; color: #fbbf24; font-size: 0.8rem; }
-        .stat-box { display: inline-block; background: rgba(0,0,0,0.4); padding: 6px 18px; border-radius: 40px; color: #c084fc; font-weight: bold; }
-        .back-link { color: #c084fc; text-decoration: none; }
-        .back-link:hover { text-decoration: underline; }
+        /* ─── RESET & BASE ─── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #080816;
+            color: #e8e8f8;
+            min-height: 100vh;
+            padding: 20px;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        /* ─── PREMIUM LUXE THEME ─── */
+        :root {
+            --gold: #F5C842;
+            --gold-light: #FFE28A;
+            --gold-dark: #C99A1A;
+            --gold-glow: 0 0 40px rgba(245, 200, 66, 0.35), 0 0 80px rgba(245, 200, 66, 0.12);
+
+            --royal-purple: #8540F5;
+            --royal-purple-light: #B388FF;
+            --electric-blue: #3B8CFF;
+            --crimson: #D42A3A;
+            --crimson-light: #FF5A6A;
+
+            --card-bg: rgba(8, 8, 22, 0.92);
+            --border-glow: 0 0 40px rgba(245, 200, 66, 0.08), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+
+        /* ─── BACKGROUND ANIMATION ─── */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .bg-animation .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.12;
+            animation: orbFloat 30s infinite ease-in-out;
+        }
+        .bg-animation .orb:nth-child(1) {
+            width: 700px;
+            height: 700px;
+            background: #F5C842;
+            top: -20%;
+            left: -20%;
+            animation-delay: 0s;
+        }
+        .bg-animation .orb:nth-child(2) {
+            width: 600px;
+            height: 600px;
+            background: #8540F5;
+            bottom: -20%;
+            right: -20%;
+            animation-delay: -10s;
+        }
+        .bg-animation .orb:nth-child(3) {
+            width: 500px;
+            height: 500px;
+            background: #3B8CFF;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -18s;
+        }
+        .bg-animation .orb:nth-child(4) {
+            width: 400px;
+            height: 400px;
+            background: #D42A3A;
+            top: 15%;
+            left: 70%;
+            animation-delay: -7s;
+            opacity: 0.08;
+        }
+        @keyframes orbFloat {
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+            25% {
+                transform: translate(80px, -120px) scale(1.15);
+            }
+            50% {
+                transform: translate(-60px, 100px) scale(0.85);
+            }
+            75% {
+                transform: translate(120px, 60px) scale(1.08);
+            }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: rgba(245, 200, 66, 0.10);
+            border-radius: 50%;
+            animation: particleFloat 20s infinite ease-in-out;
+        }
+        .particle:nth-child(odd) {
+            background: rgba(133, 64, 245, 0.08);
+        }
+        .particle:nth-child(3n) {
+            background: rgba(59, 140, 255, 0.06);
+        }
+        @keyframes particleFloat {
+            0%,
+            100% {
+                transform: translateY(0px) translateX(0px);
+                opacity: 0.1;
+            }
+            25% {
+                transform: translateY(-260px) translateX(80px);
+                opacity: 0.6;
+            }
+            50% {
+                transform: translateY(-140px) translateX(140px);
+                opacity: 0.3;
+            }
+            75% {
+                transform: translateY(80px) translateX(80px);
+                opacity: 0.7;
+            }
+        }
+
+        /* ─── CONTAINER ─── */
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ─── HEADER ─── */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 24px 32px;
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            border-radius: 24px;
+            border: 1px solid rgba(245, 200, 66, 0.08);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), var(--border-glow);
+            margin-bottom: 30px;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .header h1 {
+            font-size: 1.6rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #FFE28A, #8540F5);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header h1 i {
+            color: #F5C842;
+            filter: drop-shadow(0 0 20px rgba(245, 200, 66, 0.15));
+        }
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .header-right .welcome-text {
+            color: rgba(255, 255, 255, 0.5);
+            font-weight: 400;
+            font-size: 0.9rem;
+        }
+        .header-right .welcome-text strong {
+            color: #FFE28A;
+            font-weight: 700;
+        }
+
+        /* ─── BUTTONS ─── */
+        .btn {
+            padding: 10px 22px;
+            border-radius: 40px;
+            border: none;
+            font-weight: 700;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+            font-family: 'Inter', sans-serif;
+        }
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px) scale(1.02);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .btn-sm {
+            padding: 6px 14px;
+            font-size: 0.75rem;
+        }
+        .btn-danger {
+            background: linear-gradient(135deg, #D42A3A, #8A1A28);
+            color: #fff;
+        }
+        .btn-danger:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(212, 42, 58, 0.25);
+        }
+        .btn-success {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+        }
+        .btn-success:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(59, 140, 255, 0.25);
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #8540F5, #5A1A9A);
+            color: #fff;
+        }
+        .btn-primary:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(133, 64, 245, 0.25);
+        }
+        .btn-warning {
+            background: linear-gradient(135deg, #F5C842, #C99A1A);
+            color: #080816;
+        }
+        .btn-warning:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(245, 200, 66, 0.25);
+        }
+        .btn-gold {
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            color: #080816;
+            font-weight: 800;
+        }
+        @keyframes regenGradient {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .btn-gold:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.20);
+        }
+        .btn .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        .btn-warning .spinner,
+        .btn-gold .spinner {
+            border-color: rgba(8, 8, 22, 0.2);
+            border-top-color: #080816;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ─── CARDS ─── */
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            padding: 28px 32px;
+            border-radius: 24px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3), var(--border-glow);
+            margin-bottom: 24px;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            transition: all 0.4s ease;
+        }
+        .card:hover {
+            border-color: rgba(245, 200, 66, 0.12);
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.4), 0 0 60px rgba(245, 200, 66, 0.02);
+        }
+        .card h3 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #F5C842;
+            margin-top: 0;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.06);
+        }
+        .card h3 i {
+            color: #8540F5;
+            filter: drop-shadow(0 0 10px rgba(133, 64, 245, 0.15));
+        }
+
+        /* ─── INPUTS ─── */
+        .input-group {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .input-group label {
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .input-group input {
+            padding: 12px 18px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 0.95rem;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+            flex: 1;
+            min-width: 140px;
+        }
+        .input-group input:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.15);
+        }
+        .input-group input[type="file"] {
+            padding: 10px 16px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 0.9rem;
+            font-family: 'Inter', sans-serif;
+            cursor: pointer;
+            flex: 0 1 auto;
+            min-width: 160px;
+        }
+        .input-group input[type="file"]::-webkit-file-upload-button {
+            padding: 6px 16px;
+            border: none;
+            border-radius: 30px;
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.12), rgba(133, 64, 245, 0.08));
+            color: #FFE28A;
+            font-weight: 600;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: 0.3s;
+            margin-right: 12px;
+        }
+        .input-group input[type="file"]::-webkit-file-upload-button:hover {
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.20), rgba(133, 64, 245, 0.12));
+        }
+        .input-group input[type="number"] {
+            width: 100px;
+            flex: 0 0 auto;
+            min-width: auto;
+            text-align: center;
+        }
+
+        /* ─── FLASH MESSAGES ─── */
+        .flash-msg {
+            padding: 12px 18px;
+            border-radius: 14px;
+            margin-top: 12px;
+            font-weight: 500;
+            backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .flash-msg.success {
+            background: rgba(59, 140, 255, 0.10);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.12);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+        .flash-msg.error {
+            background: rgba(212, 42, 58, 0.12);
+            color: #FF5A6A;
+            border: 1px solid rgba(212, 42, 58, 0.15);
+            box-shadow: 0 0 30px rgba(212, 42, 58, 0.04);
+        }
+
+        /* ─── DB MANAGEMENT ─── */
+        .db-actions {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .db-upload-form {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .db-upload-form .input-group {
+            flex: 0 1 auto;
+        }
+
+        /* ─── STAT BOX ─── */
+        .stat-box {
+            display: inline-block;
+            background: rgba(0, 0, 0, 0.4);
+            padding: 6px 20px;
+            border-radius: 40px;
+            color: #F5C842;
+            font-weight: 700;
+            font-size: 1.1rem;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            box-shadow: 0 0 30px rgba(245, 200, 66, 0.03);
+        }
+
+        /* ─── NEW KEY DISPLAY ─── */
+        .key-display {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 16px 20px;
+            border-radius: 16px;
+            border: 1px solid rgba(245, 200, 66, 0.08);
+            margin-top: 14px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.03);
+        }
+        .key-display strong {
+            color: rgba(255, 255, 255, 0.3);
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .key-display code {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #F5C842;
+            font-family: 'JetBrains Mono', monospace;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.10);
+            letter-spacing: 1px;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 6px 18px;
+            border-radius: 10px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+        }
+        .key-display .key-valid {
+            color: rgba(255, 255, 255, 0.25);
+            font-size: 0.8rem;
+        }
+
+        /* ─── TABLES ─── */
+        .table-wrapper {
+            overflow-x: auto;
+            margin-top: 12px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        th,
+        td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        th {
+            color: #FFE28A;
+            font-weight: 600;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            background: rgba(0, 0, 0, 0.2);
+        }
+        tr:hover td {
+            background: rgba(245, 200, 66, 0.02);
+        }
+        td code {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 4px 12px;
+            border-radius: 8px;
+            color: #F5C842;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        .empty-row td {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.2);
+            padding: 30px 0;
+            font-style: italic;
+        }
+
+        /* ─── BADGES ─── */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 14px;
+            border-radius: 40px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .badge-used {
+            background: rgba(59, 140, 255, 0.12);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.15);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+        .badge-unused {
+            background: rgba(245, 200, 66, 0.10);
+            color: #F5C842;
+            border: 1px solid rgba(245, 200, 66, 0.12);
+            box-shadow: 0 0 30px rgba(245, 200, 66, 0.04);
+        }
+
+        /* ─── BACK LINK ─── */
+        .back-link {
+            color: #FFE28A;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            padding: 12px 0;
+        }
+        .back-link:hover {
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.10);
+            transform: translateX(-3px);
+        }
+        .back-link i {
+            transition: 0.3s;
+        }
+        .back-link:hover i {
+            transform: translateX(-4px);
+        }
+        .bottom-links {
+            margin-top: 20px;
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        /* ─── RESPONSIVE ─── */
+        @media (max-width: 768px) {
+            body {
+                padding: 12px;
+            }
+            .header {
+                flex-direction: column;
+                gap: 16px;
+                padding: 20px;
+                text-align: center;
+            }
+            .header h1 {
+                font-size: 1.3rem;
+            }
+            .header-right {
+                justify-content: center;
+            }
+            .card {
+                padding: 20px;
+            }
+            .db-actions {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .db-upload-form {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .db-upload-form .input-group {
+                width: 100%;
+            }
+            .db-upload-form .input-group input[type="file"] {
+                width: 100%;
+                min-width: auto;
+            }
+            .input-group {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .input-group input {
+                width: 100%;
+                min-width: auto;
+            }
+            .input-group input[type="number"] {
+                width: 100%;
+                flex: auto;
+            }
+            th,
+            td {
+                padding: 10px 12px;
+                font-size: 0.8rem;
+            }
+            .key-display {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+            .key-display code {
+                font-size: 1rem;
+                word-break: break-all;
+            }
+            .bottom-links {
+                flex-direction: column;
+                gap: 10px;
+            }
+        }
+        @media (max-width: 480px) {
+            .header h1 {
+                font-size: 1.1rem;
+            }
+            .btn {
+                padding: 8px 14px;
+                font-size: 0.75rem;
+            }
+            .card h3 {
+                font-size: 1rem;
+            }
+            th,
+            td {
+                padding: 8px 10px;
+                font-size: 0.72rem;
+            }
+            td code {
+                font-size: 0.7rem;
+                padding: 2px 8px;
+            }
+            .stat-box {
+                font-size: 0.9rem;
+                padding: 4px 14px;
+            }
+        }
     </style>
 </head>
 <body>
+
+    <!-- ─── BACKGROUND ANIMATION ─── -->
+    <div class="bg-animation">
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+    </div>
+    <div class="particles" id="particles"></div>
+
+    <!-- ─── CONTAINER ─── -->
     <div class="container">
+
+        <!-- ─── HEADER ─── -->
         <div class="header">
-            <h1>🔑 Agent Dashboard</h1>
-            <div>
-                <span>Welcome, {{ session.username }}</span>
-                <a href="{{ url_for('agent_logout') }}" class="btn btn-danger">Logout</a>
+            <h1><i class="fas fa-user-tie"></i> Agent Dashboard</h1>
+            <div class="header-right">
+                <span class="welcome-text"><i class="fas fa-user-circle" style="color:#8540F5;"></i> Welcome, <strong>{{ session.username }}</strong></span>
+                <a href="{{ url_for('agent_logout') }}" class="btn btn-danger"><i class="fas fa-sign-out-alt"></i> Logout</a>
             </div>
         </div>
 
-        <!-- Database Management Card -->
+        <!-- ─── DATABASE MANAGEMENT ─── -->
         <div class="card">
-            <h3>📂 Database Management (users.db)</h3>
-            <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: center;">
-                <!-- Download Button -->
+            <h3><i class="fas fa-database"></i> Database Management <span style="font-size:0.7rem;font-weight:400;color:rgba(255,255,255,0.2);">(users.db)</span></h3>
+            <div class="db-actions">
                 <a href="{{ url_for('agent_download_db') }}" class="btn btn-primary" style="text-decoration:none;">
                     <i class="fas fa-download"></i> Download users.db
                 </a>
 
-                <!-- Upload Form -->
-                <form method="POST" action="{{ url_for('agent_upload_db') }}" enctype="multipart/form-data" style="display: flex; gap: 10px; align-items: center;">
-                    <input type="file" name="db_file" accept=".db" required style="padding: 5px; background: #1a1a3e; border-radius: 8px; border: 1px solid #302b63; color: #fff;">
-                    <button type="submit" class="btn btn-warning" onclick="return confirm('এটি আপলোড করলে বর্তমান ডাটাবেস রিপ্লেস হয়ে যাবে। আপনি কি নিশ্চিত?')">
+                <form method="POST" action="{{ url_for('agent_upload_db') }}" enctype="multipart/form-data" class="db-upload-form" id="uploadDbForm">
+                    <div class="input-group">
+                        <input type="file" name="db_file" accept=".db" required />
+                    </div>
+                    <button type="submit" class="btn btn-warning" id="uploadDbBtn" onclick="return confirm('এটি আপলোড করলে বর্তমান ডাটাবেস রিপ্লেস হয়ে যাবে। আপনি কি নিশ্চিত?')">
                         <i class="fas fa-upload"></i> Upload & Replace
                     </button>
                 </form>
@@ -1506,55 +2936,123 @@ AGENT_DASHBOARD_HTML = '''
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
-                        <div style="margin-top:10px; color: {{ 'green' if category=='success' else 'red' }}; font-size: 0.9rem;">
-                            {{ message }}
-                        </div>
+                        <div class="flash-msg {{ category }}"><i class="fas fa-{% if category == 'success' %}check-circle{% else %}exclamation-circle{% endif %}"></i> {{ message }}</div>
                     {% endfor %}
                 {% endif %}
             {% endwith %}
         </div>
 
+        <!-- ─── KEY STATS ─── -->
         <div class="card">
-            <h3>📊 Your Key Stats</h3>
-            <p>Total Keys Created: <span class="stat-box">{{ keys|length }}</span></p>
+            <h3><i class="fas fa-chart-simple"></i> Your Key Stats</h3>
+            <p style="color:rgba(255,255,255,0.5);">Total Keys Created: <span class="stat-box">{{ keys|length }}</span></p>
         </div>
 
+        <!-- ─── GENERATE KEY ─── -->
         <div class="card">
-            <h3>🔑 Generate Registration Key</h3>
-            <form method="POST" action="{{ url_for('agent_create_key') }}" class="input-group">
-                <label>Valid days:</label>
-                <input type="number" name="days_valid" value="30" min="1" max="365" style="width:100px;">
-                <button type="submit" class="btn btn-success">Generate Key</button>
+            <h3><i class="fas fa-key"></i> Generate Registration Key</h3>
+            <form method="POST" action="{{ url_for('agent_create_key') }}" class="input-group" id="generateKeyForm">
+                <label><i class="far fa-calendar-alt"></i> Valid days:</label>
+                <input type="number" name="days_valid" value="30" min="1" max="365" style="width:100px;flex:0 0 auto;" />
+                <button type="submit" class="btn btn-gold" id="generateKeyBtn"><i class="fas fa-plus-circle"></i> Generate Key</button>
             </form>
             {% if new_key %}
-                <div style="margin-top:15px;background:#1a1a3e;padding:15px;border-radius:15px;border:1px solid #7c3aed;">
-                    <strong>New Key:</strong> <code style="font-size:18px;color:#fbbf24;">{{ new_key }}</code>
-                    <span style="margin-left:20px;color:#a78bfa;">(valid {{ days }} days)</span>
-                </div>
+            <div class="key-display">
+                <strong><i class="fas fa-key" style="color:#F5C842;"></i> New Key:</strong>
+                <code>{{ new_key }}</code>
+                <span class="key-valid"><i class="far fa-clock"></i> valid {{ days }} days</span>
+            </div>
             {% endif %}
         </div>
 
+        <!-- ─── YOUR KEYS ─── -->
         <div class="card">
-            <h3>📋 Your Keys</h3>
-            <table>
-                <tr><th>Key</th><th>Created</th><th>Used By</th><th>Status</th></tr>
-                {% for key in keys %}
-                <tr>
-                    <td><code>{{ key.key }}</code></td>
-                    <td>{{ key.created_at[:10] }}</td>
-                    <td>{{ key.used_by or '—' }}</td>
-                    <td><span class="badge {{ 'badge-used' if key.is_used else 'badge-unused' }}">{{ 'Used' if key.is_used else 'Available' }}</span></td>
-                </tr>
-                {% else %}
-                <tr><td colspan="4" style="text-align:center;color:#a78bfa;">No keys created yet.</td></tr>
-                {% endfor %}
-            </table>
+            <h3><i class="fas fa-list"></i> Your Keys</h3>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Key</th>
+                            <th>Created</th>
+                            <th>Used By</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for key in keys %}
+                        <tr>
+                            <td><code>{{ key.key }}</code></td>
+                            <td>{{ key.created_at[:10] }}</td>
+                            <td>{{ key.used_by or '—' }}</td>
+                            <td>
+                                <span class="badge {{ 'badge-used' if key.is_used else 'badge-unused' }}">
+                                    <i class="fas fa-{{ 'check-circle' if key.is_used else 'clock' }}"></i>
+                                    {{ 'Used' if key.is_used else 'Available' }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr class="empty-row">
+                            <td colspan="4"><i class="fas fa-key" style="font-size:1rem;display:block;margin-bottom:6px;color:rgba(255,255,255,0.05);"></i> No keys created yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
-        <div style="margin-top:20px;">
-            <a href="{{ url_for('login') }}" class="back-link">← Back to Main Site</a>
+        <!-- ─── BOTTOM LINKS ─── -->
+        <div class="bottom-links">
+            <a href="{{ url_for('login') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Main Site</a>
         </div>
     </div>
+
+    <!-- ─── JAVASCRIPT ─── -->
+    <script>
+        // ─── PARTICLES ───
+        (function createParticles() {
+            const container = document.getElementById('particles');
+            if (!container) return;
+            for (let i = 0; i < 50; i++) {
+                const p = document.createElement('div');
+                p.className = 'particle';
+                const s = Math.random() * 4 + 2;
+                p.style.width = s + 'px';
+                p.style.height = s + 'px';
+                p.style.left = Math.random() * 100 + '%';
+                p.style.top = Math.random() * 100 + '%';
+                p.style.animationDelay = Math.random() * 20 + 's';
+                p.style.animationDuration = Math.random() * 20 + 12 + 's';
+                container.appendChild(p);
+            }
+        })();
+
+        // ─── UPLOAD DB ───
+        document.getElementById('uploadDbForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('uploadDbBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Uploading...';
+            }
+        });
+
+        // ─── GENERATE KEY ───
+        document.getElementById('generateKeyForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('generateKeyBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Generating...';
+            }
+        });
+
+        // ─── CLOSE ANY MODALS ON ESC ───
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                // close any open modals if present
+            }
+        });
+    </script>
+
 </body>
 </html>
 '''
@@ -1563,201 +3061,1081 @@ ADMIN_DASHBOARD_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Admin Dashboard - MAHIR</title>
+    <title>Admin Dashboard - MAHIR PREMIUM</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; padding: 20px; }
-        .container { max-width: 1400px; margin: 0 auto; }
-        .header { display: flex; justify-content: space-between; align-items: center; padding: 20px; background: rgba(15,12,41,0.8); border-radius: 20px; margin-bottom: 30px; }
-        .header h1 { color: #c084fc; }
-        .user-info { display: flex; align-items: center; gap: 20px; }
-        .btn { padding: 10px 20px; border-radius: 30px; border: none; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .btn-danger { background: #ef4444; color: #fff; }
-        .btn-success { background: #10b981; color: #fff; }
-        .btn-primary { background: #2563eb; color: #fff; }
-        .btn-warning { background: #f59e0b; color: #fff; }
-        .btn-info { background: #06b6d4; color: #fff; }
-        .btn-sm { padding: 5px 12px; font-size: 12px; }
-        .card { background: rgba(15,12,41,0.7); padding: 25px; border-radius: 20px; border: 1px solid #302b63; margin-bottom: 20px; }
-        .card h3 { color: #c084fc; margin-top: 0; }
-        .flex { display: flex; gap: 15px; flex-wrap: wrap; align-items: center; }
-        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #302b63; }
-        th { color: #c084fc; }
-        code { background: #1a1a3e; padding: 3px 8px; border-radius: 6px; color: #fbbf24; }
-        .badge { padding: 3px 10px; border-radius: 20px; font-size: 12px; }
-        .badge-used { background: #10b98120; color: #10b981; border: 1px solid #10b981; }
-        .badge-unused { background: #fbbf2420; color: #fbbf24; border: 1px solid #fbbf24; }
-        .badge-admin { background: #7c3aed20; color: #c084fc; border: 1px solid #7c3aed; }
-        .badge-agent { background: #3b82f620; color: #60a5fa; border: 1px solid #3b82f6; }
-        .input-group { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        .input-group input[type="text"], .input-group input[type="password"] { padding: 8px 14px; border-radius: 30px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; }
-        .upload-form { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
-        .stat-card { background: rgba(0,0,0,0.5); border-radius: 18px; padding: 1.25rem; text-align: center; border: 1px solid rgba(124,58,237,0.15); }
-        .stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; color: #a78bfa; margin-bottom: 0.5rem; font-weight: 600; }
-        .stat-value { font-size: 1.3rem; font-weight: 800; color: #f0f0f0; }
-        .progress-bar { background: #1e1b3b; border-radius: 1rem; height: 0.6rem; overflow: hidden; margin-top: 0.5rem; }
-        .progress-fill { background: linear-gradient(90deg, #c084fc, #60a5fa, #34d399); height: 100%; width: 0%; border-radius: 1rem; transition: width 0.5s ease; }
-        .system-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; }
-        .back-link { color: #c084fc; text-decoration: none; }
-        .back-link:hover { text-decoration: underline; }
+        /* ─── RESET & BASE ─── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #080816;
+            color: #e8e8f8;
+            min-height: 100vh;
+            padding: 20px;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        /* ─── PREMIUM LUXE THEME ─── */
+        :root {
+            --gold: #F5C842;
+            --gold-light: #FFE28A;
+            --gold-dark: #C99A1A;
+            --gold-glow: 0 0 40px rgba(245, 200, 66, 0.35), 0 0 80px rgba(245, 200, 66, 0.12);
+
+            --royal-purple: #8540F5;
+            --royal-purple-light: #B388FF;
+            --electric-blue: #3B8CFF;
+            --crimson: #D42A3A;
+            --crimson-light: #FF5A6A;
+
+            --card-bg: rgba(8, 8, 22, 0.92);
+            --border-glow: 0 0 40px rgba(245, 200, 66, 0.08), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+
+        /* ─── BACKGROUND ANIMATION ─── */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .bg-animation .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.12;
+            animation: orbFloat 30s infinite ease-in-out;
+        }
+        .bg-animation .orb:nth-child(1) {
+            width: 700px;
+            height: 700px;
+            background: #F5C842;
+            top: -20%;
+            left: -20%;
+            animation-delay: 0s;
+        }
+        .bg-animation .orb:nth-child(2) {
+            width: 600px;
+            height: 600px;
+            background: #8540F5;
+            bottom: -20%;
+            right: -20%;
+            animation-delay: -10s;
+        }
+        .bg-animation .orb:nth-child(3) {
+            width: 500px;
+            height: 500px;
+            background: #3B8CFF;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -18s;
+        }
+        .bg-animation .orb:nth-child(4) {
+            width: 400px;
+            height: 400px;
+            background: #D42A3A;
+            top: 15%;
+            left: 70%;
+            animation-delay: -7s;
+            opacity: 0.08;
+        }
+        @keyframes orbFloat {
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+            25% {
+                transform: translate(80px, -120px) scale(1.15);
+            }
+            50% {
+                transform: translate(-60px, 100px) scale(0.85);
+            }
+            75% {
+                transform: translate(120px, 60px) scale(1.08);
+            }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: rgba(245, 200, 66, 0.10);
+            border-radius: 50%;
+            animation: particleFloat 20s infinite ease-in-out;
+        }
+        .particle:nth-child(odd) {
+            background: rgba(133, 64, 245, 0.08);
+        }
+        .particle:nth-child(3n) {
+            background: rgba(59, 140, 255, 0.06);
+        }
+        @keyframes particleFloat {
+            0%,
+            100% {
+                transform: translateY(0px) translateX(0px);
+                opacity: 0.1;
+            }
+            25% {
+                transform: translateY(-260px) translateX(80px);
+                opacity: 0.6;
+            }
+            50% {
+                transform: translateY(-140px) translateX(140px);
+                opacity: 0.3;
+            }
+            75% {
+                transform: translateY(80px) translateX(80px);
+                opacity: 0.7;
+            }
+        }
+
+        /* ─── CONTAINER ─── */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ─── HEADER ─── */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 24px 32px;
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            border-radius: 24px;
+            border: 1px solid rgba(245, 200, 66, 0.08);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), var(--border-glow);
+            margin-bottom: 30px;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .header h1 {
+            font-size: 1.6rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #FFE28A, #8540F5);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header h1 i {
+            color: #F5C842;
+            filter: drop-shadow(0 0 20px rgba(245, 200, 66, 0.15));
+        }
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .user-info .welcome-text {
+            color: rgba(255, 255, 255, 0.5);
+            font-weight: 400;
+            font-size: 0.9rem;
+        }
+        .user-info .welcome-text strong {
+            color: #FFE28A;
+            font-weight: 700;
+        }
+
+        /* ─── BUTTONS ─── */
+        .btn {
+            padding: 10px 22px;
+            border-radius: 40px;
+            border: none;
+            font-weight: 700;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+            font-family: 'Inter', sans-serif;
+        }
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px) scale(1.02);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .btn-sm {
+            padding: 6px 14px;
+            font-size: 0.75rem;
+        }
+        .btn-danger {
+            background: linear-gradient(135deg, #D42A3A, #8A1A28);
+            color: #fff;
+        }
+        .btn-danger:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(212, 42, 58, 0.25);
+        }
+        .btn-success {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+        }
+        .btn-success:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(59, 140, 255, 0.25);
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #8540F5, #5A1A9A);
+            color: #fff;
+        }
+        .btn-primary:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(133, 64, 245, 0.25);
+        }
+        .btn-warning {
+            background: linear-gradient(135deg, #F5C842, #C99A1A);
+            color: #080816;
+        }
+        .btn-warning:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(245, 200, 66, 0.25);
+        }
+        .btn-info {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+        }
+        .btn-info:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(59, 140, 255, 0.25);
+        }
+        .btn-gold {
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            color: #080816;
+            font-weight: 800;
+        }
+        @keyframes regenGradient {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .btn-gold:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.20);
+        }
+        .btn .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        .btn-warning .spinner,
+        .btn-gold .spinner {
+            border-color: rgba(8, 8, 22, 0.2);
+            border-top-color: #080816;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ─── CARDS ─── */
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            padding: 28px 32px;
+            border-radius: 24px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3), var(--border-glow);
+            margin-bottom: 24px;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            transition: all 0.4s ease;
+        }
+        .card:hover {
+            border-color: rgba(245, 200, 66, 0.12);
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.4), 0 0 60px rgba(245, 200, 66, 0.02);
+        }
+        .card h3 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #F5C842;
+            margin-top: 0;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.06);
+        }
+        .card h3 i {
+            color: #8540F5;
+            filter: drop-shadow(0 0 10px rgba(133, 64, 245, 0.15));
+        }
+
+        /* ─── SYSTEM STATS ─── */
+        .system-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+        }
+        .stat-card {
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 18px;
+            padding: 1.25rem;
+            text-align: center;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            border-color: rgba(245, 200, 66, 0.12);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2), 0 0 40px rgba(245, 200, 66, 0.02);
+        }
+        .stat-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #FFE28A;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #f0f0ff, #F5C842);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        .stat-sub {
+            font-size: 0.75rem;
+            color: rgba(255, 255, 255, 0.3);
+            margin-top: 2px;
+        }
+        .progress-bar {
+            background: #1a1a2e;
+            border-radius: 1rem;
+            height: 0.6rem;
+            overflow: hidden;
+            margin-top: 0.6rem;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .progress-fill {
+            background: linear-gradient(90deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 100%;
+            animation: progressGradient 4s ease infinite;
+            height: 100%;
+            width: 0%;
+            border-radius: 1rem;
+            box-shadow: 0 0 20px rgba(245, 200, 66, 0.15);
+            transition: width 0.5s ease;
+        }
+        @keyframes progressGradient {
+            0% {
+                background-position: 0% 0%;
+            }
+            100% {
+                background-position: 200% 0%;
+            }
+        }
+
+        /* ─── FLEX LAYOUT ─── */
+        .flex {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .flex-grow {
+            flex: 1;
+            min-width: 150px;
+        }
+
+        /* ─── INPUTS ─── */
+        .input-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .input-group label {
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .input-group input[type="text"],
+        .input-group input[type="password"],
+        .input-group input[type="email"],
+        .input-group input[type="number"] {
+            padding: 12px 18px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 0.95rem;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+            min-width: 140px;
+        }
+        .input-group input:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.15);
+        }
+        .input-group input[type="file"] {
+            padding: 12px 18px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 0.95rem;
+            font-family: 'Inter', sans-serif;
+            cursor: pointer;
+            min-width: auto;
+        }
+        .input-group input[type="file"]::-webkit-file-upload-button {
+            padding: 6px 16px;
+            border: none;
+            border-radius: 30px;
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.12), rgba(133, 64, 245, 0.08));
+            color: #FFE28A;
+            font-weight: 600;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: 0.3s;
+            margin-right: 12px;
+        }
+        .input-group input[type="file"]::-webkit-file-upload-button:hover {
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.20), rgba(133, 64, 245, 0.12));
+        }
+
+        .upload-form {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        /* ─── FLASH MESSAGES ─── */
+        .flash-msg {
+            padding: 12px 18px;
+            border-radius: 14px;
+            margin-top: 12px;
+            font-weight: 500;
+            backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .flash-msg.success {
+            background: rgba(59, 140, 255, 0.10);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.12);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+        .flash-msg.error {
+            background: rgba(212, 42, 58, 0.12);
+            color: #FF5A6A;
+            border: 1px solid rgba(212, 42, 58, 0.15);
+            box-shadow: 0 0 30px rgba(212, 42, 58, 0.04);
+        }
+
+        /* ─── TABLES ─── */
+        .table-wrapper {
+            overflow-x: auto;
+            margin-top: 12px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        th,
+        td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        th {
+            color: #FFE28A;
+            font-weight: 600;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            background: rgba(0, 0, 0, 0.2);
+        }
+        tr:hover td {
+            background: rgba(245, 200, 66, 0.02);
+        }
+        td code {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 4px 12px;
+            border-radius: 8px;
+            color: #F5C842;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        .empty-row td {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.2);
+            padding: 30px 0;
+            font-style: italic;
+        }
+
+        /* ─── BADGES ─── */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 14px;
+            border-radius: 40px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .badge-used {
+            background: rgba(59, 140, 255, 0.12);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.15);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+        .badge-unused {
+            background: rgba(245, 200, 66, 0.10);
+            color: #F5C842;
+            border: 1px solid rgba(245, 200, 66, 0.12);
+            box-shadow: 0 0 30px rgba(245, 200, 66, 0.04);
+        }
+        .badge-admin {
+            background: rgba(133, 64, 245, 0.12);
+            color: #B388FF;
+            border: 1px solid rgba(133, 64, 245, 0.15);
+        }
+        .badge-agent {
+            background: rgba(59, 140, 255, 0.12);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.15);
+        }
+        .badge-user {
+            background: rgba(255, 255, 255, 0.04);
+            color: rgba(255, 255, 255, 0.25);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }
+        .badge-running {
+            background: rgba(57, 255, 20, 0.10);
+            color: #39FF14;
+            border: 1px solid rgba(57, 255, 20, 0.12);
+            animation: pulseBadge 2s ease-in-out infinite;
+        }
+        .badge-stopped {
+            background: rgba(255, 23, 68, 0.10);
+            color: #FF1744;
+            border: 1px solid rgba(255, 23, 68, 0.12);
+        }
+        @keyframes pulseBadge {
+            0%,
+            100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* ─── NEW KEY DISPLAY ─── */
+        .key-display {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 16px 20px;
+            border-radius: 16px;
+            border: 1px solid rgba(245, 200, 66, 0.08);
+            margin-top: 14px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            flex-wrap: wrap;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.03);
+        }
+        .key-display strong {
+            color: rgba(255, 255, 255, 0.3);
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .key-display code {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #F5C842;
+            font-family: 'JetBrains Mono', monospace;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.10);
+            letter-spacing: 1px;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 6px 18px;
+            border-radius: 10px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+        }
+        .key-display .key-valid {
+            color: rgba(255, 255, 255, 0.25);
+            font-size: 0.8rem;
+        }
+
+        /* ─── BACK LINK ─── */
+        .back-link {
+            color: #FFE28A;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            padding: 12px 0;
+        }
+        .back-link:hover {
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.10);
+            transform: translateX(-3px);
+        }
+        .back-link i {
+            transition: 0.3s;
+        }
+        .back-link:hover i {
+            transform: translateX(-4px);
+        }
+
+        /* ─── RESPONSIVE ─── */
+        @media (max-width: 1024px) {
+            .system-stats {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+        @media (max-width: 768px) {
+            body {
+                padding: 12px;
+            }
+            .header {
+                flex-direction: column;
+                gap: 16px;
+                padding: 20px;
+                text-align: center;
+            }
+            .header h1 {
+                font-size: 1.3rem;
+            }
+            .user-info {
+                justify-content: center;
+            }
+            .card {
+                padding: 20px;
+            }
+            .system-stats {
+                grid-template-columns: 1fr;
+            }
+            .upload-form {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .flex {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .input-group {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .input-group input {
+                width: 100%;
+                min-width: auto;
+            }
+            th,
+            td {
+                padding: 10px 12px;
+                font-size: 0.8rem;
+            }
+            .btn-sm {
+                padding: 4px 10px;
+                font-size: 0.7rem;
+            }
+            .key-display {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+            .key-display code {
+                font-size: 1rem;
+                word-break: break-all;
+            }
+        }
+        @media (max-width: 480px) {
+            .header h1 {
+                font-size: 1.1rem;
+            }
+            .btn {
+                padding: 8px 14px;
+                font-size: 0.75rem;
+            }
+            .card h3 {
+                font-size: 1rem;
+            }
+            .stat-value {
+                font-size: 1.2rem;
+            }
+            th,
+            td {
+                padding: 8px 10px;
+                font-size: 0.72rem;
+            }
+        }
     </style>
 </head>
 <body>
+
+    <!-- ─── BACKGROUND ANIMATION ─── -->
+    <div class="bg-animation">
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+    </div>
+    <div class="particles" id="particles"></div>
+
+    <!-- ─── CONTAINER ─── -->
     <div class="container">
+
+        <!-- ─── HEADER ─── -->
         <div class="header">
-            <h1>🛡️ Admin Dashboard</h1>
+            <h1><i class="fas fa-shield-alt"></i> Admin Dashboard</h1>
             <div class="user-info">
-                <span>Welcome, {{ session.username }}</span>
-                <a href="{{ url_for('admin_logout') }}" class="btn btn-danger">Logout</a>
+                <span class="welcome-text"><i class="fas fa-user-circle" style="color:#8540F5;"></i> Welcome, <strong>{{ session.username }}</strong></span>
+                <a href="{{ url_for('admin_logout') }}" class="btn btn-danger"><i class="fas fa-sign-out-alt"></i> Logout</a>
             </div>
         </div>
 
+        <!-- ─── SERVER RESOURCES ─── -->
         <div class="card">
-            <h3>🖥️ Server Resources</h3>
+            <h3><i class="fas fa-server"></i> Server Resources</h3>
             <div class="system-stats">
                 <div class="stat-card">
-                    <div class="stat-label">CPU</div>
+                    <div class="stat-label"><i class="fas fa-microchip"></i> CPU</div>
                     <div class="stat-value">{{ cpu }}%</div>
                     <div class="progress-bar"><div class="progress-fill" style="width: {{ cpu }}%;"></div></div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">RAM</div>
+                    <div class="stat-label"><i class="fas fa-memory"></i> RAM</div>
                     <div class="stat-value">{{ ram_percent }}%</div>
                     <div class="progress-bar"><div class="progress-fill" style="width: {{ ram_percent }}%;"></div></div>
-                    <div style="font-size:0.8rem;color:#a78bfa;">{{ (ram_used / (1024**3))|round(1) }} GB / {{ (ram_total / (1024**3))|round(1) }} GB</div>
+                    <div class="stat-sub">{{ (ram_used / (1024**3))|round(1) }} GB / {{ (ram_total / (1024**3))|round(1) }} GB</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Disk</div>
+                    <div class="stat-label"><i class="fas fa-hdd"></i> Disk</div>
                     <div class="stat-value">{{ disk_percent }}%</div>
                     <div class="progress-bar"><div class="progress-fill" style="width: {{ disk_percent }}%;"></div></div>
-                    <div style="font-size:0.8rem;color:#a78bfa;">{{ (disk_used / (1024**3))|round(1) }} GB / {{ (disk_total / (1024**3))|round(1) }} GB</div>
+                    <div class="stat-sub">{{ (disk_used / (1024**3))|round(1) }} GB / {{ (disk_total / (1024**3))|round(1) }} GB</div>
                 </div>
             </div>
         </div>
 
+        <!-- ─── FILE MANAGER ─── -->
         <div class="card">
-            <h3>📁 File Manager</h3>
-            <a href="{{ url_for('admin_file_manager') }}" class="btn btn-info">Open File Manager</a>
+            <h3><i class="fas fa-folder-open"></i> File Manager</h3>
+            <a href="{{ url_for('admin_file_manager') }}" class="btn btn-gold"><i class="fas fa-folder"></i> Open File Manager</a>
         </div>
 
+        <!-- ─── UPLOAD MAHIR.PY ─── -->
         <div class="card">
-            <h3>📤 Upload New mahir.py</h3>
-            <form method="POST" action="{{ url_for('admin_upload_mahir') }}" enctype="multipart/form-data" class="upload-form">
-                <div class="input-group">
-                    <input type="file" name="mahir_file" accept=".py" required>
+            <h3><i class="fas fa-upload"></i> Upload New <code style="background:rgba(0,0,0,0.4);padding:2px 12px;border-radius:8px;color:#F5C842;font-size:0.9rem;">mahir.py</code></h3>
+            <form method="POST" action="{{ url_for('admin_upload_mahir') }}" enctype="multipart/form-data" class="upload-form" id="uploadMahirForm">
+                <div class="input-group" style="flex:1;min-width:200px;">
+                    <input type="file" name="mahir_file" accept=".py" required />
                 </div>
-                <button type="submit" class="btn btn-warning">Upload & Update All Bots</button>
+                <button type="submit" class="btn btn-warning" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload &amp; Update All Bots</button>
             </form>
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
-                        <div style="color:{{ 'green' if category=='success' else 'red' }}; margin-top:10px;">{{ message }}</div>
+                        <div class="flash-msg {{ category }}"><i class="fas fa-{% if category == 'success' %}check-circle{% else %}exclamation-circle{% endif %}"></i> {{ message }}</div>
                     {% endfor %}
                 {% endif %}
             {% endwith %}
         </div>
 
+        <!-- ─── AGENT MANAGEMENT ─── -->
         <div class="card">
-            <h3>👤 Agent Management</h3>
-            <form method="POST" action="{{ url_for('admin_create_agent') }}" class="flex">
-                <input type="text" name="username" placeholder="Username" required style="padding:8px 14px;border-radius:30px;border:1px solid #302b63;background:#1a1a3e;color:#fff;">
-                <input type="email" name="email" placeholder="Email" required style="padding:8px 14px;border-radius:30px;border:1px solid #302b63;background:#1a1a3e;color:#fff;">
-                <input type="password" name="password" placeholder="Password" required style="padding:8px 14px;border-radius:30px;border:1px solid #302b63;background:#1a1a3e;color:#fff;">
-                <button type="submit" class="btn btn-success">Create Agent</button>
+            <h3><i class="fas fa-user-tie"></i> Agent Management</h3>
+            <form method="POST" action="{{ url_for('admin_create_agent') }}" class="flex" id="createAgentForm">
+                <div class="input-group flex-grow">
+                    <input type="text" name="username" placeholder="Username" required />
+                </div>
+                <div class="input-group flex-grow">
+                    <input type="email" name="email" placeholder="Email" required />
+                </div>
+                <div class="input-group flex-grow">
+                    <input type="password" name="password" placeholder="Password" required />
+                </div>
+                <button type="submit" class="btn btn-success" id="createAgentBtn"><i class="fas fa-user-plus"></i> Create Agent</button>
             </form>
-            <table>
-                <tr><th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Keys Created</th><th>Action</th></tr>
-                {% for agent in agents %}
-                <tr>
-                    <td>{{ agent.id }}</td>
-                    <td>{{ agent.username }}</td>
-                    <td>{{ agent.email or '-' }}</td>
-                    <td>{{ agent.created_at[:10] }}</td>
-                    <td>{{ agent.key_count }}</td>
-                    <td>
-                        <form method="POST" action="{{ url_for('admin_delete_agent', agent_id=agent.id) }}" style="display:inline;" onsubmit="return confirm('Delete this agent and all their keys?');">
-                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
-                        </form>
-                    </td>
-                </tr>
-                {% else %}
-                <tr><td colspan="6" style="text-align:center;color:#a78bfa;">No agents created yet.</td></tr>
-                {% endfor %}
-            </table>
+
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Username</th>
+                            <th>Email</th>
+                            <th>Created</th>
+                            <th>Keys Created</th>
+                            <th style="text-align:right;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for agent in agents %}
+                        <tr>
+                            <td>{{ agent.id }}</td>
+                            <td><strong style="color:#FFE28A;">{{ agent.username }}</strong></td>
+                            <td>{{ agent.email or '-' }}</td>
+                            <td>{{ agent.created_at[:10] }}</td>
+                            <td><span class="badge badge-admin">{{ agent.key_count }}</span></td>
+                            <td style="text-align:right;">
+                                <form method="POST" action="{{ url_for('admin_delete_agent', agent_id=agent.id) }}" style="display:inline;" onsubmit="return confirm('Delete this agent and all their keys?');">
+                                    <button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr class="empty-row">
+                            <td colspan="6"><i class="fas fa-users" style="font-size:1rem;display:block;margin-bottom:6px;color:rgba(255,255,255,0.05);"></i> No agents created yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
+        <!-- ─── GENERATE KEY ─── -->
         <div class="card">
-            <h3>🔑 Generate Registration Key (Admin)</h3>
-            <form method="POST" action="{{ url_for('admin_create_key') }}" class="flex">
+            <h3><i class="fas fa-key"></i> Generate Registration Key</h3>
+            <form method="POST" action="{{ url_for('admin_create_key') }}" class="flex" id="generateKeyForm">
                 <div class="input-group">
-                    <label>Valid days:</label>
-                    <input type="number" name="days_valid" value="30" min="1" max="365" style="width:100px;">
+                    <label><i class="far fa-calendar-alt"></i> Valid days:</label>
+                    <input type="number" name="days_valid" value="30" min="1" max="365" style="width:100px;" />
                 </div>
-                <button type="submit" class="btn btn-success">Generate Key</button>
+                <button type="submit" class="btn btn-gold" id="generateKeyBtn"><i class="fas fa-plus-circle"></i> Generate Key</button>
             </form>
             {% if new_key %}
-                <div style="margin-top:15px;background:#1a1a3e;padding:15px;border-radius:15px;border:1px solid #7c3aed;">
-                    <strong>New Key:</strong> <code style="font-size:18px;color:#fbbf24;">{{ new_key }}</code>
-                    <span style="margin-left:20px;color:#a78bfa;">(valid {{ days }} days)</span>
-                </div>
+            <div class="key-display">
+                <strong><i class="fas fa-key" style="color:#F5C842;"></i> New Key:</strong>
+                <code>{{ new_key }}</code>
+                <span class="key-valid"><i class="far fa-clock"></i> valid {{ days }} days</span>
+            </div>
             {% endif %}
         </div>
 
+        <!-- ─── REGISTERED USERS ─── -->
         <div class="card">
-            <h3>📋 Registered Users</h3>
-            <table>
-                <tr>
-                    <th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Bot Status</th><th>Bot File</th><th>Role</th><th>Action</th>
-                </tr>
-                {% for user in users %}
-                <tr>
-                    <td>{{ user.id }}</td>
-                    <td>{{ user.username }}</td>
-                    <td>{{ user.email or '-' }}</td>
-                    <td>{{ user.created_at[:10] }}</td>
-                    <td>{{ user.bot_status }}</td>
-                    <td>{{ user.bot_file or '-' }}</td>
-                    <td>
-                        {% if user.is_admin %}<span class="badge badge-admin">Admin</span>
-                        {% elif user.is_agent %}<span class="badge badge-agent">Agent</span>
-                        {% else %}User{% endif %}
-                    </td>
-                    <td>
-                        {% if not user.is_admin and not user.is_agent %}
-                        <form method="POST" action="{{ url_for('admin_delete_user', user_id=user.id) }}" style="display:inline;" onsubmit="return confirm('Delete this user?');">
-                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
-                        </form>
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </table>
+            <h3><i class="fas fa-users"></i> Registered Users</h3>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Username</th>
+                            <th>Email</th>
+                            <th>Created</th>
+                            <th>Bot Status</th>
+                            <th>Bot File</th>
+                            <th>Role</th>
+                            <th style="text-align:right;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for user in users %}
+                        <tr>
+                            <td>{{ user.id }}</td>
+                            <td><strong style="color:#FFE28A;">{{ user.username }}</strong></td>
+                            <td>{{ user.email or '-' }}</td>
+                            <td>{{ user.created_at[:10] }}</td>
+                            <td>
+                                {% if user.bot_status == 'running' %}
+                                    <span class="badge badge-running"><i class="fas fa-circle"></i> Running</span>
+                                {% elif user.bot_status == 'stopped' %}
+                                    <span class="badge badge-stopped"><i class="fas fa-circle"></i> Stopped</span>
+                                {% else %}
+                                    <span class="badge badge-unused">{{ user.bot_status or 'Unknown' }}</span>
+                                {% endif %}
+                            </td>
+                            <td><code style="font-size:0.75rem;">{{ user.bot_file or '-' }}</code></td>
+                            <td>
+                                {% if user.is_admin %}
+                                    <span class="badge badge-admin"><i class="fas fa-crown"></i> Admin</span>
+                                {% elif user.is_agent %}
+                                    <span class="badge badge-agent"><i class="fas fa-user-tie"></i> Agent</span>
+                                {% else %}
+                                    <span class="badge badge-user">User</span>
+                                {% endif %}
+                            </td>
+                            <td style="text-align:right;">
+                                {% if not user.is_admin and not user.is_agent %}
+                                <form method="POST" action="{{ url_for('admin_delete_user', user_id=user.id) }}" style="display:inline;" onsubmit="return confirm('Delete this user?');">
+                                    <button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
+                                </form>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr class="empty-row">
+                            <td colspan="8"><i class="fas fa-user-slash" style="font-size:1rem;display:block;margin-bottom:6px;color:rgba(255,255,255,0.05);"></i> No users registered yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
+        <!-- ─── RECENT KEYS ─── -->
         <div class="card">
-            <h3>🔑 Recent Keys</h3>
-            <table>
-                <tr><th>Key</th><th>Created By</th><th>Created</th><th>Used By</th><th>Status</th><th>Action</th></tr>
-                {% for key in keys %}
-                <tr>
-                    <td><code>{{ key.key }}</code></td>
-                    <td>{{ key.created_by or '—' }}</td>
-                    <td>{{ key.created_at[:10] }}</td>
-                    <td>{{ key.used_by or '—' }}</td>
-                    <td><span class="badge {{ 'badge-used' if key.is_used else 'badge-unused' }}">{{ 'Used' if key.is_used else 'Available' }}</span></td>
-                    <td>
-                        <form method="POST" action="{{ url_for('admin_delete_key', key_id=key.id) }}" style="display:inline;" onsubmit="return confirm('Delete this key?');">
-                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
-                        </form>
-                    </td>
-                </tr>
-                {% endfor %}
-            </table>
+            <h3><i class="fas fa-key"></i> Recent Keys</h3>
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Key</th>
+                            <th>Created By</th>
+                            <th>Created</th>
+                            <th>Used By</th>
+                            <th>Status</th>
+                            <th style="text-align:right;">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for key in keys %}
+                        <tr>
+                            <td><code>{{ key.key }}</code></td>
+                            <td>{{ key.created_by or '—' }}</td>
+                            <td>{{ key.created_at[:10] }}</td>
+                            <td>{{ key.used_by or '—' }}</td>
+                            <td>
+                                <span class="badge {{ 'badge-used' if key.is_used else 'badge-unused' }}">
+                                    <i class="fas fa-{{ 'check-circle' if key.is_used else 'clock' }}"></i>
+                                    {{ 'Used' if key.is_used else 'Available' }}
+                                </span>
+                            </td>
+                            <td style="text-align:right;">
+                                <form method="POST" action="{{ url_for('admin_delete_key', key_id=key.id) }}" style="display:inline;" onsubmit="return confirm('Delete this key?');">
+                                    <button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr class="empty-row">
+                            <td colspan="6"><i class="fas fa-key" style="font-size:1rem;display:block;margin-bottom:6px;color:rgba(255,255,255,0.05);"></i> No keys generated yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
-        <a href="{{ url_for('logout') }}" class="back-link">← Back to Main Site</a>
+        <a href="{{ url_for('logout') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Main Site</a>
     </div>
+
+    <!-- ─── JAVASCRIPT ─── -->
+    <script>
+        // ─── PARTICLES ───
+        (function createParticles() {
+            const container = document.getElementById('particles');
+            if (!container) return;
+            for (let i = 0; i < 50; i++) {
+                const p = document.createElement('div');
+                p.className = 'particle';
+                const s = Math.random() * 4 + 2;
+                p.style.width = s + 'px';
+                p.style.height = s + 'px';
+                p.style.left = Math.random() * 100 + '%';
+                p.style.top = Math.random() * 100 + '%';
+                p.style.animationDelay = Math.random() * 20 + 's';
+                p.style.animationDuration = Math.random() * 20 + 12 + 's';
+                container.appendChild(p);
+            }
+        })();
+
+        // ─── UPLOAD MAHIR ───
+        document.getElementById('uploadMahirForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('uploadMahirBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Uploading...';
+            }
+        });
+
+        // ─── CREATE AGENT ───
+        document.getElementById('createAgentForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('createAgentBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Creating...';
+            }
+        });
+
+        // ─── GENERATE KEY ───
+        document.getElementById('generateKeyForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('generateKeyBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Generating...';
+            }
+        });
+
+        // ─── CONFIRM DELETE (already handled inline) ───
+        // Additional safety: close any open modals on ESC
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                // close any open modals if present
+            }
+        });
+    </script>
+
 </body>
 </html>
 '''
@@ -1766,132 +4144,878 @@ FILE_MANAGER_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>File Manager - MAHIR Admin</title>
+    <title>File Manager - MAHIR PREMIUM</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .header { display: flex; justify-content: space-between; align-items: center; padding: 20px; background: rgba(15,12,41,0.8); border-radius: 20px; margin-bottom: 30px; }
-        .header h1 { color: #c084fc; }
-        .btn { padding: 10px 20px; border-radius: 30px; border: none; font-weight: bold; cursor: pointer; transition: 0.3s; }
-        .btn-danger { background: #ef4444; color: #fff; }
-        .btn-success { background: #10b981; color: #fff; }
-        .btn-primary { background: #2563eb; color: #fff; }
-        .btn-warning { background: #f59e0b; color: #fff; }
-        .btn-info { background: #06b6d4; color: #fff; }
-        .btn-sm { padding: 5px 12px; font-size: 12px; }
-        .card { background: rgba(15,12,41,0.7); padding: 25px; border-radius: 20px; border: 1px solid #302b63; margin-bottom: 20px; }
-        .card h3 { color: #c084fc; margin-top: 0; }
-        .upload-form { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
-        .input-group input[type="file"] { padding: 8px; border-radius: 30px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #302b63; }
-        th { color: #c084fc; }
-        .file-icon { margin-right: 10px; }
-        .folder { color: #fbbf24; }
-        .file { color: #60a5fa; }
-        .back-link { color: #c084fc; text-decoration: none; display: inline-block; margin-top: 20px; }
-        .breadcrumb { color: #a78bfa; margin-bottom: 15px; }
-        .breadcrumb a { color: #c084fc; text-decoration: none; }
-        .breadcrumb a:hover { text-decoration: underline; }
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); z-index: 10000; justify-content: center; align-items: center; }
-        .modal-overlay.active { display: flex; }
-        .modal-box { background: #1a1a3e; border-radius: 30px; padding: 2rem; max-width: 800px; width: 95%; max-height: 90vh; overflow-y: auto; border: 1px solid rgba(124,58,237,0.4); }
-        .modal-close { float: right; font-size: 2rem; cursor: pointer; color: #a78bfa; background: none; border: none; }
-        .modal-title { color: #c084fc; font-size: 1.5rem; margin-bottom: 1rem; }
-        .edit-textarea { width: 100%; height: 400px; background: #0a0a1a; color: #e2e8f0; border: 1px solid #302b63; border-radius: 12px; padding: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; resize: vertical; }
+        /* ─── RESET & BASE ─── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #080816;
+            color: #e8e8f8;
+            min-height: 100vh;
+            padding: 20px;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        /* ─── PREMIUM LUXE THEME ─── */
+        :root {
+            --gold: #F5C842;
+            --gold-light: #FFE28A;
+            --gold-dark: #C99A1A;
+            --gold-glow: 0 0 40px rgba(245, 200, 66, 0.35), 0 0 80px rgba(245, 200, 66, 0.12);
+
+            --royal-purple: #8540F5;
+            --royal-purple-light: #B388FF;
+            --electric-blue: #3B8CFF;
+            --crimson: #D42A3A;
+            --crimson-light: #FF5A6A;
+
+            --card-bg: rgba(8, 8, 22, 0.92);
+            --border-glow: 0 0 40px rgba(245, 200, 66, 0.08), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+
+        /* ─── BACKGROUND ANIMATION ─── */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .bg-animation .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.12;
+            animation: orbFloat 30s infinite ease-in-out;
+        }
+        .bg-animation .orb:nth-child(1) {
+            width: 700px;
+            height: 700px;
+            background: #F5C842;
+            top: -20%;
+            left: -20%;
+            animation-delay: 0s;
+        }
+        .bg-animation .orb:nth-child(2) {
+            width: 600px;
+            height: 600px;
+            background: #8540F5;
+            bottom: -20%;
+            right: -20%;
+            animation-delay: -10s;
+        }
+        .bg-animation .orb:nth-child(3) {
+            width: 500px;
+            height: 500px;
+            background: #3B8CFF;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -18s;
+        }
+        .bg-animation .orb:nth-child(4) {
+            width: 400px;
+            height: 400px;
+            background: #D42A3A;
+            top: 15%;
+            left: 70%;
+            animation-delay: -7s;
+            opacity: 0.08;
+        }
+        @keyframes orbFloat {
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+            25% {
+                transform: translate(80px, -120px) scale(1.15);
+            }
+            50% {
+                transform: translate(-60px, 100px) scale(0.85);
+            }
+            75% {
+                transform: translate(120px, 60px) scale(1.08);
+            }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: rgba(245, 200, 66, 0.10);
+            border-radius: 50%;
+            animation: particleFloat 20s infinite ease-in-out;
+        }
+        .particle:nth-child(odd) {
+            background: rgba(133, 64, 245, 0.08);
+        }
+        .particle:nth-child(3n) {
+            background: rgba(59, 140, 255, 0.06);
+        }
+        @keyframes particleFloat {
+            0%,
+            100% {
+                transform: translateY(0px) translateX(0px);
+                opacity: 0.1;
+            }
+            25% {
+                transform: translateY(-260px) translateX(80px);
+                opacity: 0.6;
+            }
+            50% {
+                transform: translateY(-140px) translateX(140px);
+                opacity: 0.3;
+            }
+            75% {
+                transform: translateY(80px) translateX(80px);
+                opacity: 0.7;
+            }
+        }
+
+        /* ─── CONTAINER ─── */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ─── HEADER ─── */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 24px 32px;
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            border-radius: 24px;
+            border: 1px solid rgba(245, 200, 66, 0.08);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), var(--border-glow);
+            margin-bottom: 30px;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .header h1 {
+            font-size: 1.6rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #FFE28A, #8540F5);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header h1 i {
+            color: #F5C842;
+            filter: drop-shadow(0 0 20px rgba(245, 200, 66, 0.15));
+        }
+        .header-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        /* ─── BUTTONS ─── */
+        .btn {
+            padding: 10px 22px;
+            border-radius: 40px;
+            border: none;
+            font-weight: 700;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            text-decoration: none;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+            font-family: 'Inter', sans-serif;
+        }
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px) scale(1.02);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .btn-sm {
+            padding: 6px 14px;
+            font-size: 0.75rem;
+        }
+        .btn-danger {
+            background: linear-gradient(135deg, #D42A3A, #8A1A28);
+            color: #fff;
+        }
+        .btn-danger:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(212, 42, 58, 0.25);
+        }
+        .btn-success {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+        }
+        .btn-success:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(59, 140, 255, 0.25);
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #8540F5, #5A1A9A);
+            color: #fff;
+        }
+        .btn-primary:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(133, 64, 245, 0.25);
+        }
+        .btn-warning {
+            background: linear-gradient(135deg, #F5C842, #C99A1A);
+            color: #080816;
+        }
+        .btn-warning:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(245, 200, 66, 0.25);
+        }
+        .btn-info {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+        }
+        .btn-info:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(59, 140, 255, 0.25);
+        }
+        .btn-gold {
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            color: #080816;
+            font-weight: 800;
+        }
+        @keyframes regenGradient {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .btn-gold:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.20);
+        }
+        .btn .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        .btn-warning .spinner,
+        .btn-gold .spinner {
+            border-color: rgba(8, 8, 22, 0.2);
+            border-top-color: #080816;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ─── CARD ─── */
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            padding: 28px 32px;
+            border-radius: 24px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3), var(--border-glow);
+            margin-bottom: 24px;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            transition: all 0.4s ease;
+        }
+        .card:hover {
+            border-color: rgba(245, 200, 66, 0.12);
+            box-shadow: 0 10px 50px rgba(0, 0, 0, 0.4), 0 0 60px rgba(245, 200, 66, 0.02);
+        }
+        .card h3 {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #F5C842;
+            margin-top: 0;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.06);
+        }
+        .card h3 i {
+            color: #8540F5;
+        }
+
+        /* ─── UPLOAD FORM ─── */
+        .upload-form {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .input-group {
+            position: relative;
+            flex: 1;
+            min-width: 200px;
+        }
+        .input-group input[type="file"] {
+            width: 100%;
+            padding: 14px 18px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 0.95rem;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+            cursor: pointer;
+        }
+        .input-group input[type="file"]:hover {
+            border-color: rgba(245, 200, 66, 0.15);
+        }
+        .input-group input[type="file"]:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input[type="file"]::-webkit-file-upload-button {
+            padding: 8px 18px;
+            border: none;
+            border-radius: 30px;
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.12), rgba(133, 64, 245, 0.08));
+            color: #FFE28A;
+            font-weight: 600;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: 0.3s;
+            margin-right: 12px;
+        }
+        .input-group input[type="file"]::-webkit-file-upload-button:hover {
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.20), rgba(133, 64, 245, 0.12));
+        }
+
+        /* ─── FLASH MESSAGES ─── */
+        .flash-msg {
+            padding: 12px 18px;
+            border-radius: 14px;
+            margin-top: 12px;
+            font-weight: 500;
+            backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .flash-msg.success {
+            background: rgba(59, 140, 255, 0.10);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.12);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+        .flash-msg.error {
+            background: rgba(212, 42, 58, 0.12);
+            color: #FF5A6A;
+            border: 1px solid rgba(212, 42, 58, 0.15);
+            box-shadow: 0 0 30px rgba(212, 42, 58, 0.04);
+        }
+
+        /* ─── BREADCRUMB ─── */
+        .breadcrumb {
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.9rem;
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        .breadcrumb a {
+            color: #FFE28A;
+            text-decoration: none;
+            transition: 0.3s;
+        }
+        .breadcrumb a:hover {
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.10);
+        }
+        .breadcrumb .current {
+            color: #F5C842;
+        }
+
+        .current-dir {
+            color: #FFE28A;
+            font-weight: 600;
+            font-size: 0.95rem;
+            display: inline-block;
+            padding: 4px 16px;
+            background: rgba(245, 200, 66, 0.04);
+            border-radius: 30px;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+        }
+
+        /* ─── TABLE ─── */
+        .table-wrapper {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.92rem;
+        }
+        th,
+        td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        th {
+            color: #FFE28A;
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            background: rgba(0, 0, 0, 0.2);
+        }
+        tr:hover td {
+            background: rgba(245, 200, 66, 0.02);
+        }
+        .folder-link {
+            color: #F5C842;
+            text-decoration: none;
+            font-weight: 600;
+            transition: 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .folder-link:hover {
+            color: #FFE28A;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.10);
+            transform: translateX(3px);
+        }
+        .file-name {
+            color: #60a5fa;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .file-name i {
+            color: #a78bfa;
+        }
+        .td-actions {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .empty-msg {
+            color: rgba(255, 255, 255, 0.25);
+            text-align: center;
+            padding: 30px 0;
+            font-style: italic;
+        }
+
+        /* ─── BACK LINK ─── */
+        .back-link {
+            color: #FFE28A;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            padding: 12px 0;
+        }
+        .back-link:hover {
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.10);
+            transform: translateX(-3px);
+        }
+        .back-link i {
+            transition: 0.3s;
+        }
+        .back-link:hover i {
+            transform: translateX(-4px);
+        }
+
+        /* ─── MODAL ─── */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.88);
+            backdrop-filter: blur(16px);
+            z-index: 10000;
+            justify-content: center;
+            align-items: center;
+            animation: fadeIn 0.3s ease;
+        }
+        .modal-overlay.active {
+            display: flex;
+        }
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+            to {
+                opacity: 1;
+            }
+        }
+        .modal-box {
+            background: linear-gradient(135deg, #12122a, #1e1a3a);
+            border-radius: 30px;
+            padding: 2rem;
+            max-width: 820px;
+            width: 95%;
+            max-height: 92vh;
+            overflow-y: auto;
+            border: 1px solid rgba(245, 200, 66, 0.08);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.8), 0 0 60px rgba(245, 200, 66, 0.03);
+            animation: slideUpModal 0.4s ease;
+        }
+        @keyframes slideUpModal {
+            from {
+                opacity: 0;
+                transform: translateY(50px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .modal-close {
+            float: right;
+            font-size: 2rem;
+            cursor: pointer;
+            color: #FFE28A;
+            transition: all 0.3s ease;
+            background: none;
+            border: none;
+            line-height: 1;
+        }
+        .modal-close:hover {
+            color: #F5C842;
+            transform: rotate(90deg) scale(1.1);
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.15);
+        }
+        .modal-title {
+            color: #F5C842;
+            font-size: 1.5rem;
+            font-weight: 700;
+            margin-bottom: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.06);
+        }
+        .modal-title i {
+            color: #8540F5;
+        }
+        .modal-title span {
+            color: #FFE28A;
+        }
+        .edit-textarea {
+            width: 100%;
+            height: 400px;
+            background: rgba(0, 0, 0, 0.6);
+            color: #e8e8f8;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            border-radius: 14px;
+            padding: 1rem;
+            font-family: 'JetBrains Mono', 'Courier New', monospace;
+            font-size: 0.9rem;
+            resize: vertical;
+            box-shadow: inset 0 4px 30px rgba(0, 0, 0, 0.3);
+            transition: 0.3s;
+        }
+        .edit-textarea:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 30px rgba(0, 0, 0, 0.3);
+        }
+        .modal-actions {
+            margin-top: 1.2rem;
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+            flex-wrap: wrap;
+        }
+        .modal-status {
+            margin-top: 0.8rem;
+            color: #FFE28A;
+            font-weight: 500;
+            text-align: center;
+        }
+
+        /* ─── RESPONSIVE ─── */
+        @media (max-width: 768px) {
+            body {
+                padding: 12px;
+            }
+            .header {
+                flex-direction: column;
+                gap: 16px;
+                padding: 20px;
+                text-align: center;
+            }
+            .header h1 {
+                font-size: 1.3rem;
+            }
+            .header-actions {
+                justify-content: center;
+            }
+            .card {
+                padding: 20px;
+            }
+            .upload-form {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .input-group {
+                min-width: auto;
+            }
+            .input-group input[type="file"] {
+                padding: 12px 14px;
+                font-size: 0.9rem;
+            }
+            th,
+            td {
+                padding: 10px 12px;
+                font-size: 0.82rem;
+            }
+            .td-actions {
+                flex-direction: column;
+                gap: 4px;
+            }
+            .btn-sm {
+                padding: 4px 10px;
+                font-size: 0.7rem;
+            }
+            .modal-box {
+                padding: 1.25rem;
+            }
+            .edit-textarea {
+                height: 250px;
+            }
+            .modal-title {
+                font-size: 1.2rem;
+            }
+        }
+        @media (max-width: 480px) {
+            .header h1 {
+                font-size: 1.1rem;
+            }
+            .btn {
+                padding: 8px 14px;
+                font-size: 0.75rem;
+            }
+            .card h3 {
+                font-size: 1rem;
+            }
+            th,
+            td {
+                padding: 8px 10px;
+                font-size: 0.75rem;
+            }
+        }
     </style>
 </head>
 <body>
+
+    <!-- ─── BACKGROUND ANIMATION ─── -->
+    <div class="bg-animation">
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+    </div>
+    <div class="particles" id="particles"></div>
+
+    <!-- ─── CONTAINER ─── -->
     <div class="container">
+
+        <!-- ─── HEADER ─── -->
         <div class="header">
-            <h1>📁 File Manager</h1>
-            <div>
-                <a href="{{ url_for('admin_dashboard') }}" class="btn btn-primary">Dashboard</a>
-                <a href="{{ url_for('admin_logout') }}" class="btn btn-danger">Logout</a>
+            <h1><i class="fas fa-folder-open"></i> File Manager</h1>
+            <div class="header-actions">
+                <a href="{{ url_for('admin_dashboard') }}" class="btn btn-primary"><i class="fas fa-th-large"></i> Dashboard</a>
+                <a href="{{ url_for('admin_logout') }}" class="btn btn-danger"><i class="fas fa-sign-out-alt"></i> Logout</a>
             </div>
         </div>
 
+        <!-- ─── UPLOAD CARD ─── -->
         <div class="card">
-            <h3>📤 Upload Any File (Auto-extract ZIP)</h3>
-            <form method="POST" action="{{ url_for('admin_upload_file') }}" enctype="multipart/form-data" class="upload-form">
+            <h3><i class="fas fa-upload"></i> Upload Any File <span style="font-size:0.7rem;font-weight:400;color:rgba(255,255,255,0.25);">(ZIP auto-extracted)</span></h3>
+            <form method="POST" action="{{ url_for('admin_upload_file') }}" enctype="multipart/form-data" class="upload-form" id="uploadForm">
                 <div class="input-group">
-                    <input type="file" name="uploaded_file" required>
+                    <input type="file" name="uploaded_file" required id="fileInput" />
                 </div>
-                <button type="submit" class="btn btn-warning">Upload File</button>
+                <button type="submit" class="btn btn-gold" id="uploadBtn"><i class="fas fa-cloud-upload-alt"></i> Upload</button>
             </form>
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
-                        <div style="color:{{ 'green' if category=='success' else 'red' }}; margin-top:10px;">{{ message }}</div>
+                        <div class="flash-msg {{ category }}"><i class="fas fa-{% if category == 'success' %}check-circle{% else %}exclamation-circle{% endif %}"></i> {{ message }}</div>
                     {% endfor %}
                 {% endif %}
             {% endwith %}
         </div>
 
+        <!-- ─── FILE LIST CARD ─── -->
         <div class="card">
-            <h3>📂 Current Directory: <span style="color:#fbbf24;">{{ current_path }}</span></h3>
+            <h3><i class="fas fa-folder"></i> Current Directory: <span class="current-dir">{{ current_path }}</span></h3>
+
             <div class="breadcrumb">
+                <i class="fas fa-home" style="color:rgba(255,255,255,0.2);margin-right:6px;"></i>
                 <a href="{{ url_for('admin_file_manager') }}">/</a>
                 {% for part in breadcrumb_parts %}
                     / <a href="{{ url_for('admin_file_manager', path=part) }}">{{ part }}</a>
                 {% endfor %}
             </div>
-            <table>
-                <tr>
-                    <th>Name</th>
-                    <th>Size</th>
-                    <th>Modified</th>
-                    <th>Action</th>
-                </tr>
-                {% if parent_dir %}
-                <tr>
-                    <td><a href="{{ url_for('admin_file_manager', path=parent_dir) }}"><span class="folder">📁 ..</span></a></td>
-                    <td>—</td>
-                    <td>—</td>
-                    <td>—</td>
-                </tr>
-                {% endif %}
-                {% for item in files %}
-                <tr>
-                    <td>
-                        {% if item.is_dir %}
-                            <a href="{{ url_for('admin_file_manager', path=item.path) }}" class="folder">📁 {{ item.name }}</a>
+
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Size</th>
+                            <th>Modified</th>
+                            <th style="text-align:right;">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% if parent_dir %}
+                        <tr>
+                            <td>
+                                <a href="{{ url_for('admin_file_manager', path=parent_dir) }}" class="folder-link">
+                                    <i class="fas fa-arrow-up" style="font-size:0.8rem;"></i> ..
+                                </a>
+                            </td>
+                            <td>—</td>
+                            <td>—</td>
+                            <td style="text-align:right;">—</td>
+                        </tr>
+                        {% endif %}
+                        {% for item in files %}
+                        <tr>
+                            <td>
+                                {% if item.is_dir %}
+                                    <a href="{{ url_for('admin_file_manager', path=item.path) }}" class="folder-link">
+                                        <i class="fas fa-folder"></i> {{ item.name }}
+                                    </a>
+                                {% else %}
+                                    <span class="file-name">
+                                        <i class="fas fa-file"></i> {{ item.name }}
+                                    </span>
+                                {% endif %}
+                            </td>
+                            <td>{{ item.size if not item.is_dir else '—' }}</td>
+                            <td>{{ item.modified }}</td>
+                            <td style="text-align:right;">
+                                <div class="td-actions" style="justify-content:flex-end;">
+                                    {% if not item.is_dir %}
+                                        <a href="{{ url_for('admin_download_file', path=item.path) }}" class="btn btn-info btn-sm"><i class="fas fa-download"></i></a>
+                                        <button onclick="editFile('{{ item.path }}')" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></button>
+                                        <button onclick="deleteFile('{{ item.path }}')" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
+                                    {% endif %}
+                                </div>
+                            </td>
+                        </tr>
                         {% else %}
-                            <span class="file">📄 {{ item.name }}</span>
-                        {% endif %}
-                    </td>
-                    <td>{{ item.size if not item.is_dir else '—' }}</td>
-                    <td>{{ item.modified }}</td>
-                    <td>
-                        {% if not item.is_dir %}
-                            <a href="{{ url_for('admin_download_file', path=item.path) }}" class="btn btn-info btn-sm">Download</a>
-                            <button onclick="editFile('{{ item.path }}')" class="btn btn-warning btn-sm">Edit</button>
-                            <button onclick="deleteFile('{{ item.path }}')" class="btn btn-danger btn-sm">Delete</button>
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </table>
+                        <tr>
+                            <td colspan="4" class="empty-msg"><i class="fas fa-inbox" style="font-size:1.2rem;display:block;margin-bottom:8px;color:rgba(255,255,255,0.1);"></i> This directory is empty</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
-        <a href="{{ url_for('admin_dashboard') }}" class="back-link">← Back to Dashboard</a>
+        <a href="{{ url_for('admin_dashboard') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
     </div>
 
+    <!-- ─── EDIT MODAL ─── -->
     <div id="editModal" class="modal-overlay">
         <div class="modal-box">
             <button class="modal-close" onclick="closeEditModal()">&times;</button>
-            <div class="modal-title">✏️ Edit File: <span id="editFileName"></span></div>
+            <div class="modal-title"><i class="fas fa-pen-fancy"></i> Edit File: <span id="editFileName"></span></div>
             <textarea id="editContent" class="edit-textarea" spellcheck="false"></textarea>
-            <div style="margin-top:1rem; display:flex; gap:1rem; justify-content:flex-end;">
-                <button onclick="saveEdit()" class="btn btn-success">Save</button>
-                <button onclick="closeEditModal()" class="btn btn-danger">Cancel</button>
+            <div class="modal-actions">
+                <button onclick="saveEdit()" class="btn btn-success"><i class="fas fa-save"></i> Save</button>
+                <button onclick="closeEditModal()" class="btn btn-danger"><i class="fas fa-times"></i> Cancel</button>
             </div>
-            <div id="editStatus" style="margin-top:0.5rem;color:#fbbf24;"></div>
+            <div id="editStatus" class="modal-status"></div>
         </div>
     </div>
 
+    <!-- ─── JAVASCRIPT ─── -->
     <script>
+        // ─── PARTICLES ───
+        (function createParticles() {
+            const container = document.getElementById('particles');
+            if (!container) return;
+            for (let i = 0; i < 50; i++) {
+                const p = document.createElement('div');
+                p.className = 'particle';
+                const s = Math.random() * 4 + 2;
+                p.style.width = s + 'px';
+                p.style.height = s + 'px';
+                p.style.left = Math.random() * 100 + '%';
+                p.style.top = Math.random() * 100 + '%';
+                p.style.animationDelay = Math.random() * 20 + 's';
+                p.style.animationDuration = Math.random() * 20 + 12 + 's';
+                container.appendChild(p);
+            }
+        })();
+
+        // ─── UPLOAD LOADING STATE ───
+        document.getElementById('uploadForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('uploadBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Uploading...';
+            }
+        });
+
+        // ─── EDIT FILE ───
         let currentEditPath = '';
 
         function editFile(path) {
@@ -1900,6 +5024,7 @@ FILE_MANAGER_HTML = '''
             document.getElementById('editContent').value = 'Loading...';
             document.getElementById('editStatus').textContent = '';
             document.getElementById('editModal').classList.add('active');
+
             fetch(`/admin/edit_file/${encodeURIComponent(path)}`)
                 .then(res => res.json())
                 .then(data => {
@@ -1920,28 +5045,42 @@ FILE_MANAGER_HTML = '''
 
         function saveEdit() {
             const content = document.getElementById('editContent').value;
-            document.getElementById('editStatus').textContent = 'Saving...';
+            const status = document.getElementById('editStatus');
+            status.textContent = 'Saving...';
+            status.style.color = '#FFE28A';
+
             fetch(`/admin/edit_file/${encodeURIComponent(currentEditPath)}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: content })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.success) {
-                    document.getElementById('editStatus').textContent = '✅ Saved successfully!';
-                    setTimeout(() => location.reload(), 1000);
-                } else {
-                    document.getElementById('editStatus').textContent = '❌ Error: ' + data.error;
-                }
-            })
-            .catch(err => {
-                document.getElementById('editStatus').textContent = '❌ Error: ' + err;
-            });
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content: content })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        status.textContent = '✅ Saved successfully!';
+                        status.style.color = '#3B8CFF';
+                        setTimeout(() => location.reload(), 1000);
+                    } else {
+                        status.textContent = '❌ Error: ' + data.error;
+                        status.style.color = '#FF5A6A';
+                    }
+                })
+                .catch(err => {
+                    status.textContent = '❌ Error: ' + err;
+                    status.style.color = '#FF5A6A';
+                });
         }
 
+        // ─── DELETE FILE ───
         function deleteFile(path) {
             if (!confirm(`Are you sure you want to delete "${path}"?`)) return;
+
+            const btn = event?.target?.closest?.('button');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;"></span>';
+            }
+
             fetch(`/admin/delete_file/${encodeURIComponent(path)}`, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
@@ -1950,11 +5089,34 @@ FILE_MANAGER_HTML = '''
                         location.reload();
                     } else {
                         alert('❌ Error: ' + data.error);
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.innerHTML = '<i class="fas fa-trash"></i>';
+                        }
                     }
                 })
-                .catch(err => alert('Error: ' + err));
+                .catch(err => {
+                    alert('Error: ' + err);
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fas fa-trash"></i>';
+                    }
+                });
         }
+
+        // ─── CLOSE MODAL ON ESC ───
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                closeEditModal();
+            }
+        });
+
+        // ─── CLOSE MODAL ON OVERLAY CLICK ───
+        document.getElementById('editModal')?.addEventListener('click', function(e) {
+            if (e.target === this) closeEditModal();
+        });
     </script>
+
 </body>
 </html>
 '''
@@ -1963,116 +5125,760 @@ LOGIN_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>MAHIR Bot Deployer - Login</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <title>MAHIR PREMIUM - Login</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .main-container { width: 100%; max-width: 450px; padding: 20px; }
-        .logo-container { text-align: center; margin-bottom: 20px; }
-        .logo-container img { height: 100px; border-radius: 20px; box-shadow: 0 10px 30px rgba(124,58,237,0.3); }
-        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); position: relative; }
-        h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
-        input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
-        input:focus { outline: none; border-color: #7c3aed; }
-        button { width: 100%; padding: 14px; background: linear-gradient(135deg, #7c3aed, #2563eb); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
-        button:hover { transform: scale(1.02); }
-        .error { color: #f87171; text-align: center; margin: 10px 0; }
-        .success { color: #4ade80; text-align: center; margin: 10px 0; }
-        
-        /* Sidebar Styles */
-        .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
-        .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
-        .menu-dropdown { display: none; position: absolute; top: 70px; left: 0; background: rgba(15,12,41,0.95); backdrop-filter: blur(20px); border: 1px solid #7c3aed; border-radius: 16px; padding: 12px 0; min-width: 250px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
-        .menu-dropdown.active { display: block; animation: slideDown 0.3s ease; }
-        @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-        .menu-item { display: block; padding: 12px 24px; color: #e2e8f0; text-decoration: none; transition: 0.3s; font-size: 0.95rem; border-left: 3px solid transparent; }
-        .menu-item:hover { background: rgba(124,58,237,0.15); border-left-color: #7c3aed; color: #c084fc; }
-        .menu-item i { width: 24px; margin-right: 12px; color: #a78bfa; }
-        .menu-divider { border-top: 1px solid #302b63; margin: 6px 12px; }
-        .menu-title { padding: 8px 24px; color: #a78bfa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; }
-        
-        /* Premium Download Button in Sidebar */
-        .sidebar-download { 
-            margin: 10px 15px;
-            padding: 12px;
-            background: linear-gradient(135deg, #f59e0b, #ef4444);
-            border-radius: 12px;
-            text-align: center;
-            font-weight: bold;
-            font-size: 0.85rem;
-            color: #fff !important;
-            display: block;
-            text-decoration: none;
-            box-shadow: 0 5px 15px rgba(239,68,68,0.3);
-            animation: pulse 2s infinite;
+        /* ─── RESET & BASE ─── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.03); } 100% { transform: scale(1); } }
-        
-        .link { text-align: center; margin-top: 15px; }
-        .link a { color: #c084fc; text-decoration: none; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #080816;
+            color: #e8e8f8;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        /* ─── PREMIUM LUXE THEME ─── */
+        :root {
+            --gold: #F5C842;
+            --gold-light: #FFE28A;
+            --gold-dark: #C99A1A;
+            --gold-glow: 0 0 40px rgba(245, 200, 66, 0.35), 0 0 80px rgba(245, 200, 66, 0.12);
+
+            --royal-purple: #8540F5;
+            --royal-purple-light: #B388FF;
+            --electric-blue: #3B8CFF;
+            --crimson: #D42A3A;
+
+            --card-bg: rgba(8, 8, 22, 0.92);
+            --border-glow: 0 0 40px rgba(245, 200, 66, 0.08), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+
+        /* ─── BACKGROUND ANIMATION ─── */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .bg-animation .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.14;
+            animation: orbFloat 30s infinite ease-in-out;
+        }
+        .bg-animation .orb:nth-child(1) {
+            width: 700px;
+            height: 700px;
+            background: #F5C842;
+            top: -20%;
+            left: -20%;
+            animation-delay: 0s;
+        }
+        .bg-animation .orb:nth-child(2) {
+            width: 600px;
+            height: 600px;
+            background: #8540F5;
+            bottom: -20%;
+            right: -20%;
+            animation-delay: -10s;
+        }
+        .bg-animation .orb:nth-child(3) {
+            width: 500px;
+            height: 500px;
+            background: #3B8CFF;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -18s;
+        }
+        .bg-animation .orb:nth-child(4) {
+            width: 400px;
+            height: 400px;
+            background: #D42A3A;
+            top: 15%;
+            left: 70%;
+            animation-delay: -7s;
+            opacity: 0.10;
+        }
+        @keyframes orbFloat {
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+            25% {
+                transform: translate(80px, -120px) scale(1.15);
+            }
+            50% {
+                transform: translate(-60px, 100px) scale(0.85);
+            }
+            75% {
+                transform: translate(120px, 60px) scale(1.08);
+            }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: rgba(245, 200, 66, 0.10);
+            border-radius: 50%;
+            animation: particleFloat 20s infinite ease-in-out;
+        }
+        .particle:nth-child(odd) {
+            background: rgba(133, 64, 245, 0.08);
+        }
+        .particle:nth-child(3n) {
+            background: rgba(59, 140, 255, 0.06);
+        }
+        @keyframes particleFloat {
+            0%,
+            100% {
+                transform: translateY(0px) translateX(0px);
+                opacity: 0.1;
+            }
+            25% {
+                transform: translateY(-260px) translateX(80px);
+                opacity: 0.6;
+            }
+            50% {
+                transform: translateY(-140px) translateX(140px);
+                opacity: 0.3;
+            }
+            75% {
+                transform: translateY(80px) translateX(80px);
+                opacity: 0.7;
+            }
+        }
+
+        /* ─── MAIN CONTAINER ─── */
+        .main-container {
+            width: 100%;
+            max-width: 480px;
+            padding: 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ─── LOGO ─── */
+        .logo-container {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .logo-container img {
+            height: 90px;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(245, 200, 66, 0.15), 0 0 60px rgba(245, 200, 66, 0.04);
+            animation: logoGlow 4s ease-in-out infinite;
+            transition: transform 0.4s ease;
+        }
+        .logo-container img:hover {
+            transform: scale(1.04);
+        }
+        @keyframes logoGlow {
+            0%,
+            100% {
+                filter: drop-shadow(0 0 15px rgba(245, 200, 66, 0.15));
+            }
+            50% {
+                filter: drop-shadow(0 0 40px rgba(245, 200, 66, 0.30)) drop-shadow(0 0 80px rgba(133, 64, 245, 0.10));
+            }
+        }
+
+        /* ─── CARD ─── */
+        .container {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            padding: 44px 40px 40px;
+            border-radius: 32px;
+            border: 1px solid rgba(245, 200, 66, 0.10);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), var(--border-glow), 0 0 60px rgba(245, 200, 66, 0.03);
+            position: relative;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(50px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        /* ─── ICON ─── */
+        .icon-circle {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.12), rgba(133, 64, 245, 0.08));
+            border: 2px solid rgba(245, 200, 66, 0.15);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            box-shadow: 0 0 50px rgba(245, 200, 66, 0.06);
+        }
+        .icon-circle i {
+            font-size: 2.2rem;
+            color: #F5C842;
+            filter: drop-shadow(0 0 20px rgba(245, 200, 66, 0.15));
+        }
+
+        /* ─── HEADINGS ─── */
+        h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #FFE28A, #8540F5, #3B8CFF);
+            background-size: 300% 300%;
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            margin-bottom: 6px;
+            animation: shimmer 6s ease infinite;
+            letter-spacing: -0.5px;
+        }
+        @keyframes shimmer {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .subtitle {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.85rem;
+            font-weight: 300;
+            margin-bottom: 24px;
+            letter-spacing: 0.5px;
+        }
+
+        /* ─── FLASH MESSAGES ─── */
+        .error,
+        .success {
+            text-align: center;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin: 8px 0 16px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            backdrop-filter: blur(8px);
+        }
+        .error {
+            background: rgba(212, 42, 58, 0.12);
+            color: #FF5A6A;
+            border: 1px solid rgba(212, 42, 58, 0.15);
+            box-shadow: 0 0 30px rgba(212, 42, 58, 0.04);
+        }
+        .success {
+            background: rgba(59, 140, 255, 0.10);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.12);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+
+        /* ─── FORM ─── */
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .input-group {
+            position: relative;
+        }
+        .input-group i {
+            position: absolute;
+            left: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: rgba(255, 255, 255, 0.20);
+            font-size: 1rem;
+            transition: 0.3s;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 16px 16px 16px 48px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.18);
+            font-weight: 300;
+        }
+        .input-group input:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input:focus+i {
+            color: #F5C842;
+        }
+
+        /* ─── BUTTON ─── */
+        .btn-login {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            border: none;
+            border-radius: 14px;
+            color: #080816;
+            font-weight: 800;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2), 0 0 40px rgba(245, 200, 66, 0.04);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 4px;
+        }
+        @keyframes regenGradient {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .btn-login:hover:not(:disabled) {
+            transform: scale(1.02);
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.12), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+        .btn-login:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .btn-login .spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2.5px solid rgba(8, 8, 22, 0.2);
+            border-top-color: #080816;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ─── LINKS ─── */
+        .link {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        .link a {
+            color: #FFE28A;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .link a:hover {
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.15);
+            transform: translateX(-3px);
+        }
+        .link a i {
+            font-size: 0.8rem;
+            transition: 0.3s;
+        }
+        .link a:hover i {
+            transform: translateX(-4px);
+        }
+        .link .forgot-link {
+            display: block;
+            margin-top: 8px;
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.3);
+        }
+        .link .forgot-link:hover {
+            color: #F5C842;
+        }
+
+        /* ─── HAMBURGER MENU ─── */
+        .hamburger-menu {
+            position: fixed;
+            top: 24px;
+            left: 24px;
+            z-index: 1000;
+        }
+        .hamburger-btn {
+            background: rgba(245, 200, 66, 0.06);
+            border: 1px solid rgba(245, 200, 66, 0.12);
+            color: #F5C842;
+            padding: 12px 18px;
+            border-radius: 14px;
+            cursor: pointer;
+            font-size: 1.5rem;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+            line-height: 1;
+        }
+        .hamburger-btn:hover {
+            background: rgba(245, 200, 66, 0.10);
+            border-color: rgba(245, 200, 66, 0.25);
+            transform: scale(1.05);
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.06);
+        }
+
+        .menu-dropdown {
+            display: none;
+            position: absolute;
+            top: 76px;
+            left: 0;
+            background: rgba(8, 8, 22, 0.96);
+            backdrop-filter: blur(24px);
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            border-radius: 18px;
+            padding: 10px 0;
+            min-width: 250px;
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.7), 0 0 60px rgba(245, 200, 66, 0.02);
+        }
+        .menu-dropdown.active {
+            display: block;
+            animation: slideDown 0.3s ease;
+        }
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .menu-title {
+            padding: 8px 24px 4px;
+            color: rgba(255, 255, 255, 0.25);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 2.5px;
+            font-weight: 700;
+        }
+        .menu-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 24px;
+            color: rgba(255, 255, 255, 0.7);
+            text-decoration: none;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+            border-left: 3px solid transparent;
+            gap: 12px;
+        }
+        .menu-item:hover {
+            background: rgba(245, 200, 66, 0.04);
+            border-left-color: #F5C842;
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.05);
+        }
+        .menu-item i {
+            width: 20px;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.2);
+            transition: 0.3s;
+            font-size: 0.9rem;
+        }
+        .menu-item:hover i {
+            color: #F5C842;
+        }
+        .menu-divider {
+            border-top: 1px solid rgba(245, 200, 66, 0.04);
+            margin: 6px 16px;
+        }
+
+        /* ─── SIDEBAR DOWNLOAD BUTTON ─── */
+        .sidebar-download {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin: 10px 16px;
+            padding: 12px 16px;
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 4s ease infinite;
+            border-radius: 14px;
+            text-align: center;
+            font-weight: 800;
+            font-size: 0.85rem;
+            color: #080816 !important;
+            text-decoration: none;
+            box-shadow: 0 5px 30px rgba(245, 200, 66, 0.12);
+            transition: all 0.3s ease;
+            border-left: none !important;
+        }
+        .sidebar-download:hover {
+            transform: scale(1.03);
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.20);
+            color: #080816 !important;
+            background: linear-gradient(135deg, #FFE28A, #9B6BFF, #5A9CFF);
+        }
+        .sidebar-download i {
+            font-size: 1.1rem;
+            color: #080816 !important;
+        }
+
+        /* ─── RESPONSIVE ─── */
+        @media (max-width: 500px) {
+            .main-container {
+                padding: 12px;
+            }
+            .container {
+                padding: 32px 24px 28px;
+            }
+            h2 {
+                font-size: 1.4rem;
+            }
+            .icon-circle {
+                width: 60px;
+                height: 60px;
+            }
+            .icon-circle i {
+                font-size: 1.8rem;
+            }
+            .input-group input {
+                padding: 14px 14px 14px 44px;
+                font-size: 0.95rem;
+            }
+            .btn-login {
+                padding: 14px;
+                font-size: 0.95rem;
+            }
+            .logo-container img {
+                height: 70px;
+            }
+            .hamburger-btn {
+                padding: 10px 14px;
+                font-size: 1.3rem;
+            }
+            .menu-dropdown {
+                min-width: 200px;
+                left: -8px;
+            }
+            .menu-item {
+                padding: 8px 18px;
+                font-size: 0.85rem;
+            }
+            .sidebar-download {
+                padding: 10px 14px;
+                font-size: 0.8rem;
+                margin: 8px 12px;
+            }
+        }
+        @media (max-width: 380px) {
+            .container {
+                padding: 24px 16px 20px;
+            }
+            .input-group input {
+                padding: 12px 12px 12px 38px;
+                font-size: 0.9rem;
+            }
+            .logo-container img {
+                height: 60px;
+            }
+        }
     </style>
 </head>
 <body>
+
+    <!-- ─── BACKGROUND ANIMATION ─── -->
+    <div class="bg-animation">
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+    </div>
+    <div class="particles" id="particles"></div>
+
+    <!-- ─── HAMBURGER MENU ─── -->
     <div class="hamburger-menu">
-        <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
+        <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Toggle menu">
+            <i class="fas fa-bars"></i>
+        </button>
         <div class="menu-dropdown" id="menuDropdown">
             <div class="menu-title">🚀 Premium App</div>
             <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download">
                 <i class="fas fa-download"></i> DOWNLOAD APK
             </a>
             
+            <!-- নতুন ভিডিও লিঙ্ক অপশন এখানে -->
+            <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item">
+                <i class="fas fa-play-circle" style="color: #00FF7F;"></i> Watch Video
+            </a>
+
             <div class="menu-divider"></div>
             <div class="menu-title">🔐 Authentication</div>
             <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
             <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
-            
-            <div class="menu-divider"></div>
-            <div class="menu-title">📱 Social Connect</div>
-            <a href="https://t.me/MAHIR0208" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram (Admin)</a>
-            <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok Profile</a>
-            
+            <a href="{{ url_for('recover') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+
             <div class="menu-divider"></div>
             <div class="menu-title">👥 Roles</div>
             <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
             <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+
+            <div class="menu-divider"></div>
+            <div class="menu-title">📱 Social Connect</div>
+            <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram ID</a>
+            <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok ID</a>
+
+            <div class="menu-divider"></div>
+            <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
         </div>
     </div>
 
+    <!-- ─── MAIN CARD ─── -->
     <div class="main-container">
+
+        <!-- Logo -->
         <div class="logo-container">
-            <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo">
+            <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo" />
         </div>
+
         <div class="container">
-            <h2>🔐 Login</h2>
+
+            <!-- Icon -->
+            <div class="icon-circle">
+                <i class="fas fa-lock"></i>
+            </div>
+
+            <h2>Welcome Back</h2>
+            <p class="subtitle">Sign in to your account</p>
+
+            <!-- Flash Messages -->
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
-                        <div class="error">{{ message }}</div>
+                        <div class="{{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>
                     {% endfor %}
                 {% endif %}
             {% endwith %}
-            
-            <form method="POST">
-                <input type="text" name="username" placeholder="Username" required>
-                <input type="password" name="password" placeholder="Password" required>
-                <button type="submit">Login</button>
+
+            <!-- Form -->
+            <form method="POST" id="loginForm">
+                <div class="input-group">
+                    <i class="fas fa-user"></i>
+                    <input type="text" name="username" placeholder="Username" required autocomplete="username" />
+                </div>
+                <div class="input-group">
+                    <i class="fas fa-lock"></i>
+                    <input type="password" name="password" placeholder="Password" required autocomplete="current-password" />
+                </div>
+                <button type="submit" class="btn-login" id="loginBtn">
+                    <i class="fas fa-sign-in-alt"></i> Login
+                </button>
             </form>
-            <div class="link"><a href="{{ url_for('register') }}">Don't have account? Register</a></div>
+
+            <div class="link">
+                <a href="{{ url_for('register') }}"><i class="fas fa-arrow-left"></i> Don't have account? Register</a>
+                <a href="{{ url_for('recover') }}" class="forgot-link"><i class="fas fa-key"></i> Forgot Password?</a>
+            </div>
         </div>
     </div>
 
+    <!-- ─── JAVASCRIPT ─── -->
     <script>
+        // ─── PARTICLES ───
+        (function createParticles() {
+            const container = document.getElementById('particles');
+            if (!container) return;
+            for (let i = 0; i < 50; i++) {
+                const p = document.createElement('div');
+                p.className = 'particle';
+                const s = Math.random() * 4 + 2;
+                p.style.width = s + 'px';
+                p.style.height = s + 'px';
+                p.style.left = Math.random() * 100 + '%';
+                p.style.top = Math.random() * 100 + '%';
+                p.style.animationDelay = Math.random() * 20 + 's';
+                p.style.animationDuration = Math.random() * 20 + 12 + 's';
+                container.appendChild(p);
+            }
+        })();
+
+        // ─── HAMBURGER MENU ───
         function toggleMenu() {
             document.getElementById('menuDropdown').classList.toggle('active');
         }
+
         document.addEventListener('click', function(e) {
             const menu = document.querySelector('.hamburger-menu');
-            if (!menu.contains(e.target)) {
+            if (menu && !menu.contains(e.target)) {
+                document.getElementById('menuDropdown').classList.remove('active');
+            }
+        });
+
+        // ─── FORM LOADING STATE ───
+        document.getElementById('loginForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('loginBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Authenticating...';
+            }
+        });
+
+        // ─── CLOSE MENU ON ESC ───
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
                 document.getElementById('menuDropdown').classList.remove('active');
             }
         });
     </script>
+
 </body>
 </html>
 '''
@@ -2081,44 +5887,595 @@ REGISTER_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>MAHIR Bot Deployer - Register</title>
+    <title>MAHIR PREMIUM - Register</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .main-container { width: 100%; max-width: 450px; padding: 20px; }
-        .logo-container { text-align: center; margin-bottom: 20px; }
-        .logo-container img { height: 100px; border-radius: 20px; box-shadow: 0 10px 30px rgba(124,58,237,0.3); }
-        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); position: relative; }
-        h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
-        input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
-        input:focus { outline: none; border-color: #7c3aed; }
-        button { width: 100%; padding: 14px; background: linear-gradient(135deg, #7c3aed, #2563eb); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
-        button:hover { transform: scale(1.02); }
-        .error { color: #f87171; text-align: center; margin: 10px 0; }
-        .success { color: #4ade80; text-align: center; margin: 10px 0; }
-        .link { text-align: center; margin-top: 15px; }
-        .link a { color: #c084fc; text-decoration: none; }
-        .link a:hover { text-decoration: underline; }
+        /* ─── RESET & BASE ─── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #080816;
+            color: #e8e8f8;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            position: relative;
+            overflow-x: hidden;
+        }
 
-        .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
-        .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
-        .hamburger-btn:hover { background: rgba(124,58,237,0.5); transform: scale(1.05); }
-        .menu-dropdown { display: none; position: absolute; top: 70px; left: 0; background: rgba(15,12,41,0.95); backdrop-filter: blur(20px); border: 1px solid #7c3aed; border-radius: 16px; padding: 12px 0; min-width: 220px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
-        .menu-dropdown.active { display: block; animation: slideDown 0.3s ease; }
-        @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-        .menu-item { display: block; padding: 12px 24px; color: #e2e8f0; text-decoration: none; transition: 0.3s; font-size: 0.95rem; border-left: 3px solid transparent; }
-        .menu-item:hover { background: rgba(124,58,237,0.15); border-left-color: #7c3aed; color: #c084fc; }
-        .menu-item i { width: 24px; margin-right: 12px; color: #a78bfa; }
-        .menu-divider { border-top: 1px solid #302b63; margin: 6px 12px; }
-        .menu-title { padding: 8px 24px; color: #a78bfa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; }
+        /* ─── PREMIUM LUXE THEME ─── */
+        :root {
+            --gold: #F5C842;
+            --gold-light: #FFE28A;
+            --gold-dark: #C99A1A;
+            --gold-glow: 0 0 40px rgba(245, 200, 66, 0.35), 0 0 80px rgba(245, 200, 66, 0.12);
+
+            --royal-purple: #8540F5;
+            --royal-purple-light: #B388FF;
+            --electric-blue: #3B8CFF;
+            --crimson: #D42A3A;
+
+            --card-bg: rgba(8, 8, 22, 0.92);
+            --border-glow: 0 0 40px rgba(245, 200, 66, 0.08), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+
+        /* ─── BACKGROUND ANIMATION ─── */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .bg-animation .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.14;
+            animation: orbFloat 30s infinite ease-in-out;
+        }
+        .bg-animation .orb:nth-child(1) {
+            width: 700px;
+            height: 700px;
+            background: #F5C842;
+            top: -20%;
+            left: -20%;
+            animation-delay: 0s;
+        }
+        .bg-animation .orb:nth-child(2) {
+            width: 600px;
+            height: 600px;
+            background: #8540F5;
+            bottom: -20%;
+            right: -20%;
+            animation-delay: -10s;
+        }
+        .bg-animation .orb:nth-child(3) {
+            width: 500px;
+            height: 500px;
+            background: #3B8CFF;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -18s;
+        }
+        .bg-animation .orb:nth-child(4) {
+            width: 400px;
+            height: 400px;
+            background: #D42A3A;
+            top: 15%;
+            left: 70%;
+            animation-delay: -7s;
+            opacity: 0.10;
+        }
+        @keyframes orbFloat {
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+            25% {
+                transform: translate(80px, -120px) scale(1.15);
+            }
+            50% {
+                transform: translate(-60px, 100px) scale(0.85);
+            }
+            75% {
+                transform: translate(120px, 60px) scale(1.08);
+            }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: rgba(245, 200, 66, 0.10);
+            border-radius: 50%;
+            animation: particleFloat 20s infinite ease-in-out;
+        }
+        .particle:nth-child(odd) {
+            background: rgba(133, 64, 245, 0.08);
+        }
+        .particle:nth-child(3n) {
+            background: rgba(59, 140, 255, 0.06);
+        }
+        @keyframes particleFloat {
+            0%,
+            100% {
+                transform: translateY(0px) translateX(0px);
+                opacity: 0.1;
+            }
+            25% {
+                transform: translateY(-260px) translateX(80px);
+                opacity: 0.6;
+            }
+            50% {
+                transform: translateY(-140px) translateX(140px);
+                opacity: 0.3;
+            }
+            75% {
+                transform: translateY(80px) translateX(80px);
+                opacity: 0.7;
+            }
+        }
+
+        /* ─── MAIN CONTAINER ─── */
+        .main-container {
+            width: 100%;
+            max-width: 480px;
+            padding: 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ─── LOGO ─── */
+        .logo-container {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .logo-container img {
+            height: 90px;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(245, 200, 66, 0.15), 0 0 60px rgba(245, 200, 66, 0.04);
+            animation: logoGlow 4s ease-in-out infinite;
+            transition: transform 0.4s ease;
+        }
+        .logo-container img:hover {
+            transform: scale(1.04);
+        }
+        @keyframes logoGlow {
+            0%,
+            100% {
+                filter: drop-shadow(0 0 15px rgba(245, 200, 66, 0.15));
+            }
+            50% {
+                filter: drop-shadow(0 0 40px rgba(245, 200, 66, 0.30)) drop-shadow(0 0 80px rgba(133, 64, 245, 0.10));
+            }
+        }
+
+        /* ─── CARD ─── */
+        .container {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            padding: 44px 40px 40px;
+            border-radius: 32px;
+            border: 1px solid rgba(245, 200, 66, 0.10);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), var(--border-glow), 0 0 60px rgba(245, 200, 66, 0.03);
+            position: relative;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(50px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        /* ─── ICON ─── */
+        .icon-circle {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.12), rgba(133, 64, 245, 0.08));
+            border: 2px solid rgba(245, 200, 66, 0.15);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            box-shadow: 0 0 50px rgba(245, 200, 66, 0.06);
+        }
+        .icon-circle i {
+            font-size: 2.2rem;
+            color: #F5C842;
+            filter: drop-shadow(0 0 20px rgba(245, 200, 66, 0.15));
+        }
+
+        /* ─── HEADINGS ─── */
+        h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #FFE28A, #8540F5, #3B8CFF);
+            background-size: 300% 300%;
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            margin-bottom: 6px;
+            animation: shimmer 6s ease infinite;
+            letter-spacing: -0.5px;
+        }
+        @keyframes shimmer {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .subtitle {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 0.85rem;
+            font-weight: 300;
+            margin-bottom: 24px;
+            letter-spacing: 0.5px;
+        }
+
+        /* ─── FLASH MESSAGES ─── */
+        .error,
+        .success {
+            text-align: center;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin: 8px 0 16px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            backdrop-filter: blur(8px);
+        }
+        .error {
+            background: rgba(212, 42, 58, 0.12);
+            color: #FF5A6A;
+            border: 1px solid rgba(212, 42, 58, 0.15);
+            box-shadow: 0 0 30px rgba(212, 42, 58, 0.04);
+        }
+        .success {
+            background: rgba(59, 140, 255, 0.10);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.12);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+
+        /* ─── FORM ─── */
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .input-group {
+            position: relative;
+        }
+        .input-group i {
+            position: absolute;
+            left: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: rgba(255, 255, 255, 0.20);
+            font-size: 1rem;
+            transition: 0.3s;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 16px 16px 16px 48px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.18);
+            font-weight: 300;
+        }
+        .input-group input:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input:focus+i {
+            color: #F5C842;
+        }
+
+        /* ─── BUTTON ─── */
+        .btn-register {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            border: none;
+            border-radius: 14px;
+            color: #080816;
+            font-weight: 800;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2), 0 0 40px rgba(245, 200, 66, 0.04);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 4px;
+        }
+        @keyframes regenGradient {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .btn-register:hover:not(:disabled) {
+            transform: scale(1.02);
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.12), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+        .btn-register:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .btn-register .spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2.5px solid rgba(8, 8, 22, 0.2);
+            border-top-color: #080816;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ─── LINKS ─── */
+        .link {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        .link a {
+            color: #FFE28A;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .link a:hover {
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.15);
+            transform: translateX(-3px);
+        }
+        .link a i {
+            font-size: 0.8rem;
+            transition: 0.3s;
+        }
+        .link a:hover i {
+            transform: translateX(-4px);
+        }
+
+        /* ─── HAMBURGER MENU ─── */
+        .hamburger-menu {
+            position: fixed;
+            top: 24px;
+            left: 24px;
+            z-index: 1000;
+        }
+        .hamburger-btn {
+            background: rgba(245, 200, 66, 0.06);
+            border: 1px solid rgba(245, 200, 66, 0.12);
+            color: #F5C842;
+            padding: 12px 18px;
+            border-radius: 14px;
+            cursor: pointer;
+            font-size: 1.5rem;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+            line-height: 1;
+        }
+        .hamburger-btn:hover {
+            background: rgba(245, 200, 66, 0.10);
+            border-color: rgba(245, 200, 66, 0.25);
+            transform: scale(1.05);
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.06);
+        }
+
+        .menu-dropdown {
+            display: none;
+            position: absolute;
+            top: 76px;
+            left: 0;
+            background: rgba(8, 8, 22, 0.96);
+            backdrop-filter: blur(24px);
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            border-radius: 18px;
+            padding: 10px 0;
+            min-width: 240px;
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.7), 0 0 60px rgba(245, 200, 66, 0.02);
+        }
+        .menu-dropdown.active {
+            display: block;
+            animation: slideDown 0.3s ease;
+        }
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .menu-title {
+            padding: 8px 24px 4px;
+            color: rgba(255, 255, 255, 0.25);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 2.5px;
+            font-weight: 700;
+        }
+        .menu-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 24px;
+            color: rgba(255, 255, 255, 0.7);
+            text-decoration: none;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+            border-left: 3px solid transparent;
+            gap: 12px;
+        }
+        .menu-item:hover {
+            background: rgba(245, 200, 66, 0.04);
+            border-left-color: #F5C842;
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.05);
+        }
+        .menu-item i {
+            width: 20px;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.2);
+            transition: 0.3s;
+            font-size: 0.9rem;
+        }
+        .menu-item:hover i {
+            color: #F5C842;
+        }
+        .menu-divider {
+            border-top: 1px solid rgba(245, 200, 66, 0.04);
+            margin: 6px 16px;
+        }
+
+        /* ─── RESPONSIVE ─── */
+        @media (max-width: 500px) {
+            .main-container {
+                padding: 12px;
+            }
+            .container {
+                padding: 32px 24px 28px;
+            }
+            h2 {
+                font-size: 1.4rem;
+            }
+            .icon-circle {
+                width: 60px;
+                height: 60px;
+            }
+            .icon-circle i {
+                font-size: 1.8rem;
+            }
+            .input-group input {
+                padding: 14px 14px 14px 44px;
+                font-size: 0.95rem;
+            }
+            .btn-register {
+                padding: 14px;
+                font-size: 0.95rem;
+            }
+            .logo-container img {
+                height: 70px;
+            }
+            .hamburger-btn {
+                padding: 10px 14px;
+                font-size: 1.3rem;
+            }
+            .menu-dropdown {
+                min-width: 200px;
+                left: -8px;
+            }
+            .menu-item {
+                padding: 8px 18px;
+                font-size: 0.85rem;
+            }
+        }
+        @media (max-width: 380px) {
+            .container {
+                padding: 24px 16px 20px;
+            }
+            .input-group input {
+                padding: 12px 12px 12px 38px;
+                font-size: 0.9rem;
+            }
+            .logo-container img {
+                height: 60px;
+            }
+        }
     </style>
 </head>
 <body>
+
+    <!-- ─── BACKGROUND ANIMATION ─── -->
+    <div class="bg-animation">
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+    </div>
+    <div class="particles" id="particles"></div>
+
+    <!-- ─── HAMBURGER MENU ─── -->
     <div class="hamburger-menu">
-        <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
+        <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Toggle menu">
+            <i class="fas fa-bars"></i>
+        </button>
         <div class="menu-dropdown" id="menuDropdown">
             <div class="menu-title">🚀 Premium App</div>
-            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="menu-item"><i class="fas fa-download"></i> Download APK</a>
+            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download">
+                <i class="fas fa-download"></i> DOWNLOAD APK
+            </a>
+            
+            <!-- নতুন ভিডিও লিঙ্ক অপশন এখানে -->
+            <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item">
+                <i class="fas fa-play-circle" style="color: #00FF7F;"></i> Watch Video
+            </a>
+
             <div class="menu-divider"></div>
             <div class="menu-title">🔐 Authentication</div>
             <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
@@ -2130,48 +6487,118 @@ REGISTER_HTML = '''
             <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
             <div class="menu-divider"></div>
             <div class="menu-title">📱 Social Connect</div>
-            <a href="https://t.me/MAHIR0208" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram ID</a>
+            <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram ID</a>
             <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok ID</a>
             <div class="menu-divider"></div>
             <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
         </div>
     </div>
 
+    <!-- ─── MAIN CARD ─── -->
     <div class="main-container">
+
+        <!-- Logo -->
         <div class="logo-container">
-            <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo">
+            <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo" />
         </div>
+
         <div class="container">
-            <h2>📝 Register</h2>
+
+            <!-- Icon -->
+            <div class="icon-circle">
+                <i class="fas fa-user-plus"></i>
+            </div>
+
+            <h2>Create Account</h2>
+            <p class="subtitle">Join the MAHIR network</p>
+
+            <!-- Flash Messages -->
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
-                        <div class="{{ category }}">{{ message }}</div>
+                        <div class="{{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>
                     {% endfor %}
                 {% endif %}
             {% endwith %}
-            <form method="POST">
-                <input type="text" name="username" placeholder="Username" required>
-                <input type="password" name="password" placeholder="Password" required>
-                <input type="email" name="email" placeholder="Email (optional)">
-                <input type="text" name="registration_key" placeholder="Registration Key" required>
-                <button type="submit">Register</button>
+
+            <!-- Form -->
+            <form method="POST" id="registerForm">
+                <div class="input-group">
+                    <i class="fas fa-user"></i>
+                    <input type="text" name="username" placeholder="Username" required autocomplete="username" />
+                </div>
+                <div class="input-group">
+                    <i class="fas fa-lock"></i>
+                    <input type="password" name="password" placeholder="Password" required autocomplete="new-password" />
+                </div>
+                <div class="input-group">
+                    <i class="fas fa-envelope"></i>
+                    <input type="email" name="email" placeholder="Email (optional)" autocomplete="email" />
+                </div>
+                <div class="input-group">
+                    <i class="fas fa-key"></i>
+                    <input type="text" name="registration_key" placeholder="Registration Key" required />
+                </div>
+                <button type="submit" class="btn-register" id="registerBtn">
+                    <i class="fas fa-paper-plane"></i> Register
+                </button>
             </form>
-            <div class="link"><a href="{{ url_for('login') }}">Already have account? Login</a></div>
+
+            <div class="link">
+                <a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Already have account? Login</a>
+            </div>
         </div>
     </div>
 
+    <!-- ─── JAVASCRIPT ─── -->
     <script>
+        // ─── PARTICLES ───
+        (function createParticles() {
+            const container = document.getElementById('particles');
+            if (!container) return;
+            for (let i = 0; i < 50; i++) {
+                const p = document.createElement('div');
+                p.className = 'particle';
+                const s = Math.random() * 4 + 2;
+                p.style.width = s + 'px';
+                p.style.height = s + 'px';
+                p.style.left = Math.random() * 100 + '%';
+                p.style.top = Math.random() * 100 + '%';
+                p.style.animationDelay = Math.random() * 20 + 's';
+                p.style.animationDuration = Math.random() * 20 + 12 + 's';
+                container.appendChild(p);
+            }
+        })();
+
+        // ─── HAMBURGER MENU ───
         function toggleMenu() {
             document.getElementById('menuDropdown').classList.toggle('active');
         }
+
         document.addEventListener('click', function(e) {
             const menu = document.querySelector('.hamburger-menu');
-            if (!menu.contains(e.target)) {
+            if (menu && !menu.contains(e.target)) {
+                document.getElementById('menuDropdown').classList.remove('active');
+            }
+        });
+
+        // ─── FORM LOADING STATE ───
+        document.getElementById('registerForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('registerBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Processing...';
+            }
+        });
+
+        // ─── CLOSE MENU ON ESC ───
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
                 document.getElementById('menuDropdown').classList.remove('active');
             }
         });
     </script>
+
 </body>
 </html>
 '''
@@ -2180,42 +6607,575 @@ RECOVER_HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Recover Password - MAHIR</title>
+    <title>Recover Password - MAHIR PREMIUM</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
     <style>
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .container { background: rgba(15,12,41,0.9); padding: 40px; border-radius: 30px; width: 400px; border: 1px solid #7c3aed; box-shadow: 0 20px 60px rgba(0,0,0,0.5); position: relative; }
-        h2 { text-align: center; color: #c084fc; margin-bottom: 20px; }
-        input { width: 100%; padding: 14px; margin: 10px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
-        input:focus { outline: none; border-color: #7c3aed; }
-        button { width: 100%; padding: 14px; background: linear-gradient(135deg, #7c3aed, #2563eb); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
-        button:hover { transform: scale(1.02); }
-        .error { color: #f87171; text-align: center; margin: 10px 0; }
-        .success { color: #4ade80; text-align: center; margin: 10px 0; }
-        .link { text-align: center; margin-top: 15px; }
-        .link a { color: #c084fc; text-decoration: none; }
-        .password-box { background: #1a1a3e; padding: 15px; border-radius: 12px; border: 1px solid #7c3aed; margin: 10px 0; word-break: break-all; }
-        .password-box code { color: #fbbf24; font-size: 1.1rem; }
+        /* ─── RESET & BASE ─── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #080816;
+            color: #e8e8f8;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            position: relative;
+            overflow-x: hidden;
+        }
 
-        .hamburger-menu { position: fixed; top: 20px; left: 20px; z-index: 1000; }
-        .hamburger-btn { background: rgba(124,58,237,0.3); border: 1px solid rgba(124,58,237,0.5); color: #c084fc; padding: 12px 16px; border-radius: 12px; cursor: pointer; font-size: 1.5rem; transition: 0.3s; backdrop-filter: blur(10px); }
-        .hamburger-btn:hover { background: rgba(124,58,237,0.5); transform: scale(1.05); }
-        .menu-dropdown { display: none; position: absolute; top: 70px; left: 0; background: rgba(15,12,41,0.95); backdrop-filter: blur(20px); border: 1px solid #7c3aed; border-radius: 16px; padding: 12px 0; min-width: 220px; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
-        .menu-dropdown.active { display: block; animation: slideDown 0.3s ease; }
-        @keyframes slideDown { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-        .menu-item { display: block; padding: 12px 24px; color: #e2e8f0; text-decoration: none; transition: 0.3s; font-size: 0.95rem; border-left: 3px solid transparent; }
-        .menu-item:hover { background: rgba(124,58,237,0.15); border-left-color: #7c3aed; color: #c084fc; }
-        .menu-item i { width: 24px; margin-right: 12px; color: #a78bfa; }
-        .menu-divider { border-top: 1px solid #302b63; margin: 6px 12px; }
-        .menu-title { padding: 8px 24px; color: #a78bfa; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 600; }
+        /* ─── PREMIUM LUXE THEME ─── */
+        :root {
+            --gold: #F5C842;
+            --gold-light: #FFE28A;
+            --gold-dark: #C99A1A;
+            --gold-glow: 0 0 40px rgba(245, 200, 66, 0.35), 0 0 80px rgba(245, 200, 66, 0.12);
+
+            --royal-purple: #8540F5;
+            --royal-purple-light: #B388FF;
+            --electric-blue: #3B8CFF;
+            --crimson: #D42A3A;
+
+            --card-bg: rgba(8, 8, 22, 0.92);
+            --border-glow: 0 0 40px rgba(245, 200, 66, 0.08), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+
+        /* ─── BACKGROUND ANIMATION ─── */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            overflow: hidden;
+            pointer-events: none;
+        }
+        .bg-animation .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.14;
+            animation: orbFloat 30s infinite ease-in-out;
+        }
+        .bg-animation .orb:nth-child(1) {
+            width: 700px;
+            height: 700px;
+            background: #F5C842;
+            top: -20%;
+            left: -20%;
+            animation-delay: 0s;
+        }
+        .bg-animation .orb:nth-child(2) {
+            width: 600px;
+            height: 600px;
+            background: #8540F5;
+            bottom: -20%;
+            right: -20%;
+            animation-delay: -10s;
+        }
+        .bg-animation .orb:nth-child(3) {
+            width: 500px;
+            height: 500px;
+            background: #3B8CFF;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -18s;
+        }
+        .bg-animation .orb:nth-child(4) {
+            width: 400px;
+            height: 400px;
+            background: #D42A3A;
+            top: 15%;
+            left: 70%;
+            animation-delay: -7s;
+            opacity: 0.10;
+        }
+        @keyframes orbFloat {
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+            25% {
+                transform: translate(80px, -120px) scale(1.15);
+            }
+            50% {
+                transform: translate(-60px, 100px) scale(0.85);
+            }
+            75% {
+                transform: translate(120px, 60px) scale(1.08);
+            }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: rgba(245, 200, 66, 0.10);
+            border-radius: 50%;
+            animation: particleFloat 20s infinite ease-in-out;
+        }
+        .particle:nth-child(odd) {
+            background: rgba(133, 64, 245, 0.08);
+        }
+        .particle:nth-child(3n) {
+            background: rgba(59, 140, 255, 0.06);
+        }
+        @keyframes particleFloat {
+            0%,
+            100% {
+                transform: translateY(0px) translateX(0px);
+                opacity: 0.1;
+            }
+            25% {
+                transform: translateY(-260px) translateX(80px);
+                opacity: 0.6;
+            }
+            50% {
+                transform: translateY(-140px) translateX(140px);
+                opacity: 0.3;
+            }
+            75% {
+                transform: translateY(80px) translateX(80px);
+                opacity: 0.7;
+            }
+        }
+
+        /* ─── CONTAINER ─── */
+        .container {
+            background: var(--card-bg);
+            backdrop-filter: blur(24px);
+            padding: 44px 40px 40px;
+            border-radius: 32px;
+            width: 420px;
+            max-width: 95%;
+            border: 1px solid rgba(245, 200, 66, 0.12);
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), var(--border-glow), 0 0 60px rgba(245, 200, 66, 0.04);
+            position: relative;
+            z-index: 1;
+            animation: slideUp 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(50px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        /* ─── LOGO / ICON ─── */
+        .icon-circle {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.12), rgba(133, 64, 245, 0.08));
+            border: 2px solid rgba(245, 200, 66, 0.15);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px;
+            box-shadow: 0 0 50px rgba(245, 200, 66, 0.06);
+        }
+        .icon-circle i {
+            font-size: 2.2rem;
+            color: #F5C842;
+            filter: drop-shadow(0 0 20px rgba(245, 200, 66, 0.15));
+        }
+
+        /* ─── HEADINGS ─── */
+        h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #FFE28A, #8540F5, #3B8CFF);
+            background-size: 300% 300%;
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            margin-bottom: 6px;
+            animation: shimmer 6s ease infinite;
+            letter-spacing: -0.5px;
+        }
+        @keyframes shimmer {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .subtitle {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 0.85rem;
+            font-weight: 300;
+            margin-bottom: 24px;
+            letter-spacing: 0.5px;
+        }
+
+        /* ─── FLASH MESSAGES ─── */
+        .error,
+        .success {
+            text-align: center;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin: 8px 0 16px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            backdrop-filter: blur(8px);
+        }
+        .error {
+            background: rgba(212, 42, 58, 0.12);
+            color: #FF5A6A;
+            border: 1px solid rgba(212, 42, 58, 0.15);
+            box-shadow: 0 0 30px rgba(212, 42, 58, 0.04);
+        }
+        .success {
+            background: rgba(59, 140, 255, 0.10);
+            color: #3B8CFF;
+            border: 1px solid rgba(59, 140, 255, 0.12);
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.04);
+        }
+
+        /* ─── PASSWORD RESULT BOX ─── */
+        .password-box {
+            background: rgba(0, 0, 0, 0.5);
+            padding: 16px 20px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.08);
+            margin: 12px 0 16px;
+            word-break: break-all;
+            box-shadow: inset 0 4px 30px rgba(0, 0, 0, 0.3);
+        }
+        .password-box code {
+            color: #F5C842;
+            font-size: 1.1rem;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-shadow: 0 0 20px rgba(245, 200, 66, 0.10);
+        }
+
+        /* ─── FORM ─── */
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .input-group {
+            position: relative;
+        }
+        .input-group i {
+            position: absolute;
+            left: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: rgba(255, 255, 255, 0.25);
+            font-size: 1rem;
+            transition: 0.3s;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 16px 16px 16px 48px;
+            border-radius: 14px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.2);
+            font-weight: 300;
+        }
+        .input-group input:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .input-group input:focus+i {
+            color: #F5C842;
+        }
+
+        /* ─── BUTTON ─── */
+        .btn-recover {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            border: none;
+            border-radius: 14px;
+            color: #080816;
+            font-weight: 800;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2), 0 0 40px rgba(245, 200, 66, 0.04);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 4px;
+        }
+        @keyframes regenGradient {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .btn-recover:hover:not(:disabled) {
+            transform: scale(1.02);
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.12), 0 0 80px rgba(133, 64, 245, 0.06);
+        }
+        .btn-recover:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .btn-recover .spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2.5px solid rgba(8, 8, 22, 0.2);
+            border-top-color: #080816;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ─── LINKS ─── */
+        .link {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid rgba(245, 200, 66, 0.04);
+        }
+        .link a {
+            color: #FFE28A;
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .link a:hover {
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.15);
+            transform: translateX(-3px);
+        }
+        .link a i {
+            font-size: 0.8rem;
+            transition: 0.3s;
+        }
+        .link a:hover i {
+            transform: translateX(-4px);
+        }
+
+        /* ─── HAMBURGER MENU ─── */
+        .hamburger-menu {
+            position: fixed;
+            top: 24px;
+            left: 24px;
+            z-index: 1000;
+        }
+        .hamburger-btn {
+            background: rgba(245, 200, 66, 0.06);
+            border: 1px solid rgba(245, 200, 66, 0.12);
+            color: #F5C842;
+            padding: 12px 18px;
+            border-radius: 14px;
+            cursor: pointer;
+            font-size: 1.5rem;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+            line-height: 1;
+        }
+        .hamburger-btn:hover {
+            background: rgba(245, 200, 66, 0.10);
+            border-color: rgba(245, 200, 66, 0.25);
+            transform: scale(1.05);
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.06);
+        }
+
+        .menu-dropdown {
+            display: none;
+            position: absolute;
+            top: 76px;
+            left: 0;
+            background: rgba(8, 8, 22, 0.96);
+            backdrop-filter: blur(24px);
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            border-radius: 18px;
+            padding: 10px 0;
+            min-width: 240px;
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.7), 0 0 60px rgba(245, 200, 66, 0.02);
+        }
+        .menu-dropdown.active {
+            display: block;
+            animation: slideDown 0.3s ease;
+        }
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px) scale(0.96);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+        .menu-title {
+            padding: 8px 24px 4px;
+            color: rgba(255, 255, 255, 0.25);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 2.5px;
+            font-weight: 700;
+        }
+        .menu-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 24px;
+            color: rgba(255, 255, 255, 0.7);
+            text-decoration: none;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+            border-left: 3px solid transparent;
+            gap: 12px;
+        }
+        .menu-item:hover {
+            background: rgba(245, 200, 66, 0.04);
+            border-left-color: #F5C842;
+            color: #F5C842;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.05);
+        }
+        .menu-item i {
+            width: 20px;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.2);
+            transition: 0.3s;
+            font-size: 0.9rem;
+        }
+        .menu-item:hover i {
+            color: #F5C842;
+        }
+        .menu-divider {
+            border-top: 1px solid rgba(245, 200, 66, 0.04);
+            margin: 6px 16px;
+        }
+
+        /* ─── RESPONSIVE ─── */
+        @media (max-width: 480px) {
+            .container {
+                padding: 32px 24px 28px;
+                width: 100%;
+                margin: 0 12px;
+            }
+            h2 {
+                font-size: 1.4rem;
+            }
+            .icon-circle {
+                width: 60px;
+                height: 60px;
+            }
+            .icon-circle i {
+                font-size: 1.8rem;
+            }
+            .input-group input {
+                padding: 14px 14px 14px 44px;
+                font-size: 0.95rem;
+            }
+            .btn-recover {
+                padding: 14px;
+                font-size: 0.95rem;
+            }
+            .hamburger-btn {
+                padding: 10px 14px;
+                font-size: 1.3rem;
+            }
+            .menu-dropdown {
+                min-width: 200px;
+                left: -8px;
+            }
+            .menu-item {
+                padding: 8px 18px;
+                font-size: 0.85rem;
+            }
+        }
+        @media (max-width: 380px) {
+            .container {
+                padding: 24px 16px 20px;
+            }
+            .input-group input {
+                padding: 12px 12px 12px 38px;
+                font-size: 0.9rem;
+            }
+        }
     </style>
 </head>
 <body>
+
+    <!-- ─── BACKGROUND ANIMATION ─── -->
+    <div class="bg-animation">
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+        <div class="orb"></div>
+    </div>
+    <div class="particles" id="particles"></div>
+
+    <!-- ─── HAMBURGER MENU ─── -->
     <div class="hamburger-menu">
-        <button class="hamburger-btn" onclick="toggleMenu()">☰</button>
+        <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Toggle menu">
+            <i class="fas fa-bars"></i>
+        </button>
         <div class="menu-dropdown" id="menuDropdown">
             <div class="menu-title">🚀 Premium App</div>
-            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="menu-item"><i class="fas fa-download"></i> Download APK</a>
+            <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download">
+                <i class="fas fa-download"></i> DOWNLOAD APK
+            </a>
+            
+            <!-- নতুন ভিডিও লিঙ্ক অপশন এখানে -->
+            <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item">
+                <i class="fas fa-play-circle" style="color: #00FF7F;"></i> Watch Video
+            </a>
+
             <div class="menu-divider"></div>
             <div class="menu-title">🔐 Authentication</div>
             <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
@@ -2227,41 +7187,102 @@ RECOVER_HTML = '''
             <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
             <div class="menu-divider"></div>
             <div class="menu-title">📱 Social Connect</div>
-            <a href="https://t.me/MAHIR0208" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram ID</a>
+            <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram ID</a>
             <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok ID</a>
             <div class="menu-divider"></div>
             <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
         </div>
     </div>
 
+    <!-- ─── MAIN CARD ─── -->
     <div class="container">
-        <h2>🔑 Recover Password</h2>
+
+        <!-- Icon -->
+        <div class="icon-circle">
+            <i class="fas fa-key"></i>
+        </div>
+
+        <h2>Recover Password</h2>
+        <p class="subtitle">Enter your credentials to reset your password</p>
+
+        <!-- Flash Messages -->
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
-                    <div class="{{ category }}">{{ message }}</div>
+                    <div class="{{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>
                 {% endfor %}
             {% endif %}
         {% endwith %}
-        <form method="POST">
-            <input type="text" name="username" placeholder="Username" required>
-            <input type="email" name="email" placeholder="Email" required>
-            <button type="submit">Recover Password</button>
+
+        <!-- Form -->
+        <form method="POST" id="recoverForm">
+            <div class="input-group">
+                <i class="fas fa-user"></i>
+                <input type="text" name="username" placeholder="Username" required autocomplete="username" />
+            </div>
+            <div class="input-group">
+                <i class="fas fa-envelope"></i>
+                <input type="email" name="email" placeholder="Email Address" required autocomplete="email" />
+            </div>
+            <button type="submit" class="btn-recover" id="recoverBtn">
+                <i class="fas fa-paper-plane"></i> Recover Password
+            </button>
         </form>
-        <div class="link"><a href="{{ url_for('login') }}">Back to Login</a></div>
+
+        <div class="link">
+            <a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Back to Login</a>
+        </div>
     </div>
 
+    <!-- ─── JAVASCRIPT ─── -->
     <script>
+        // ─── PARTICLES ───
+        (function createParticles() {
+            const container = document.getElementById('particles');
+            if (!container) return;
+            for (let i = 0; i < 50; i++) {
+                const p = document.createElement('div');
+                p.className = 'particle';
+                const s = Math.random() * 4 + 2;
+                p.style.width = s + 'px';
+                p.style.height = s + 'px';
+                p.style.left = Math.random() * 100 + '%';
+                p.style.top = Math.random() * 100 + '%';
+                p.style.animationDelay = Math.random() * 20 + 's';
+                p.style.animationDuration = Math.random() * 20 + 12 + 's';
+                container.appendChild(p);
+            }
+        })();
+
+        // ─── HAMBURGER MENU ───
         function toggleMenu() {
             document.getElementById('menuDropdown').classList.toggle('active');
         }
+
         document.addEventListener('click', function(e) {
             const menu = document.querySelector('.hamburger-menu');
-            if (!menu.contains(e.target)) {
+            if (menu && !menu.contains(e.target)) {
+                document.getElementById('menuDropdown').classList.remove('active');
+            }
+        });
+
+        // ─── FORM LOADING STATE ───
+        document.getElementById('recoverForm')?.addEventListener('submit', function(e) {
+            const btn = document.getElementById('recoverBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Processing...';
+            }
+        });
+
+        // ─── CLOSE MENU ON ESC ───
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
                 document.getElementById('menuDropdown').classList.remove('active');
             }
         });
     </script>
+
 </body>
 </html>
 '''
@@ -2272,112 +7293,1201 @@ RECOVER_HTML = '''
 USER_PANEL_HTML = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MAHIR PREMIUM | Bot Controller v5.1</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MAHIR PREMIUM | Bot Controller</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js">
+    </script>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Inter', sans-serif; background: #0a0a1a; color: #fff; min-height: 100vh; position: relative; overflow-x: hidden; }
-        .bg-animation { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; overflow: hidden; }
-        .bg-animation .orb { position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.3; animation: orbFloat 25s infinite ease-in-out; }
-        .bg-animation .orb:nth-child(1) { width: 600px; height: 600px; background: #7c3aed; top: -10%; left: -10%; animation-delay: 0s; }
-        .bg-animation .orb:nth-child(2) { width: 500px; height: 500px; background: #2563eb; bottom: -10%; right: -10%; animation-delay: -8s; }
-        .bg-animation .orb:nth-child(3) { width: 400px; height: 400px; background: #8b5cf6; top: 50%; left: 50%; transform: translate(-50%, -50%); animation-delay: -15s; }
-        @keyframes orbFloat { 0%,100% { transform: translate(0,0) scale(1); } 25% { transform: translate(50px,-80px) scale(1.1); } 50% { transform: translate(-30px,60px) scale(0.9); } 75% { transform: translate(80px,30px) scale(1.05); } }
-        .particles { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }
-        .particle { position: absolute; width: 3px; height: 3px; background: rgba(255,255,255,0.15); border-radius: 50%; animation: particleFloat 15s infinite ease-in-out; }
-        @keyframes particleFloat { 0%,100% { transform: translateY(0px) translateX(0px); opacity: 0.1; } 25% { transform: translateY(-200px) translateX(50px); opacity: 0.5; } 50% { transform: translateY(-100px) translateX(100px); opacity: 0.3; } 75% { transform: translateY(50px) translateX(50px); opacity: 0.6; } }
-        .container { max-width: 1600px; margin: 0 auto; padding: 20px; position: relative; z-index: 1; }
-        .cover-section { position: relative; border-radius: 32px; overflow: hidden; margin-bottom: 30px; box-shadow: 0 30px 60px rgba(0,0,0,0.6); }
-        .cover-section .cover-image { width: 100%; height: 320px; object-fit: cover; display: block; transition: transform 0.6s ease; }
-        .cover-section:hover .cover-image { transform: scale(1.02); }
-        .cover-section .cover-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: linear-gradient(135deg, rgba(10,10,26,0.7) 0%, rgba(124,58,237,0.2) 50%, rgba(37,99,235,0.1) 100%); display: flex; flex-direction: column; justify-content: center; padding: 40px 50px; }
-        .cover-section .cover-overlay .logo-container { display: flex; align-items: center; gap: 25px; margin-bottom: 10px; }
-        .cover-section .cover-overlay .logo-container img { height: 90px; width: auto; border-radius: 20px; box-shadow: 0 10px 30px rgba(124,58,237,0.4); animation: logoGlow 3s ease-in-out infinite; }
-        @keyframes logoGlow { 0%,100% { filter: drop-shadow(0 0 15px rgba(124,58,237,0.3)); } 50% { filter: drop-shadow(0 0 35px rgba(124,58,237,0.6)); } }
-        .cover-section .cover-overlay .title-group h1 { font-size: 3rem; font-weight: 800; background: linear-gradient(125deg, #c084fc, #60a5fa, #34d399, #f472b6); -webkit-background-clip: text; background-clip: text; color: transparent; line-height: 1.1; letter-spacing: -0.02em; }
-        .cover-section .cover-overlay .title-group p { font-size: 1rem; color: rgba(255,255,255,0.7); font-weight: 300; letter-spacing: 1px; }
-        .cover-section .cover-overlay .cover-badge { position: absolute; top: 25px; right: 30px; background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.15); padding: 8px 20px; border-radius: 40px; font-size: 0.75rem; font-weight: 600; color: #c084fc; letter-spacing: 2px; text-transform: uppercase; }
-        @media (max-width: 768px) { .cover-section .cover-image { height: 220px; } .cover-section .cover-overlay { padding: 25px; } .cover-section .cover-overlay .logo-container img { height: 55px; } .cover-section .cover-overlay .title-group h1 { font-size: 1.8rem; } .cover-section .cover-overlay .cover-badge { top: 15px; right: 15px; font-size: 0.6rem; padding: 5px 12px; } }
-        .card { background: rgba(15,12,41,0.65); backdrop-filter: blur(20px); border-radius: 24px; border: 1px solid rgba(124,58,237,0.2); padding: 1.5rem; margin-bottom: 1.5rem; transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); position: relative; overflow: hidden; }
-        .card::before { content: ''; position: absolute; top: 0; left: -100%; width: 100%; height: 100%; background: linear-gradient(90deg, transparent, rgba(124,58,237,0.08), transparent); transition: left 0.6s; }
-        .card:hover::before { left: 100%; }
-        .card:hover { transform: translateY(-4px); border-color: rgba(124,58,237,0.4); box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
-        .card-title { font-size: 1.1rem; font-weight: 700; color: #c084fc; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.75rem; }
-        .card-title i { font-size: 1.2rem; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
-        .stat-card { background: rgba(0,0,0,0.5); border-radius: 18px; padding: 1.25rem; text-align: center; transition: all 0.3s ease; border: 1px solid rgba(124,58,237,0.15); position: relative; overflow: hidden; }
-        .stat-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #c084fc, #60a5fa, #34d399); }
-        .stat-card:hover { transform: scale(1.02); background: rgba(0,0,0,0.7); border-color: rgba(124,58,237,0.4); }
-        .stat-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 2px; color: #a78bfa; margin-bottom: 0.5rem; font-weight: 600; }
-        .stat-value { font-size: 1.3rem; font-weight: 800; background: linear-gradient(135deg, #f0f0f0, #cbd5e1); -webkit-background-clip: text; background-clip: text; color: transparent; word-break: break-all; }
-        .progress-bar { background: #1e1b3b; border-radius: 1rem; height: 0.6rem; overflow: hidden; margin-top: 0.5rem; }
-        .progress-fill { background: linear-gradient(90deg, #c084fc, #60a5fa, #34d399); height: 100%; width: 0%; transition: width 0.5s ease; border-radius: 1rem; }
-        .system-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; }
-        @media (max-width: 768px) { .system-stats { grid-template-columns: 1fr; } }
-        .tab-container { display: flex; gap: 0.5rem; margin-bottom: 1rem; border-bottom: 2px solid rgba(124,58,237,0.2); padding-bottom: 0.75rem; flex-wrap: wrap; }
-        .tab-btn { background: transparent; border: none; padding: 0.6rem 1.8rem; border-radius: 40px; color: #a78bfa; cursor: pointer; transition: all 0.3s ease; font-weight: 600; font-size: 0.85rem; position: relative; }
-        .tab-btn:hover { color: #c084fc; transform: translateY(-2px); }
-        .tab-btn.active { background: linear-gradient(135deg, rgba(124,58,237,0.2), rgba(96,165,250,0.1)); color: #c084fc; border: 1px solid rgba(124,58,237,0.4); }
-        .tab-content { display: none; animation: fadeInUp 0.4s ease-out; }
-        .tab-content.active { display: block; }
-        @keyframes fadeInUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        .log-box { background: rgba(0,0,0,0.85); border-radius: 18px; padding: 1rem; height: 450px; overflow-y: auto; font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 0.8rem; border: 1px solid #302b63; }
-        .log-box::-webkit-scrollbar { width: 6px; }
-        .log-box::-webkit-scrollbar-track { background: #1e1b3b; border-radius: 10px; }
-        .log-box::-webkit-scrollbar-thumb { background: #c084fc; border-radius: 10px; }
-        .log-line { padding: 0.4rem 0.6rem; border-left: 3px solid #c084fc; margin-bottom: 0.15rem; color: #d1d5db; font-size: 0.75rem; word-wrap: break-word; white-space: pre-wrap; transition: all 0.2s ease; }
-        .log-line:hover { background: rgba(124,58,237,0.05); transform: translateX(4px); }
-        .error-line { border-left-color: #ef4444; color: #fca5a5; background: rgba(239,68,68,0.05); }
-        .message-card { background: linear-gradient(135deg, rgba(124,58,237,0.08), rgba(96,165,250,0.05)); border: 1px solid rgba(124,58,237,0.2); border-radius: 18px; padding: 1rem; margin-bottom: 0.75rem; transition: all 0.3s ease; }
-        .message-card:hover { transform: translateX(5px); border-color: #c084fc; }
-        .message-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; padding-bottom: 0.4rem; border-bottom: 1px solid rgba(124,58,237,0.2); flex-wrap: wrap; }
-        .message-sender { font-weight: 800; color: #c084fc; }
-        .message-time { font-size: 0.65rem; color: #8b5cf6; }
-        .message-meta { display: grid; grid-template-columns: auto 1fr; gap: 0.3rem 0.8rem; font-size: 0.8rem; }
-        .message-label { font-weight: 600; color: #a78bfa; }
-        .message-value { color: #e2e8f0; word-break: break-all; }
-        .button-group { display: flex; gap: 0.75rem; margin-top: 1.5rem; flex-wrap: wrap; }
-        .btn { flex: 1; padding: 0.75rem 1.5rem; border: none; border-radius: 40px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; font-size: 0.85rem; position: relative; overflow: hidden; min-width: 120px; }
-        .btn::before { content: ''; position: absolute; top: 50%; left: 50%; width: 0; height: 0; border-radius: 50%; background: rgba(255,255,255,0.15); transform: translate(-50%, -50%); transition: width 0.6s, height 0.6s; }
-        .btn:hover::before { width: 300px; height: 300px; }
-        .btn:hover { transform: translateY(-3px); box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
-        .btn-start { background: linear-gradient(135deg, #10b981, #059669); color: white; }
-        .btn-stop { background: linear-gradient(135deg, #ef4444, #b91c1c); color: white; }
-        .btn-reset { background: linear-gradient(135deg, #f59e0b, #d97706); color: white; }
-        .btn-clear { background: linear-gradient(135deg, #475569, #1e293b); color: white; }
-        .btn-export { background: linear-gradient(135deg, #0891b2, #06b6d4); color: white; }
-        .btn-fullscreen { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; }
-        .btn-admin { background: linear-gradient(135deg, #f472b6, #be185d); color: white; }
-        .btn-regenerate { background: linear-gradient(135deg, #f97316, #ea580c); color: white; }
+        /* ─── RESET & BASE ─── */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #080816;
+            color: #e8e8f8;
+            min-height: 100vh;
+            position: relative;
+            overflow-x: hidden;
+        }
 
-        /* ============================================
-           CUSTOM REGENERATE MODAL STYLING
-           ============================================ */
+        /* ─── PREMIUM LUXE THEME ─── */
+        :root {
+            --gold: #F5C842;
+            --gold-light: #FFE28A;
+            --gold-dark: #C99A1A;
+            --gold-glow: 0 0 40px rgba(245, 200, 66, 0.35), 0 0 80px rgba(245, 200, 66, 0.12);
+            --gold-border: rgba(245, 200, 66, 0.25);
+
+            --royal-purple: #8540F5;
+            --royal-purple-light: #B388FF;
+            --deep-blue: #0A1A4A;
+            --electric-blue: #3B8CFF;
+            --crimson: #D42A3A;
+            --crimson-light: #FF5A6A;
+
+            --card-bg: rgba(8, 8, 22, 0.88);
+            --border-glow: 0 0 40px rgba(245, 200, 66, 0.08), 0 0 80px rgba(133, 64, 245, 0.06);
+            --text-shadow-glow: 0 0 20px rgba(245, 200, 66, 0.15);
+        }
+
+        /* ─── BACKGROUND ANIMATION ─── */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            overflow: hidden;
+        }
+        .bg-animation .orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(120px);
+            opacity: 0.15;
+            animation: orbFloat 30s infinite ease-in-out;
+        }
+        .bg-animation .orb:nth-child(1) {
+            width: 800px;
+            height: 800px;
+            background: #F5C842;
+            top: -20%;
+            left: -20%;
+            animation-delay: 0s;
+        }
+        .bg-animation .orb:nth-child(2) {
+            width: 700px;
+            height: 700px;
+            background: #8540F5;
+            bottom: -20%;
+            right: -20%;
+            animation-delay: -10s;
+        }
+        .bg-animation .orb:nth-child(3) {
+            width: 600px;
+            height: 600px;
+            background: #3B8CFF;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            animation-delay: -18s;
+        }
+        .bg-animation .orb:nth-child(4) {
+            width: 500px;
+            height: 500px;
+            background: #D42A3A;
+            top: 15%;
+            left: 70%;
+            animation-delay: -7s;
+            opacity: 0.10;
+        }
+        @keyframes orbFloat {
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+            25% {
+                transform: translate(80px, -120px) scale(1.15);
+            }
+            50% {
+                transform: translate(-60px, 100px) scale(0.85);
+            }
+            75% {
+                transform: translate(120px, 60px) scale(1.08);
+            }
+        }
+
+        .particles {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+        }
+        .particle {
+            position: absolute;
+            width: 3px;
+            height: 3px;
+            background: rgba(245, 200, 66, 0.12);
+            border-radius: 50%;
+            animation: particleFloat 20s infinite ease-in-out;
+        }
+        .particle:nth-child(odd) {
+            background: rgba(133, 64, 245, 0.10);
+        }
+        .particle:nth-child(3n) {
+            background: rgba(59, 140, 255, 0.08);
+        }
+        @keyframes particleFloat {
+            0%,
+            100% {
+                transform: translateY(0px) translateX(0px);
+                opacity: 0.1;
+            }
+            25% {
+                transform: translateY(-260px) translateX(80px);
+                opacity: 0.6;
+            }
+            50% {
+                transform: translateY(-140px) translateX(140px);
+                opacity: 0.3;
+            }
+            75% {
+                transform: translateY(80px) translateX(80px);
+                opacity: 0.7;
+            }
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ─── GLOW TEXT ─── */
+        .glow-gold {
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.3), 0 0 60px rgba(245, 200, 66, 0.10);
+        }
+        .glow-purple {
+            text-shadow: 0 0 30px rgba(133, 64, 245, 0.25), 0 0 60px rgba(133, 64, 245, 0.08);
+        }
+        .glow-blue {
+            text-shadow: 0 0 30px rgba(59, 140, 255, 0.2), 0 0 60px rgba(59, 140, 255, 0.08);
+        }
+
+        /* ─── COVER SECTION ─── */
+        .cover-section {
+            position: relative;
+            border-radius: 32px;
+            overflow: hidden;
+            margin-bottom: 30px;
+            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.6), var(--border-glow), 0 0 80px rgba(245, 200, 66, 0.04);
+            border: 1px solid rgba(245, 200, 66, 0.15);
+        }
+        .cover-section .cover-image {
+            width: 100%;
+            height: 320px;
+            object-fit: cover;
+            display: block;
+            transition: transform 0.6s ease;
+        }
+        .cover-section:hover .cover-image {
+            transform: scale(1.02);
+        }
+        .cover-section .cover-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, rgba(8, 8, 22, 0.88) 0%, rgba(245, 200, 66, 0.08) 40%, rgba(133, 64, 245, 0.06) 70%, rgba(59, 140, 255, 0.04) 100%);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            padding: 40px 50px;
+        }
+        .cover-section .cover-overlay .logo-container {
+            display: flex;
+            align-items: center;
+            gap: 25px;
+            margin-bottom: 10px;
+        }
+        .cover-section .cover-overlay .logo-container img {
+            height: 90px;
+            width: auto;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(245, 200, 66, 0.3), 0 0 60px rgba(245, 200, 66, 0.10);
+            animation: logoGlow 4s ease-in-out infinite;
+        }
+        @keyframes logoGlow {
+            0%,
+            100% {
+                filter: drop-shadow(0 0 15px rgba(245, 200, 66, 0.2));
+            }
+            50% {
+                filter: drop-shadow(0 0 50px rgba(245, 200, 66, 0.4)) drop-shadow(0 0 100px rgba(133, 64, 245, 0.15));
+            }
+        }
+        .cover-section .cover-overlay .title-group h1 {
+            font-size: 3rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #FFE28A, #8540F5, #3B8CFF, #F5C842);
+            background-size: 300% 300%;
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            line-height: 1.1;
+            letter-spacing: -0.02em;
+            animation: blackguardShimmer 6s ease infinite;
+            text-shadow: 0 0 60px rgba(245, 200, 66, 0.15);
+        }
+        @keyframes blackguardShimmer {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .cover-section .cover-overlay .title-group p {
+            font-size: 1rem;
+            color: rgba(255, 255, 255, 0.65);
+            font-weight: 300;
+            letter-spacing: 2px;
+            text-shadow: 0 0 30px rgba(0, 0, 0, 0.6);
+        }
+        .cover-section .cover-overlay .cover-badge {
+            position: absolute;
+            top: 25px;
+            right: 30px;
+            background: rgba(245, 200, 66, 0.08);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(245, 200, 66, 0.2);
+            padding: 8px 24px;
+            border-radius: 40px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: #F5C842;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            box-shadow: 0 0 50px rgba(245, 200, 66, 0.06);
+        }
+        .cover-section .cover-overlay .cover-badge i {
+            color: #8540F5;
+            margin-right: 6px;
+        }
+        @media (max-width: 768px) {
+            .cover-section .cover-image {
+                height: 220px;
+            }
+            .cover-section .cover-overlay {
+                padding: 25px;
+            }
+            .cover-section .cover-overlay .logo-container img {
+                height: 55px;
+            }
+            .cover-section .cover-overlay .title-group h1 {
+                font-size: 1.8rem;
+            }
+            .cover-section .cover-overlay .cover-badge {
+                top: 15px;
+                right: 15px;
+                font-size: 0.6rem;
+                padding: 5px 12px;
+            }
+        }
+
+        /* ─── CARDS ─── */
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3), 0 0 40px rgba(245, 200, 66, 0.02);
+        }
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(245, 200, 66, 0.04), rgba(133, 64, 245, 0.03), transparent);
+            transition: left 0.8s;
+        }
+        .card:hover::before {
+            left: 100%;
+        }
+        .card:hover {
+            transform: translateY(-4px);
+            border-color: rgba(245, 200, 66, 0.18);
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), 0 0 60px rgba(245, 200, 66, 0.03), 0 0 100px rgba(133, 64, 245, 0.02);
+        }
+        .card-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #F5C842;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.10);
+        }
+        .card-title i {
+            font-size: 1.2rem;
+            color: #8540F5;
+            filter: drop-shadow(0 0 10px rgba(133, 64, 245, 0.2));
+        }
+
+        /* ─── STATS ─── */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+        }
+        .stat-card {
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 18px;
+            padding: 1.25rem;
+            text-align: center;
+            transition: all 0.3s ease;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+        }
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #F5C842, #8540F5, #3B8CFF, #D42A3A);
+            background-size: 300% 100%;
+            animation: rainbowBar 5s ease infinite;
+        }
+        @keyframes rainbowBar {
+            0% {
+                background-position: 0% 0%;
+            }
+            50% {
+                background-position: 100% 0%;
+            }
+            100% {
+                background-position: 0% 0%;
+            }
+        }
+        .stat-card:hover {
+            transform: scale(1.02);
+            background: rgba(0, 0, 0, 0.7);
+            border-color: rgba(245, 200, 66, 0.2);
+            box-shadow: 0 0 50px rgba(245, 200, 66, 0.04), 0 0 80px rgba(133, 64, 245, 0.02);
+        }
+        .stat-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #FFE28A;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+        .stat-value {
+            font-size: 1.3rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #f0f0ff, #F5C842, #8540F5);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            word-break: break-all;
+            text-shadow: 0 0 40px rgba(245, 200, 66, 0.10);
+        }
+
+        .progress-bar {
+            background: #1a1a2e;
+            border-radius: 1rem;
+            height: 0.6rem;
+            overflow: hidden;
+            margin-top: 0.5rem;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+            box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.4);
+        }
+        .progress-fill {
+            background: linear-gradient(90deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 100%;
+            animation: progressGradient 4s ease infinite;
+            height: 100%;
+            width: 0%;
+            transition: width 0.5s ease;
+            border-radius: 1rem;
+            box-shadow: 0 0 20px rgba(245, 200, 66, 0.2);
+        }
+        @keyframes progressGradient {
+            0% {
+                background-position: 0% 0%;
+            }
+            100% {
+                background-position: 200% 0%;
+            }
+        }
+
+        .system-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+        @media (max-width: 768px) {
+            .system-stats {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ─── TABS ─── */
+        .tab-container {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            border-bottom: 2px solid rgba(245, 200, 66, 0.04);
+            padding-bottom: 0.75rem;
+            flex-wrap: wrap;
+        }
+        .tab-btn {
+            background: transparent;
+            border: none;
+            padding: 0.6rem 1.8rem;
+            border-radius: 40px;
+            color: #FFE28A;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+            font-size: 0.85rem;
+            position: relative;
+        }
+        .tab-btn:hover {
+            color: #F5C842;
+            transform: translateY(-2px);
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.15);
+        }
+        .tab-btn.active {
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.08), rgba(133, 64, 245, 0.04));
+            color: #F5C842;
+            border: 1px solid rgba(245, 200, 66, 0.2);
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04);
+        }
+        .tab-content {
+            display: none;
+            animation: fadeInUp 0.4s ease-out;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* ─── LOG BOX ─── */
+        .log-box {
+            background: rgba(0, 0, 0, 0.92);
+            border-radius: 18px;
+            padding: 1rem;
+            height: 450px;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', 'Courier New', monospace;
+            font-size: 0.8rem;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+            box-shadow: inset 0 0 80px rgba(0, 0, 0, 0.6);
+        }
+        .log-box::-webkit-scrollbar {
+            width: 6px;
+        }
+        .log-box::-webkit-scrollbar-track {
+            background: #1a1a2e;
+            border-radius: 10px;
+        }
+        .log-box::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, #F5C842, #8540F5);
+            border-radius: 10px;
+            box-shadow: 0 0 20px rgba(245, 200, 66, 0.2);
+        }
+        .log-line {
+            padding: 0.4rem 0.6rem;
+            border-left: 3px solid #F5C842;
+            margin-bottom: 0.15rem;
+            color: #c8c8e8;
+            font-size: 0.75rem;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+            transition: all 0.2s ease;
+        }
+        .log-line:hover {
+            background: rgba(245, 200, 66, 0.03);
+            transform: translateX(4px);
+        }
+        .error-line {
+            border-left-color: #D42A3A;
+            color: #fca5a5;
+            background: rgba(212, 42, 58, 0.06);
+        }
+
+        /* ─── MESSAGE CARD ─── */
+        .message-card {
+            background: linear-gradient(135deg, rgba(245, 200, 66, 0.04), rgba(133, 64, 245, 0.02), rgba(59, 140, 255, 0.01));
+            border: 1px solid rgba(245, 200, 66, 0.04);
+            border-radius: 18px;
+            padding: 1rem;
+            margin-bottom: 0.75rem;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        }
+        .message-card:hover {
+            transform: translateX(5px);
+            border-color: rgba(245, 200, 66, 0.2);
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.02), 0 0 60px rgba(133, 64, 245, 0.01);
+        }
+        .message-header {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 0.5rem;
+            padding-bottom: 0.4rem;
+            border-bottom: 1px solid rgba(245, 200, 66, 0.04);
+            flex-wrap: wrap;
+        }
+        .message-sender {
+            font-weight: 800;
+            background: linear-gradient(135deg, #F5C842, #8540F5);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        .message-time {
+            font-size: 0.65rem;
+            color: #FFE28A;
+        }
+        .message-meta {
+            display: grid;
+            grid-template-columns: auto 1fr;
+            gap: 0.3rem 0.8rem;
+            font-size: 0.8rem;
+        }
+        .message-label {
+            font-weight: 600;
+            color: #FFE28A;
+        }
+        .message-value {
+            color: #c8c8e8;
+            word-break: break-all;
+        }
+
+        /* ─── BUTTONS ─── */
+        .button-group {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 1.5rem;
+            flex-wrap: wrap;
+        }
+        .btn {
+            flex: 1;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 40px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.85rem;
+            position: relative;
+            overflow: hidden;
+            min-width: 120px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+        }
+        .btn::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.06);
+            transform: translate(-50%, -50%);
+            transition: width 0.6s, height 0.6s;
+        }
+        .btn:hover::before {
+            width: 300px;
+            height: 300px;
+        }
+        .btn:hover:not(:disabled) {
+            transform: translateY(-3px) scale(1.02);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+            box-shadow: none !important;
+        }
+        .btn:disabled::before {
+            display: none;
+        }
+
+        /* ─── BUTTON VARIANTS with GLOW ─── */
+        .btn-start {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+            box-shadow: 0 0 40px rgba(59, 140, 255, 0.15);
+        }
+        .btn-start:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(59, 140, 255, 0.3), 0 0 80px rgba(59, 140, 255, 0.10);
+        }
+        .btn-stop {
+            background: linear-gradient(135deg, #D42A3A, #8A1A28);
+            color: #fff;
+            box-shadow: 0 0 40px rgba(212, 42, 58, 0.15);
+        }
+        .btn-stop:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(212, 42, 58, 0.3), 0 0 80px rgba(212, 42, 58, 0.10);
+        }
+        .btn-reset {
+            background: linear-gradient(135deg, #F5C842, #C99A1A);
+            color: #080816;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.15);
+        }
+        .btn-reset:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.3), 0 0 80px rgba(245, 200, 66, 0.10);
+        }
+        .btn-clear {
+            background: linear-gradient(135deg, #4A4A6A, #2A2A4A);
+            color: #e8e8f8;
+        }
+        .btn-clear:hover:not(:disabled) {
+            box-shadow: 0 10px 40px rgba(74, 74, 106, 0.3);
+        }
+        .btn-export {
+            background: linear-gradient(135deg, #8540F5, #5A1A9A);
+            color: #fff;
+            box-shadow: 0 0 40px rgba(133, 64, 245, 0.12);
+        }
+        .btn-export:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(133, 64, 245, 0.25);
+        }
+        .btn-fullscreen {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+            box-shadow: 0 0 40px rgba(59, 140, 255, 0.10);
+        }
+        .btn-fullscreen:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(59, 140, 255, 0.2);
+        }
+        .btn-admin {
+            background: linear-gradient(135deg, #D42A3A, #8A1A28);
+            color: #fff;
+            box-shadow: 0 0 40px rgba(212, 42, 58, 0.10);
+        }
+        .btn-admin:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(212, 42, 58, 0.2);
+        }
+        .btn-regenerate {
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            color: #080816;
+            font-weight: 800;
+            border: 2px solid rgba(245, 200, 66, 0.15);
+            box-shadow: 0 0 60px rgba(245, 200, 66, 0.08);
+        }
+        @keyframes regenGradient {
+            0% {
+                background-position: 0% 50%;
+            }
+            50% {
+                background-position: 100% 50%;
+            }
+            100% {
+                background-position: 0% 50%;
+            }
+        }
+        .btn-regenerate:hover:not(:disabled) {
+            box-shadow: 0 10px 60px rgba(245, 200, 66, 0.2), 0 0 100px rgba(133, 64, 245, 0.10);
+            border-color: rgba(245, 200, 66, 0.3);
+        }
+
+        .btn-sm {
+            flex: 0 0 auto;
+            padding: 0.4rem 1rem;
+            font-size: 0.75rem;
+            min-width: auto;
+        }
+
+        /* ─── LOADING SPINNER ─── */
+        .btn .spinner {
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            border: 2.5px solid rgba(255, 255, 255, 0.2);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+        .btn-start .spinner,
+        .btn-reset .spinner,
+        .btn-export .spinner,
+        .btn-regenerate .spinner {
+            border-color: rgba(8, 8, 22, 0.2);
+            border-top-color: #080816;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ─── BADGES ─── */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.3rem 1rem;
+            border-radius: 40px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.2);
+        }
+        .badge-active {
+            background: rgba(59, 140, 255, 0.12);
+            color: #3B8CFF;
+            border: 1px solid #3B8CFF;
+            animation: pulse 2s ease-in-out infinite;
+            box-shadow: 0 0 40px rgba(59, 140, 255, 0.06);
+        }
+        .badge-offline {
+            background: rgba(212, 42, 58, 0.12);
+            color: #D42A3A;
+            border: 1px solid #D42A3A;
+            box-shadow: 0 0 40px rgba(212, 42, 58, 0.04);
+        }
+        .badge-warning {
+            background: rgba(245, 200, 66, 0.12);
+            color: #F5C842;
+            border: 1px solid #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04);
+        }
+        @keyframes pulse {
+            0%,
+            100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        /* ─── CHART ─── */
+        .chart-container {
+            position: relative;
+            height: 280px;
+            margin-top: 0.5rem;
+        }
+
+        /* ─── INFO ROW ─── */
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.6rem 0;
+            border-bottom: 1px solid rgba(245, 200, 66, 0.04);
+            flex-wrap: wrap;
+            gap: 0.3rem;
+        }
+        .info-label {
+            font-weight: 600;
+            color: #FFE28A;
+            text-shadow: 0 0 20px rgba(245, 200, 66, 0.05);
+        }
+        .info-value {
+            font-weight: 700;
+            color: #c8c8e8;
+        }
+
+        /* ─── CONTROL BAR ─── */
+        .control-bar {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .pause-btn {
+            background: rgba(100, 100, 130, 0.08);
+            border: 1px solid rgba(245, 200, 66, 0.08);
+            padding: 0.4rem 1rem;
+            border-radius: 40px;
+            color: #c8c8e8;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.8rem;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        }
+        .pause-btn:hover {
+            background: rgba(245, 200, 66, 0.05);
+            border-color: rgba(245, 200, 66, 0.2);
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04);
+        }
+        .pause-btn.paused {
+            background: rgba(212, 42, 58, 0.08);
+            border-color: #D42A3A;
+            color: #D42A3A;
+        }
+
+        /* ─── MODAL ─── */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.88);
+            backdrop-filter: blur(14px);
+            z-index: 10000;
+            justify-content: center;
+            align-items: center;
+            animation: fadeIn 0.3s ease;
+        }
+        .modal-overlay.active {
+            display: flex;
+        }
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+            }
+            to {
+                opacity: 1;
+            }
+        }
+        .modal-box {
+            background: linear-gradient(135deg, #12122a, #1e1a3a, #0f0a2a);
+            border-radius: 30px;
+            padding: 2rem;
+            max-width: 800px;
+            width: 95%;
+            max-height: 90vh;
+            overflow-y: auto;
+            border: 1px solid rgba(245, 200, 66, 0.10);
+            box-shadow: 0 30px 60px rgba(0, 0, 0, 0.8), 0 0 80px rgba(245, 200, 66, 0.03), 0 0 120px rgba(133, 64, 245, 0.02);
+            animation: slideUp 0.4s ease;
+            position: relative;
+        }
+        @keyframes slideUp {
+            from {
+                transform: translateY(50px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+        .modal-close {
+            position: absolute;
+            top: 15px;
+            right: 20px;
+            font-size: 2rem;
+            cursor: pointer;
+            color: #FFE28A;
+            transition: all 0.3s ease;
+            background: none;
+            border: none;
+        }
+        .modal-close:hover {
+            color: #F5C842;
+            transform: rotate(90deg) scale(1.1);
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.2);
+        }
+        .modal-title {
+            font-size: 1.8rem;
+            font-weight: 800;
+            background: linear-gradient(125deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 300% 100%;
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            animation: blackguardShimmer 5s ease infinite;
+        }
+        .modal-section {
+            background: rgba(0, 0, 0, 0.35);
+            border-radius: 18px;
+            padding: 1.25rem;
+            margin-bottom: 1.25rem;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+        .modal-section h3 {
+            color: #F5C842;
+            font-size: 1.1rem;
+            margin-bottom: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            text-shadow: 0 0 30px rgba(245, 200, 66, 0.06);
+        }
+        .modal-input-group {
+            display: flex;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .modal-input-group label {
+            min-width: 100px;
+            color: #FFE28A;
+            font-weight: 600;
+        }
+        .modal-input-group input {
+            flex: 1;
+            padding: 0.6rem 1rem;
+            border-radius: 40px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: rgba(0, 0, 0, 0.5);
+            color: #e8e8f8;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.3s ease;
+            min-width: 180px;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.2);
+        }
+        .modal-input-group input:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.2);
+        }
+        .modal-btn {
+            padding: 0.5rem 1.5rem;
+            border: none;
+            border-radius: 40px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.8rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+        }
+        .modal-btn:hover:not(:disabled) {
+            transform: scale(1.05);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        }
+        .modal-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .modal-btn-save {
+            background: linear-gradient(135deg, #F5C842, #C99A1A);
+            color: #080816;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04);
+        }
+        .modal-btn-save:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.15);
+        }
+        .modal-btn-cancel {
+            background: linear-gradient(135deg, #4A4A6A, #2A2A4A);
+            color: #e8e8f8;
+        }
+        .modal-btn-action {
+            background: linear-gradient(135deg, #8540F5, #5A1A9A);
+            color: #fff;
+            box-shadow: 0 0 40px rgba(133, 64, 245, 0.04);
+        }
+        .modal-btn-action:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(133, 64, 245, 0.15);
+        }
+        .modal-btn-danger {
+            background: linear-gradient(135deg, #D42A3A, #8A1A28);
+            color: #fff;
+            box-shadow: 0 0 40px rgba(212, 42, 58, 0.04);
+        }
+        .modal-btn-danger:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(212, 42, 58, 0.15);
+        }
+        .modal-btn-info {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+            box-shadow: 0 0 40px rgba(59, 140, 255, 0.04);
+        }
+        .modal-btn-info:hover:not(:disabled) {
+            box-shadow: 0 10px 50px rgba(59, 140, 255, 0.15);
+        }
+        .modal-flex-row {
+            display: flex;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .modal-result-box {
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 14px;
+            padding: 0.8rem;
+            margin-top: 0.8rem;
+            max-height: 180px;
+            overflow-y: auto;
+            font-size: 0.8rem;
+            color: #c8c8e8;
+            border: 1px solid rgba(245, 200, 66, 0.04);
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            box-shadow: inset 0 4px 30px rgba(0, 0, 0, 0.3);
+        }
+
+        /* ─── NOTIFICATION ─── */
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 0.8rem 1.5rem;
+            border-radius: 14px;
+            z-index: 9999;
+            animation: fadeInUp 0.3s ease-out;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6), 0 0 60px rgba(0, 0, 0, 0.1);
+            font-weight: 500;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+        }
+        .notification-success {
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
+        }
+        .notification-error {
+            background: linear-gradient(135deg, #D42A3A, #8A1A28);
+            color: #fff;
+        }
+        .notification-info {
+            background: linear-gradient(135deg, #8540F5, #5A1A9A);
+            color: #fff;
+        }
+
+        /* ─── CONFIG FORM ─── */
+        .config-form {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        .config-form input {
+            width: 100%;
+            padding: 14px;
+            margin: 12px 0;
+            border-radius: 12px;
+            border: 1px solid rgba(245, 200, 66, 0.06);
+            background: #12122a;
+            color: #e8e8f8;
+            font-size: 1rem;
+            transition: 0.3s;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .config-form input:focus {
+            outline: none;
+            border-color: #F5C842;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04), inset 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+        .config-form button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
+            border: none;
+            border-radius: 12px;
+            color: #080816;
+            font-weight: 800;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: 0.3s;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+        }
+        .config-form button:hover:not(:disabled) {
+            transform: scale(1.02);
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.10);
+        }
+        .config-form button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+        .config-status {
+            text-align: center;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            margin-bottom: 20px;
+            border-left: 4px solid #F5C842;
+            color: #FFE28A;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+        .logout-btn {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 999;
+            background: linear-gradient(135deg, rgba(212, 42, 58, 0.8), rgba(138, 26, 40, 0.8));
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 30px;
+            font-weight: 600;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+            transition: 0.3s;
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
+        }
+        .logout-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 10px 40px rgba(212, 42, 58, 0.15);
+        }
+
+        /* ─── REGENERATE MODAL ─── */
         .regen-modal-box {
-            background: linear-gradient(135deg, #1e1b4b 0%, #111827 100%);
+            background: linear-gradient(135deg, #12122a, #1a0a2a);
             border-radius: 28px;
             padding: 2.5rem;
             max-width: 500px;
             width: 90%;
-            border: 2px solid #7c3aed;
-            box-shadow: 0 0 50px rgba(124, 58, 237, 0.4);
+            border: 2px solid rgba(245, 200, 66, 0.15);
+            box-shadow: 0 0 80px rgba(245, 200, 66, 0.06), 0 0 120px rgba(133, 64, 245, 0.03);
             position: relative;
             animation: regenSlideUp 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
         }
-
         @keyframes regenSlideUp {
-            from { transform: translateY(100px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
+            from {
+                transform: translateY(100px);
+                opacity: 0;
+            }
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
         }
-
         .regen-title {
             font-size: 1.5rem;
             font-weight: 800;
-            color: #c084fc;
+            background: linear-gradient(125deg, #F5C842, #8540F5, #3B8CFF);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
             text-align: center;
             margin-bottom: 1.5rem;
             display: flex;
@@ -2385,82 +8495,94 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             align-items: center;
             gap: 10px;
         }
-
         .regen-title i {
             font-size: 2.5rem;
-            filter: drop-shadow(0 0 10px #7c3aed);
+            color: #F5C842;
+            filter: drop-shadow(0 0 30px rgba(245, 200, 66, 0.2));
             animation: pulseIcon 2s infinite;
         }
-
         @keyframes pulseIcon {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.1); }
+            0%,
+            100% {
+                transform: scale(1);
+            }
+            50% {
+                transform: scale(1.1);
+            }
         }
-
-        .regen-input-group {
-            margin-bottom: 1.5rem;
-        }
-
         .regen-input-group input {
             width: 100%;
             padding: 16px 20px;
-            background: rgba(0,0,0,0.5);
-            border: 2px solid #302b63;
+            background: rgba(0, 0, 0, 0.5);
+            border: 2px solid rgba(245, 200, 66, 0.06);
             border-radius: 15px;
-            color: #fff;
+            color: #e8e8f8;
             font-size: 1.1rem;
             transition: all 0.3s ease;
             text-align: center;
+            box-shadow: inset 0 4px 30px rgba(0, 0, 0, 0.3);
         }
-
         .regen-input-group input:focus {
             outline: none;
-            border-color: #c084fc;
-            box-shadow: 0 0 20px rgba(192, 132, 252, 0.3);
-            background: rgba(0,0,0,0.8);
+            border-color: #F5C842;
+            box-shadow: 0 0 50px rgba(245, 200, 66, 0.04), inset 0 4px 30px rgba(0, 0, 0, 0.3);
+            background: rgba(0, 0, 0, 0.7);
         }
-
         .regen-btn-group {
             display: flex;
             gap: 12px;
         }
-
         .regen-btn-confirm {
             flex: 2;
-            background: linear-gradient(135deg, #7c3aed, #2563eb);
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF);
+            background-size: 200% 200%;
+            animation: regenGradient 5s ease infinite;
             padding: 14px;
             border-radius: 15px;
             font-weight: 800;
-            color: #fff;
+            color: #080816;
             border: none;
             cursor: pointer;
             transition: 0.3s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
         }
-
+        .regen-btn-confirm:hover:not(:disabled) {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 50px rgba(245, 200, 66, 0.12);
+        }
+        .regen-btn-confirm:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+        }
         .regen-btn-cancel {
             flex: 1;
-            background: rgba(255,255,255,0.05);
+            background: rgba(255, 255, 255, 0.04);
             padding: 14px;
             border-radius: 15px;
             font-weight: 700;
             color: #94a3b8;
-            border: 1px solid #302b63;
+            border: 1px solid rgba(245, 200, 66, 0.04);
             cursor: pointer;
+            transition: 0.3s;
+        }
+        .regen-btn-cancel:hover {
+            background: rgba(212, 42, 58, 0.06);
+            color: #D42A3A;
         }
 
-        .regen-btn-confirm:hover { transform: translateY(-3px); box-shadow: 0 10px 20px rgba(124, 58, 237, 0.4); }
-        .regen-btn-cancel:hover { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-
-        /* ============================================
-           DOWNLOAD APK BUTTON - Premium Design
-           ============================================ */
+        /* ─── DOWNLOAD APK ─── */
         .btn-download-apk {
-            background: linear-gradient(135deg, #f59e0b, #ef4444, #ec4899);
+            background: linear-gradient(135deg, #F5C842, #8540F5, #3B8CFF, #D42A3A);
             background-size: 300% 300%;
-            animation: gradientShift 3s ease infinite;
-            color: white;
-            border: 2px solid rgba(255,255,255,0.2);
-            box-shadow: 0 0 30px rgba(239,68,68,0.3), inset 0 0 30px rgba(255,255,255,0.05);
+            animation: blackguardShimmer 6s ease infinite;
+            color: #080816;
+            border: 2px solid rgba(245, 200, 66, 0.12);
+            box-shadow: 0 0 60px rgba(245, 200, 66, 0.04), 0 0 120px rgba(133, 64, 245, 0.02);
             position: relative;
             overflow: hidden;
             min-width: 180px;
@@ -2472,7 +8594,6 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             justify-content: center;
             gap: 12px;
         }
-
         .btn-download-apk::after {
             content: '';
             position: absolute;
@@ -2480,21 +8601,17 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             left: -50%;
             width: 200%;
             height: 200%;
-            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
-            animation: shineRotate 4s linear infinite;
+            background: radial-gradient(circle, rgba(255, 255, 255, 0.06) 0%, transparent 70%);
+            animation: shineRotate 5s linear infinite;
         }
-
-        @keyframes gradientShift {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-        }
-
         @keyframes shineRotate {
-            0% { transform: rotate(0deg) scale(1); }
-            100% { transform: rotate(360deg) scale(1.2); }
+            0% {
+                transform: rotate(0deg) scale(1);
+            }
+            100% {
+                transform: rotate(360deg) scale(1.2);
+            }
         }
-
         .btn-download-apk .icon-wrapper {
             display: inline-flex;
             align-items: center;
@@ -2502,37 +8619,37 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             animation: bounceIcon 1.5s ease infinite;
             font-size: 1.3rem;
         }
-
         @keyframes bounceIcon {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-5px); }
+            0%,
+            100% {
+                transform: translateY(0);
+            }
+            50% {
+                transform: translateY(-5px);
+            }
         }
-
         .btn-download-apk .text-wrapper {
             display: flex;
             flex-direction: column;
             align-items: flex-start;
             line-height: 1.2;
         }
-
         .btn-download-apk .text-wrapper .main-text {
             font-weight: 800;
             font-size: 1rem;
         }
-
         .btn-download-apk .text-wrapper .sub-text {
             font-size: 0.6rem;
-            opacity: 0.8;
+            opacity: 0.7;
             font-weight: 400;
             letter-spacing: 0.5px;
         }
-
         .btn-download-apk .badge-new {
             position: absolute;
             top: -8px;
             right: -8px;
-            background: linear-gradient(135deg, #34d399, #10b981);
-            color: #0a0a1a;
+            background: linear-gradient(135deg, #3B8CFF, #0F4CBF);
+            color: #fff;
             font-size: 0.55rem;
             font-weight: 800;
             padding: 2px 10px;
@@ -2540,41 +8657,46 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             text-transform: uppercase;
             letter-spacing: 0.5px;
             animation: pulseBadge 2s ease infinite;
-            border: 2px solid #0a0a1a;
+            border: 2px solid #080816;
+            box-shadow: 0 0 30px rgba(59, 140, 255, 0.2);
         }
-
         @keyframes pulseBadge {
-            0%, 100% { transform: scale(1); }
-            50% { transform: scale(1.1); }
+            0%,
+            100% {
+                transform: scale(1);
+            }
+            50% {
+                transform: scale(1.1);
+            }
         }
-
-        .btn-download-apk:hover {
+        .btn-download-apk:hover:not(:disabled) {
             transform: translateY(-4px) scale(1.02);
-            box-shadow: 0 15px 40px rgba(239,68,68,0.4), 0 0 60px rgba(236,72,153,0.2);
-            border-color: rgba(255,255,255,0.4);
+            box-shadow: 0 15px 60px rgba(245, 200, 66, 0.12), 0 0 100px rgba(133, 64, 245, 0.06);
+            border-color: rgba(245, 200, 66, 0.3);
         }
-
-        .btn-download-apk:active {
-            transform: scale(0.95);
+        .btn-download-apk:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
         }
-
         .btn-download-apk .ripple {
             position: absolute;
             border-radius: 50%;
-            background: rgba(255,255,255,0.3);
+            background: rgba(255, 255, 255, 0.2);
             transform: scale(0);
             animation: rippleEffect 0.6s ease-out;
             pointer-events: none;
         }
-
         @keyframes rippleEffect {
-            to { transform: scale(4); opacity: 0; }
+            to {
+                transform: scale(4);
+                opacity: 0;
+            }
         }
 
-        /* Download card style */
         .download-card {
-            background: linear-gradient(135deg, rgba(15,12,41,0.8), rgba(30,17,60,0.6));
-            border: 1px solid rgba(239,68,68,0.3);
+            background: linear-gradient(135deg, rgba(8, 8, 22, 0.88), rgba(20, 10, 40, 0.6));
+            border: 1px solid rgba(245, 200, 66, 0.04);
             border-radius: 24px;
             padding: 1.8rem;
             margin-bottom: 1.5rem;
@@ -2582,8 +8704,8 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             position: relative;
             overflow: hidden;
             transition: all 0.4s ease;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
         }
-
         .download-card::before {
             content: '';
             position: absolute;
@@ -2591,15 +8713,17 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             left: -50%;
             width: 200%;
             height: 200%;
-            background: conic-gradient(from 0deg, transparent, rgba(239,68,68,0.05), transparent, rgba(236,72,153,0.05), transparent);
-            animation: rotateBg 10s linear infinite;
+            background: conic-gradient(from 0deg, transparent, rgba(245, 200, 66, 0.02), transparent, rgba(133, 64, 245, 0.01), transparent, rgba(59, 140, 255, 0.01), transparent);
+            animation: rotateBg 20s linear infinite;
         }
-
         @keyframes rotateBg {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
         }
-
         .download-card .content {
             position: relative;
             z-index: 1;
@@ -2609,50 +8733,51 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             flex-wrap: wrap;
             gap: 1.5rem;
         }
-
         .download-card .info-section {
             display: flex;
             align-items: center;
             gap: 1.2rem;
         }
-
         .download-card .info-section .android-icon {
             font-size: 3rem;
-            color: #34d399;
-            background: rgba(52,211,153,0.15);
+            color: #F5C842;
+            background: rgba(245, 200, 66, 0.04);
             padding: 12px;
             border-radius: 18px;
-            border: 1px solid rgba(52,211,153,0.3);
+            border: 1px solid rgba(245, 200, 66, 0.04);
             animation: floatIcon 3s ease-in-out infinite;
+            box-shadow: 0 0 40px rgba(245, 200, 66, 0.04);
         }
-
         @keyframes floatIcon {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-8px); }
+            0%,
+            100% {
+                transform: translateY(0);
+            }
+            50% {
+                transform: translateY(-8px);
+            }
         }
-
         .download-card .info-section .text-area h3 {
             font-size: 1.2rem;
             font-weight: 700;
-            color: #e2e8f0;
+            color: #e8e8f8;
             margin-bottom: 4px;
         }
-
         .download-card .info-section .text-area p {
             font-size: 0.85rem;
-            color: #a78bfa;
+            color: #FFE28A;
             opacity: 0.8;
         }
-
         .download-card .info-section .text-area .version-tag {
             display: inline-block;
-            background: rgba(124,58,237,0.2);
-            color: #c084fc;
+            background: rgba(245, 200, 66, 0.04);
+            color: #F5C842;
             padding: 2px 12px;
             border-radius: 40px;
             font-size: 0.65rem;
             font-weight: 600;
             margin-top: 4px;
+            box-shadow: 0 0 20px rgba(245, 200, 66, 0.02);
         }
 
         @media (max-width: 768px) {
@@ -2669,113 +8794,106 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 width: 100%;
                 justify-content: center;
             }
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .stat-value {
+                font-size: 1rem;
+            }
+            .btn {
+                padding: 0.5rem 1rem;
+                font-size: 0.75rem;
+                min-width: 80px;
+            }
+            .button-group .btn {
+                flex: 1 1 45%;
+            }
+            .tab-btn {
+                padding: 0.4rem 1rem;
+                font-size: 0.75rem;
+            }
+            .modal-box {
+                padding: 1.25rem;
+            }
+            .modal-input-group {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .modal-input-group label {
+                min-width: auto;
+            }
         }
-
-        .btn-sm { flex: 0 0 auto; padding: 0.4rem 1rem; font-size: 0.75rem; min-width: auto; }
-        .badge { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.3rem 1rem; border-radius: 40px; font-size: 0.75rem; font-weight: 700; }
-        .badge-active { background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid #22c55e; animation: pulse 2s ease-in-out infinite; }
-        .badge-offline { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid #ef4444; }
-        .badge-warning { background: rgba(251,191,36,0.2); color: #fbbf24; border: 1px solid #fbbf24; }
-        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
-        .chart-container { position: relative; height: 280px; margin-top: 0.5rem; }
-        .info-row { display: flex; justify-content: space-between; padding: 0.6rem 0; border-bottom: 1px solid #302b63; flex-wrap: wrap; gap: 0.3rem; }
-        .info-label { font-weight: 600; color: #a78bfa; }
-        .info-value { font-weight: 700; color: #e2e8f0; }
-        .control-bar { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; align-items: center; flex-wrap: wrap; }
-        .pause-btn { background: rgba(100,100,100,0.2); border: 1px solid #a78bfa; padding: 0.4rem 1rem; border-radius: 40px; color: #e2e8f0; cursor: pointer; transition: all 0.3s ease; font-size: 0.8rem; }
-        .pause-btn:hover { background: rgba(124,58,237,0.2); }
-        .pause-btn.paused { background: rgba(239,68,68,0.2); border-color: #ef4444; color: #fca5a5; }
-        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(8px); z-index: 10000; justify-content: center; align-items: center; animation: fadeIn 0.3s ease; }
-        .modal-overlay.active { display: flex; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-        .modal-box { background: linear-gradient(135deg, #1a1a3e, #2d2b55); border-radius: 30px; padding: 2rem; max-width: 800px; width: 95%; max-height: 90vh; overflow-y: auto; border: 1px solid rgba(124,58,237,0.4); box-shadow: 0 30px 60px rgba(0,0,0,0.8); animation: slideUp 0.4s ease; position: relative; }
-        @keyframes slideUp { from { transform: translateY(50px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        .modal-close { position: absolute; top: 15px; right: 20px; font-size: 2rem; cursor: pointer; color: #a78bfa; transition: all 0.3s ease; background: none; border: none; }
-        .modal-close:hover { color: #c084fc; transform: rotate(90deg); }
-        .modal-title { font-size: 1.8rem; font-weight: 800; background: linear-gradient(125deg, #c084fc, #60a5fa); -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 0.75rem; }
-        .modal-section { background: rgba(0,0,0,0.4); border-radius: 18px; padding: 1.25rem; margin-bottom: 1.25rem; border: 1px solid rgba(124,58,237,0.15); }
-        .modal-section h3 { color: #c084fc; font-size: 1.1rem; margin-bottom: 0.75rem; display: flex; align-items: center; gap: 0.5rem; }
-        .modal-input-group { display: flex; gap: 0.75rem; margin-bottom: 0.75rem; flex-wrap: wrap; align-items: center; }
-        .modal-input-group label { min-width: 100px; color: #a78bfa; font-weight: 600; }
-        .modal-input-group input { flex: 1; padding: 0.6rem 1rem; border-radius: 40px; border: 1px solid #302b63; background: rgba(0,0,0,0.6); color: #e2e8f0; font-family: 'Inter', sans-serif; transition: all 0.3s ease; min-width: 180px; }
-        .modal-input-group input:focus { outline: none; border-color: #c084fc; box-shadow: 0 0 15px rgba(124,58,237,0.3); }
-        .modal-btn { padding: 0.5rem 1.5rem; border: none; border-radius: 40px; font-weight: 700; cursor: pointer; transition: all 0.3s ease; font-size: 0.8rem; }
-        .modal-btn:hover { transform: scale(1.05); }
-        .modal-btn-save { background: linear-gradient(135deg, #10b981, #059669); color: white; }
-        .modal-btn-cancel { background: linear-gradient(135deg, #475569, #1e293b); color: white; }
-        .modal-btn-action { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; }
-        .modal-btn-danger { background: linear-gradient(135deg, #ef4444, #b91c1c); color: white; }
-        .modal-btn-info { background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; }
-        .modal-flex-row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
-        .modal-result-box { background: rgba(0,0,0,0.6); border-radius: 14px; padding: 0.8rem; margin-top: 0.8rem; max-height: 180px; overflow-y: auto; font-size: 0.8rem; color: #d1d5db; border: 1px solid #302b63; white-space: pre-wrap; word-wrap: break-word; }
-        .notification { position: fixed; top: 20px; right: 20px; padding: 0.8rem 1.5rem; border-radius: 14px; z-index: 9999; animation: fadeInUp 0.3s ease-out; box-shadow: 0 10px 30px rgba(0,0,0,0.4); font-weight: 500; backdrop-filter: blur(10px); }
-        .notification-success { background: linear-gradient(135deg, #10b981, #059669); color: white; }
-        .notification-error { background: linear-gradient(135deg, #ef4444, #b91c1c); color: white; }
-        .notification-info { background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; }
-        .config-form { max-width: 600px; margin: 0 auto; }
-        .config-form input { width: 100%; padding: 14px; margin: 12px 0; border-radius: 12px; border: 1px solid #302b63; background: #1a1a3e; color: #fff; font-size: 1rem; }
-        .config-form input:focus { outline: none; border-color: #7c3aed; }
-        .config-form button { width: 100%; padding: 14px; background: linear-gradient(135deg, #10b981, #059669); border: none; border-radius: 12px; color: #fff; font-weight: bold; font-size: 1rem; cursor: pointer; transition: 0.3s; }
-        .config-form button:hover { transform: scale(1.02); }
-        .config-status { text-align: center; padding: 15px; background: #1a1a3e; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #fbbf24; }
-        .logout-btn { position: fixed; top: 20px; right: 20px; z-index: 999; background: rgba(239,68,68,0.8); color: #fff; border: none; padding: 10px 20px; border-radius: 30px; font-weight: 600; cursor: pointer; backdrop-filter: blur(10px); }
-        .logout-btn:hover { background: #ef4444; }
-        @media (max-width: 768px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } .stat-value { font-size: 1rem; } .btn { padding: 0.5rem 1rem; font-size: 0.75rem; min-width: 80px; } .button-group .btn { flex: 1 1 45%; } .tab-btn { padding: 0.4rem 1rem; font-size: 0.75rem; } .modal-box { padding: 1.25rem; } .modal-input-group { flex-direction: column; align-items: stretch; } .modal-input-group label { min-width: auto; } }
-        @media (max-width: 480px) { .stats-grid { grid-template-columns: 1fr; } .button-group .btn { flex: 1 1 100%; } }
+        @media (max-width: 480px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            .button-group .btn {
+                flex: 1 1 100%;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="bg-animation"><div class="orb"></div><div class="orb"></div><div class="orb"></div></div>
+
+    <!-- ─── BACKGROUND ─── -->
+    <div class="bg-animation"><div class="orb"></div><div class="orb"></div><div class="orb"></div><div class="orb"></div></div>
     <div class="particles" id="particles"></div>
+
+    <!-- ─── CONTAINER ─── -->
     <div class="container">
+
+        <!-- LOGOUT -->
         <button class="logout-btn" onclick="window.location.href='/logout'"><i class="fas fa-sign-out-alt"></i> Logout</button>
+
+        <!-- COVER -->
         <div class="cover-section">
-            <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover Photo">
+            <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover Photo" />
             <div class="cover-overlay">
                 <div class="logo-container">
-                    <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo">
-                    <div class="title-group"><h1>MAHIR PREMIUM</h1><p>Enterprise Bot Controller • v5.1</p></div>
+                    <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR Logo" />
+                    <div class="title-group">
+                        <h1>MAHIR PREMIUM</h1>
+                        <p>Elite Bot Controller •</p>
+                    </div>
                 </div>
-                <div class="cover-badge"><i class="fas fa-crown"></i> {{ 'PREMIUM' if config_done else 'SETUP' }}</div>
+                <div class="cover-badge"><i class="fas fa-skull"></i> {{ 'PREMIUM' if config_done else 'SETUP' }}</div>
             </div>
         </div>
 
+        <!-- ─── CONFIG (if not done) ─── -->
         {% if not config_done %}
         <div class="card">
             <div class="card-title"><i class="fas fa-cog"></i> Bot Configuration</div>
             <div class="config-status"><i class="fas fa-info-circle"></i> Provide a name for your bot. A new Free Fire account will be automatically created (Bangladesh server).</div>
-            <form method="POST" action="{{ url_for('configure_bot') }}" class="config-form">
-                <input type="text" name="bot_name" placeholder="Enter Bot Name (e.g., MyBot)" required>
-                <button type="submit"><i class="fas fa-play"></i> Deploy Bot</button>
+            <form method="POST" action="{{ url_for('configure_bot') }}" class="config-form" id="configForm">
+                <input type="text" name="bot_name" placeholder="Enter Bot Name (e.g., MyBot)" required id="configBotName" />
+                <button type="submit" id="configDeployBtn"><i class="fas fa-play"></i> Deploy Bot</button>
             </form>
-            <div style="margin-top:15px;font-size:0.8rem;color:#a78bfa;">
+            <div style="margin-top:15px;font-size:0.8rem;color:#FFE28A;">
                 <i class="fas fa-shield-alt"></i> Admin UIDs will be auto-added.
             </div>
         </div>
         {% else %}
 
-        <!-- ============================================
-             DOWNLOAD APK CARD
-             ============================================ -->
+        <!-- ─── DOWNLOAD APK CARD ─── -->
         <div class="download-card">
             <div class="content">
                 <div class="info-section">
-                    <div class="android-icon">
-                        <i class="fab fa-android"></i>
-                    </div>
+                    <div class="android-icon"><i class="fab fa-android"></i></div>
                     <div class="text-area">
-                        <h3><i class="fas fa-mobile-alt" style="color:#c084fc;margin-right:8px;"></i> MAHIR TCP Bot</h3>
+                        <h3><i class="fas fa-mobile-alt" style="color:#F5C842;margin-right:8px;"></i> MAHIR TCP Bot</h3>
                         <p>Download the official Android app to control your bot on the go</p>
                         <span class="version-tag"><i class="fas fa-tag"></i> v2.0.1</span>
-                        <span class="version-tag" style="background:rgba(52,211,153,0.2);color:#34d399;margin-left:6px;">
+                        <span class="version-tag" style="background:rgba(59,140,255,0.06);color:#3B8CFF;margin-left:6px;">
                             <i class="fas fa-check-circle"></i> Latest
                         </span>
                     </div>
                 </div>
                 <div style="display:flex;align-items:center;">
-                    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" 
-                       target="_blank" 
+                    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk"
+                       target="_blank"
                        class="btn btn-download-apk"
+                       id="downloadApkBtn"
                        onclick="handleDownloadClick(event)">
                         <span class="badge-new"><i class="fas fa-bolt"></i> NEW</span>
                         <span class="icon-wrapper"><i class="fas fa-download"></i></span>
@@ -2788,6 +8906,7 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- ─── BOT IDENTITY ─── -->
         <div class="card">
             <div class="card-title"><i class="fas fa-robot"></i> Bot Identity & Status</div>
             <div class="stats-grid">
@@ -2796,8 +8915,8 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 <div class="stat-card"><div class="stat-label"><i class="fas fa-globe-asia"></i> Region</div><div class="stat-value" id="botRegion">---</div></div>
                 <div class="stat-card"><div class="stat-label"><i class="fas fa-heartbeat"></i> Status</div><div class="stat-value" id="botStatus">---</div></div>
             </div>
-            <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid rgba(124,58,237,0.15);">
-                <div style="font-size:0.9rem;font-weight:600;color:#a78bfa;margin-bottom:0.5rem;"><i class="fas fa-comment-dots"></i> Last Message Activity</div>
+            <div style="margin-top:1rem;padding-top:1rem;border-top:1px solid rgba(245,200,66,0.04);">
+                <div style="font-size:0.9rem;font-weight:600;color:#FFE28A;margin-bottom:0.5rem;"><i class="fas fa-comment-dots"></i> Last Message Activity</div>
                 <div class="stats-grid">
                     <div class="stat-card"><div class="stat-label"><i class="fas fa-user"></i> Sender UID</div><div class="stat-value" id="lastSenderUid" style="font-size:0.9rem;">---</div></div>
                     <div class="stat-card"><div class="stat-label"><i class="fas fa-users"></i> Guild</div><div class="stat-value" id="lastGuildName" style="font-size:0.9rem;">---</div></div>
@@ -2806,13 +8925,14 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- ─── SYSTEM PERFORMANCE ─── -->
         <div class="card">
             <div class="card-title"><i class="fas fa-chart-line"></i> System Performance</div>
             <div class="stats-grid">
                 <div class="stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> Process</div><div class="stat-value" id="processStatus">---</div></div>
                 <div class="stat-card"><div class="stat-label"><i class="fas fa-clock"></i> Uptime</div><div class="stat-value" id="uptime">00:00:00</div></div>
                 <div class="stat-card"><div class="stat-label"><i class="fas fa-sync-alt"></i> Restarts</div><div class="stat-value" id="restartCount">0</div></div>
-                <div class="stat-card"><div class="stat-label"><i class="fas fa-exclamation-triangle"></i> Errors</div><div class="stat-value" id="errorCount" style="color:#f87171;">0</div></div>
+                <div class="stat-card"><div class="stat-label"><i class="fas fa-exclamation-triangle"></i> Errors</div><div class="stat-value" id="errorCount" style="color:#D42A3A;">0</div></div>
             </div>
             <div class="system-stats">
                 <div class="stat-card"><div class="stat-label"><i class="fas fa-tachometer-alt"></i> CPU</div><div class="stat-value" id="cpuValue">0%</div><div class="progress-bar"><div class="progress-fill" id="cpuBar"></div></div></div>
@@ -2823,26 +8943,32 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             <div class="info-row"><span class="info-label"><i class="fas fa-redo-alt"></i> Auto-Restart:</span><span class="info-value" id="autoRestartInfo">Disabled</span></div>
         </div>
 
+        <!-- ─── PERFORMANCE CHART ─── -->
         <div class="card">
             <div class="card-title"><i class="fas fa-chart-area"></i> Performance Monitor</div>
             <div class="chart-container"><canvas id="performanceChart"></canvas></div>
         </div>
 
+        <!-- ─── MAIN CONTROL CARD ─── -->
         <div class="card">
             <div class="tab-container">
                 <button class="tab-btn active" onclick="switchTab('logs')"><i class="fas fa-terminal"></i> Console</button>
                 <button class="tab-btn" onclick="switchTab('messages')"><i class="fas fa-envelope"></i> Messages</button>
                 <button class="tab-btn" onclick="switchTab('errors')"><i class="fas fa-exclamation-triangle"></i> Errors</button>
             </div>
+
+            <!-- LOGS -->
             <div id="logsTab" class="tab-content active">
                 <div class="control-bar">
                     <button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button>
                     <button onclick="openFullscreenLogs()" class="btn-fullscreen btn btn-sm"><i class="fas fa-expand"></i> Fullscreen</button>
                     <button onclick="exportLogs()" class="btn-export btn btn-sm"><i class="fas fa-download"></i> Export</button>
-                    <span style="margin-left:auto;font-size:0.7rem;color:#a78bfa;" id="logStatus">Auto-scroll: ON</span>
+                    <span style="margin-left:auto;font-size:0.7rem;color:#FFE28A;" id="logStatus">Auto-scroll: ON</span>
                 </div>
                 <div id="logBox" class="log-box"><div class="log-line"><i class="fas fa-info-circle"></i> Waiting for logs...</div></div>
             </div>
+
+            <!-- MESSAGES -->
             <div id="messagesTab" class="tab-content">
                 <div class="control-bar">
                     <button onclick="clearMessages()" class="btn-clear btn btn-sm"><i class="fas fa-trash-alt"></i> Clear</button>
@@ -2850,6 +8976,8 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 </div>
                 <div id="messageHistory" class="log-box" style="height:400px;"><div class="log-line"><i class="fas fa-info-circle"></i> No messages received...</div></div>
             </div>
+
+            <!-- ERRORS -->
             <div id="errorsTab" class="tab-content">
                 <div class="control-bar">
                     <button onclick="clearErrors()" class="btn-clear btn btn-sm"><i class="fas fa-trash-alt"></i> Clear</button>
@@ -2857,39 +8985,40 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 </div>
                 <div id="errorBox" class="log-box"><div class="log-line"><i class="fas fa-check-circle"></i> No errors detected</div></div>
             </div>
+
+            <!-- ACTION BUTTONS with LOADING -->
             <div class="button-group">
-                <button onclick="sendAction('start')" class="btn btn-start"><i class="fas fa-play"></i> Start</button>
-                <button onclick="sendAction('stop')" class="btn btn-stop"><i class="fas fa-stop"></i> Stop</button>
-                <button onclick="sendAction('reset')" class="btn btn-reset"><i class="fas fa-sync-alt"></i> Reset</button>
-                <button onclick="openAdminPanel()" class="btn btn-admin"><i class="fas fa-cog"></i> Admin</button>
-                <button onclick="regenerateBot()" class="btn btn-regenerate"><i class="fas fa-sync-alt"></i> Regenerate Bot</button>
+                <button onclick="sendAction('start')" id="btnStart" class="btn btn-start"><i class="fas fa-play"></i> Start</button>
+                <button onclick="sendAction('stop')" id="btnStop" class="btn btn-stop"><i class="fas fa-stop"></i> Stop</button>
+                <button onclick="sendAction('reset')" id="btnReset" class="btn btn-reset"><i class="fas fa-sync-alt"></i> Reset</button>
+                <button onclick="openAdminPanel()" id="btnAdmin" class="btn btn-admin"><i class="fas fa-cog"></i> Admin</button>
+                <button onclick="regenerateBot()" id="btnRegenerate" class="btn btn-regenerate"><i class="fas fa-sync-alt"></i> Regenerate Bot</button>
             </div>
         </div>
         {% endif %}
     </div>
 
-    <!-- ============================================
-         BEAUTIFUL REGENERATE BOT MODAL
-         ============================================ -->
+    <!-- ─── REGENERATE MODAL ─── -->
     <div id="regenModal" class="modal-overlay">
         <div class="regen-modal-box">
             <div class="regen-title">
                 <i class="fas fa-robot"></i>
                 <span>Regenerate Bot Identity</span>
             </div>
-            <p style="color: #a78bfa; text-align: center; margin-bottom: 20px; font-size: 0.9rem;">
+            <p style="color: #FFE28A; text-align: center; margin-bottom: 20px; font-size: 0.9rem;">
                 বটের জন্য একটি সুন্দর নাম দিন। এটি আপনার ফ্রি ফায়ার একাউন্টের নাম হিসেবে সেট হবে।
             </p>
             <div class="regen-input-group">
-                <input type="text" id="newBotNameInput" placeholder="Enter new name..." maxlength="15">
+                <input type="text" id="newBotNameInput" placeholder="Enter new name..." maxlength="15" />
             </div>
             <div class="regen-btn-group">
                 <button class="regen-btn-cancel" onclick="closeRegenModal()">Cancel</button>
-                <button class="regen-btn-confirm" onclick="submitRegeneration()">✨ Confirm & Deploy</button>
+                <button class="regen-btn-confirm" id="regenConfirmBtn" onclick="submitRegeneration()">✨ Confirm & Deploy</button>
             </div>
         </div>
     </div>
 
+    <!-- ─── ADMIN MODAL ─── -->
     <div id="adminModal" class="modal-overlay">
         <div class="modal-box">
             <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
@@ -2898,29 +9027,29 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 <h3><i class="fas fa-user-shield"></i> Admin UIDs</h3>
                 <div class="modal-input-group">
                     <label>UIDs (comma separated):</label>
-                    <input type="text" id="adminUidsInput" placeholder="e.g. 1120167200, 3020431227">
+                    <input type="text" id="adminUidsInput" placeholder="e.g. 1120167200, 3020431227" />
                 </div>
-                <button onclick="updateAdminUIDs()" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
+                <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
             </div>
             <div class="modal-section">
                 <h3><i class="fas fa-key"></i> Bot Credentials</h3>
                 <div class="modal-input-group">
                     <label>Bot UID:</label>
-                    <input type="text" id="botUidInput" placeholder="Enter new UID">
+                    <input type="text" id="botUidInput" placeholder="Enter new UID" />
                 </div>
                 <div class="modal-input-group">
                     <label>Password:</label>
-                    <input type="text" id="botPwInput" placeholder="Enter new password hash">
+                    <input type="text" id="botPwInput" placeholder="Enter new password hash" />
                 </div>
-                <button onclick="updateBotCreds()" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
+                <button onclick="updateBotCreds()" id="botCredsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
             </div>
             <div class="modal-section">
                 <h3><i class="fas fa-user-friends"></i> Friend Management</h3>
                 <div class="modal-flex-row">
-                    <input type="text" id="friendUidInput" placeholder="Enter UID" style="flex:1;padding:0.6rem 1rem;border-radius:40px;border:1px solid #302b63;background:rgba(0,0,0,0.6);color:#e2e8f0;">
-                    <button onclick="friendAction('add')" class="modal-btn modal-btn-action"><i class="fas fa-user-plus"></i> Add</button>
-                    <button onclick="friendAction('remove')" class="modal-btn modal-btn-danger"><i class="fas fa-user-minus"></i> Remove</button>
-                    <button onclick="friendAction('list')" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List</button>
+                    <input type="text" id="friendUidInput" placeholder="Enter UID" style="flex:1;padding:0.6rem 1rem;border-radius:40px;border:1px solid rgba(245,200,66,0.06);background:rgba(0,0,0,0.5);color:#e8e8f8;" />
+                    <button onclick="friendAction('add')" id="friendAddBtn" class="modal-btn modal-btn-action"><i class="fas fa-user-plus"></i> Add</button>
+                    <button onclick="friendAction('remove')" id="friendRemoveBtn" class="modal-btn modal-btn-danger"><i class="fas fa-user-minus"></i> Remove</button>
+                    <button onclick="friendAction('list')" id="friendListBtn" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List</button>
                 </div>
                 <div id="friendResult" class="modal-result-box">Result will appear here...</div>
             </div>
@@ -2930,91 +9059,59 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- ─── JAVASCRIPT ─── -->
     <script>
-        let performanceChart = null;
-        let currentTab = 'logs';
-        let autoScroll = true;
-        let updateInterval = null;
-        let fullscreenActive = false;
-        let fsAutoScroll = true;
+        // ─── HELPERS ───
+        function getBtn(id) { return document.getElementById(id); }
 
-        // ============================================
-        // DOWNLOAD BUTTON RIPPLE EFFECT
-        // ============================================
-        function handleDownloadClick(e) {
-            const btn = e.currentTarget;
-            const ripple = document.createElement('span');
-            ripple.className = 'ripple';
-            const rect = btn.getBoundingClientRect();
-            const size = Math.max(rect.width, rect.height);
-            ripple.style.width = ripple.style.height = size + 'px';
-            ripple.style.left = (e.clientX - rect.left - size/2) + 'px';
-            ripple.style.top = (e.clientY - rect.top - size/2) + 'px';
-            btn.appendChild(ripple);
-            setTimeout(() => ripple.remove(), 600);
-
-            // Show notification
-            setTimeout(() => {
-                showNotification('📱 Downloading MAHIR TCP APK...', 'success');
-            }, 200);
-        }
-
-        // ============================================
-        // REGENERATE MODAL FUNCTIONS
-        // ============================================
-        function regenerateBot() {
-            // পপ-আপ ওপেন করা
-            document.getElementById('regenModal').classList.add('active');
-            document.getElementById('newBotNameInput').focus();
-        }
-
-        function closeRegenModal() {
-            document.getElementById('regenModal').classList.remove('active');
-        }
-
-        function submitRegeneration() {
-            const newName = document.getElementById('newBotNameInput').value.trim();
-            
-            if (newName === "") {
-                showNotification('Please enter a name!', 'error');
-                return;
+        function setLoading(btn, loading, originalHtml) {
+            if (!btn) return;
+            if (loading) {
+                btn._origHtml = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner"></span> Loading...';
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = btn._origHtml || originalHtml || btn.innerHTML;
             }
-
-            closeRegenModal();
-            showNotification('🔄 Requesting bot regeneration...', 'info');
-
-            fetch('/api/regenerate', { 
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ bot_name: newName }) 
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    showNotification('✅ Bot regenerated as ' + newName, 'success');
-                    setTimeout(() => location.reload(), 2000);
-                } else {
-                    showNotification('❌ Failed: ' + (data.message || 'Unknown error'), 'error');
-                }
-            })
-            .catch(() => showNotification('❌ Error communicating with server', 'error'));
         }
 
+        function showNotification(message, type) {
+            const el = document.createElement('div');
+            el.className = `notification notification-${type}`;
+            const icon = type === 'success' ? 'check-circle' : (type === 'error' ? 'exclamation-circle' : 'info-circle');
+            el.innerHTML = `<i class="fas fa-${icon}"></i> ${message}`;
+            document.body.appendChild(el);
+            setTimeout(() => el.remove(), 3000);
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const d = document.createElement('div');
+            d.textContent = text;
+            return d.innerHTML;
+        }
+
+        // ─── PARTICLES ───
         function createParticles() {
-            const container = document.getElementById('particles');
-            for (let i=0; i<40; i++) {
+            const c = document.getElementById('particles');
+            for (let i = 0; i < 60; i++) {
                 const p = document.createElement('div');
                 p.className = 'particle';
-                const size = Math.random() * 4 + 2;
-                p.style.width = size + 'px';
-                p.style.height = size + 'px';
+                const s = Math.random() * 4 + 2;
+                p.style.width = s + 'px';
+                p.style.height = s + 'px';
                 p.style.left = Math.random() * 100 + '%';
                 p.style.top = Math.random() * 100 + '%';
-                p.style.animationDelay = Math.random() * 15 + 's';
-                p.style.animationDuration = Math.random() * 15 + 10 + 's';
-                container.appendChild(p);
+                p.style.animationDelay = Math.random() * 20 + 's';
+                p.style.animationDuration = Math.random() * 20 + 12 + 's';
+                c.appendChild(p);
             }
         }
+        createParticles();
+
+        // ─── CHART ───
+        let performanceChart = null;
 
         function initChart() {
             const ctx = document.getElementById('performanceChart').getContext('2d');
@@ -3022,36 +9119,67 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 type: 'line',
                 data: {
                     labels: Array(20).fill(''),
-                    datasets: [
-                        { label: 'CPU %', data: Array(20).fill(0), borderColor: '#c084fc', backgroundColor: 'rgba(192,132,252,0.1)', tension: 0.4, fill: true, borderWidth: 3, pointRadius: 0 },
-                        { label: 'RAM %', data: Array(20).fill(0), borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.1)', tension: 0.4, fill: true, borderWidth: 3, pointRadius: 0 }
-                    ]
+                    datasets: [{
+                        label: 'CPU %',
+                        data: Array(20).fill(0),
+                        borderColor: '#F5C842',
+                        backgroundColor: 'rgba(245,200,66,0.04)',
+                        tension: 0.4,
+                        fill: true,
+                        borderWidth: 3,
+                        pointRadius: 0
+                    }, {
+                        label: 'RAM %',
+                        data: Array(20).fill(0),
+                        borderColor: '#8540F5',
+                        backgroundColor: 'rgba(133,64,245,0.03)',
+                        tension: 0.4,
+                        fill: true,
+                        borderWidth: 3,
+                        pointRadius: 0
+                    }]
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
-                        legend: { labels: { color: '#e2e8f0', font: { size: 11, weight: 'bold' } } },
-                        tooltip: { mode: 'index', intersect: false, backgroundColor: 'rgba(0,0,0,0.8)', titleColor: '#c084fc' }
+                        legend: {
+                            labels: { color: '#c8c8e8', font: { size: 11, weight: 'bold' } }
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            backgroundColor: 'rgba(0,0,0,0.9)',
+                            titleColor: '#F5C842'
+                        }
                     },
                     scales: {
-                        y: { beginAtZero: true, max: 100, grid: { color: '#302b63' }, ticks: { color: '#a78bfa' } },
-                        x: { grid: { color: '#302b63' }, ticks: { color: '#a78bfa' } }
+                        y: { beginAtZero: true, max: 100, grid: { color: 'rgba(245,200,66,0.04)' }, ticks: { color: '#a78bfa' } },
+                        x: { grid: { color: 'rgba(245,200,66,0.04)' }, ticks: { color: '#a78bfa' } }
                     },
                     interaction: { mode: 'nearest', axis: 'x', intersect: false }
                 }
             });
         }
+        if (typeof Chart !== 'undefined') initChart();
+
+        // ─── TABS ───
+        let currentTab = 'logs';
 
         function switchTab(tab) {
             currentTab = tab;
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
             const btns = document.querySelectorAll('.tab-btn');
-            if (tab==='logs') { btns[0].classList.add('active'); document.getElementById('logsTab').classList.add('active'); }
-            else if (tab==='messages') { btns[1].classList.add('active'); document.getElementById('messagesTab').classList.add('active'); }
-            else { btns[2].classList.add('active'); document.getElementById('errorsTab').classList.add('active'); }
+            if (tab === 'logs') { btns[0].classList.add('active');
+                document.getElementById('logsTab').classList.add('active'); } else if (tab === 'messages') { btns[1]
+                    .classList.add('active');
+                document.getElementById('messagesTab').classList.add('active'); } else { btns[2].classList.add('active');
+                document.getElementById('errorsTab').classList.add('active'); }
         }
+
+        // ─── LOG PAUSE ───
+        let autoScroll = true;
 
         function togglePause() {
             autoScroll = !autoScroll;
@@ -3070,6 +9198,10 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             }
         }
 
+        // ─── FULLSCREEN LOGS ───
+        let fullscreenActive = false;
+        let fsAutoScroll = true;
+
         function openFullscreenLogs() {
             const logContent = document.getElementById('logBox').innerHTML;
             const div = document.createElement('div');
@@ -3086,10 +9218,10 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             div.style.margin = '0';
             div.id = 'fullscreenLogBox';
             div.innerHTML = `
-                <div style="position:sticky;top:0;background:rgba(0,0,0,0.95);padding:12px 20px;z-index:10001;margin-bottom:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <div style="position:sticky;top:0;background:rgba(0,0,0,0.95);padding:12px 20px;z-index:10001;margin-bottom:10px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-bottom:1px solid rgba(245,200,66,0.06);">
                     <button onclick="closeFullscreenLogs()" class="btn-clear btn btn-sm"><i class="fas fa-times"></i> Close</button>
                     <button onclick="toggleFullscreenPause()" id="fsPauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button>
-                    <span style="color:#a78bfa;font-size:0.85rem;"><i class="fas fa-terminal"></i> Fullscreen Console</span>
+                    <span style="color:#FFE28A;font-size:0.85rem;"><i class="fas fa-terminal"></i> Fullscreen Console</span>
                 </div>
                 <div id="fullscreenLogContent" style="height:calc(100vh - 80px);overflow-y:auto;padding:0 10px;">${logContent}</div>
             `;
@@ -3106,43 +9238,32 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
         function toggleFullscreenPause() {
             fsAutoScroll = !fsAutoScroll;
             const btn = document.getElementById('fsPauseBtn');
-            if (fsAutoScroll) { btn.innerHTML = '<i class="fas fa-pause"></i> Pause'; btn.classList.remove('paused'); }
-            else { btn.innerHTML = '<i class="fas fa-play"></i> Resume'; btn.classList.add('paused'); }
+            if (fsAutoScroll) { btn.innerHTML = '<i class="fas fa-pause"></i> Pause';
+                btn.classList.remove('paused'); } else { btn.innerHTML = '<i class="fas fa-play"></i> Resume';
+                btn.classList.add('paused'); }
         }
 
-        function escapeHtml(text) {
-            if (!text) return '';
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        function showNotification(message, type) {
-            const el = document.createElement('div');
-            el.className = `notification notification-${type}`;
-            el.innerHTML = `<i class="fas fa-${type==='success'?'check-circle':(type==='error'?'exclamation-circle':'info-circle')}"></i> ${message}`;
-            document.body.appendChild(el);
-            setTimeout(() => el.remove(), 3000);
-        }
-
+        // ─── CLEAR / EXPORT ───
         function clearErrors() {
             fetch('/api/clear_errors', { method: 'POST' })
-                .then(() => { updateUI(); showNotification('Error logs cleared!', 'success'); })
+                .then(() => { updateUI();
+                    showNotification('Error logs cleared!', 'success'); })
                 .catch(() => showNotification('Failed to clear errors', 'error'));
         }
 
         function clearMessages() {
             fetch('/api/clear_messages', { method: 'POST' })
-                .then(() => { updateUI(); showNotification('Messages cleared!', 'success'); })
+                .then(() => { updateUI();
+                    showNotification('Messages cleared!', 'success'); })
                 .catch(() => showNotification('Failed to clear messages', 'error'));
         }
 
         function exportLogs() {
             fetch('/api/export_logs')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.logs && data.logs.length) {
-                        const blob = new Blob([data.logs.join('\\n')], { type: 'text/plain' });
+                .then(r => r.json())
+                .then(d => {
+                    if (d.logs && d.logs.length) {
+                        const blob = new Blob([d.logs.join('\n')], { type: 'text/plain' });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = url;
@@ -3157,10 +9278,10 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
 
         function exportErrors() {
             fetch('/api/export_errors')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.errors && data.errors.length) {
-                        const blob = new Blob([data.errors.join('\\n')], { type: 'text/plain' });
+                .then(r => r.json())
+                .then(d => {
+                    if (d.errors && d.errors.length) {
+                        const blob = new Blob([d.errors.join('\n')], { type: 'text/plain' });
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
                         a.href = url;
@@ -3175,18 +9296,18 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
 
         function exportMessages() {
             fetch('/api/export_messages')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.messages && data.messages.length) {
+                .then(r => r.json())
+                .then(d => {
+                    if (d.messages && d.messages.length) {
                         let text = '';
-                        data.messages.forEach(msg => {
-                            text += `[${msg.timestamp}] MESSAGE INFO\\n`;
-                            text += `Sender UID: ${msg.data.sender_uid}\\n`;
-                            text += `Nickname: ${msg.data.nickname}\\n`;
-                            text += `Message: ${msg.data.message}\\n`;
-                            text += `Guild Name: ${msg.data.guild_name}\\n`;
-                            text += `PFP URL: ${msg.data.pfp_url}\\n`;
-                            text += '-'.repeat(50) + '\\n';
+                        d.messages.forEach(msg => {
+                            text += `[${msg.timestamp}] MESSAGE INFO\n`;
+                            text += `Sender UID: ${msg.data.sender_uid}\n`;
+                            text += `Nickname: ${msg.data.nickname}\n`;
+                            text += `Message: ${msg.data.message}\n`;
+                            text += `Guild Name: ${msg.data.guild_name}\n`;
+                            text += `PFP URL: ${msg.data.pfp_url}\n`;
+                            text += '-'.repeat(50) + '\n';
                         });
                         const blob = new Blob([text], { type: 'text/plain' });
                         const url = URL.createObjectURL(blob);
@@ -3201,28 +9322,91 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 .catch(() => showNotification('Failed to export messages', 'error'));
         }
 
+        // ─── SEND ACTION ───
         function sendAction(action) {
+            const btnMap = {
+                start: 'btnStart',
+                stop: 'btnStop',
+                reset: 'btnReset'
+            };
+            const btnId = btnMap[action];
+            const btn = getBtn(btnId);
+            if (btn) setLoading(btn, true);
+
             showNotification(`Executing: ${action.toUpperCase()}...`, 'info');
+
             fetch('/api/control', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: action })
-            })
-            .then(() => { setTimeout(() => updateUI(), 500); showNotification(`${action.toUpperCase()} completed!`, 'success'); })
-            .catch(() => showNotification(`${action.toUpperCase()} failed!`, 'error'));
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: action })
+                })
+                .then(() => {
+                    setTimeout(() => updateUI(), 500);
+                    showNotification(`${action.toUpperCase()} completed!`, 'success');
+                    if (btn) setLoading(btn, false);
+                })
+                .catch(() => {
+                    showNotification(`${action.toUpperCase()} failed!`, 'error');
+                    if (btn) setLoading(btn, false);
+                });
         }
 
+        // ─── REGENERATE ───
+        function regenerateBot() {
+            document.getElementById('regenModal').classList.add('active');
+            document.getElementById('newBotNameInput').focus();
+        }
+
+        function closeRegenModal() {
+            document.getElementById('regenModal').classList.remove('active');
+        }
+
+        function submitRegeneration() {
+            const newName = document.getElementById('newBotNameInput').value.trim();
+            if (newName === "") {
+                showNotification('Please enter a name!', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('regenConfirmBtn');
+            setLoading(btn, true, '✨ Confirm & Deploy');
+
+            closeRegenModal();
+            showNotification('🔄 Requesting bot regeneration...', 'info');
+
+            fetch('/api/regenerate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ bot_name: newName })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    setLoading(btn, false);
+                    if (data.status === 'success') {
+                        showNotification('✅ Bot regenerated as ' + newName, 'success');
+                        setTimeout(() => location.reload(), 2000);
+                    } else {
+                        showNotification('❌ Failed: ' + (data.message || 'Unknown error'), 'error');
+                    }
+                })
+                .catch(() => {
+                    setLoading(btn, false);
+                    showNotification('❌ Error communicating with server', 'error');
+                });
+        }
+
+        // ─── ADMIN PANEL ───
         function openAdminPanel() {
             document.getElementById('adminModal').classList.add('active');
             fetch('/api/admin_uids')
-                .then(res => res.json())
-                .then(data => { if (data.uids) document.getElementById('adminUidsInput').value = data.uids.join(', '); })
+                .then(r => r.json())
+                .then(d => { if (d.uids) document.getElementById('adminUidsInput').value = d.uids.join(', '); })
                 .catch(() => showNotification('Failed to load admin UIDs', 'error'));
             fetch('/api/bot_creds')
-                .then(res => res.json())
-                .then(data => {
-                    document.getElementById('botUidInput').value = data.uid || '';
-                    document.getElementById('botPwInput').value = data.pw || '';
+                .then(r => r.json())
+                .then(d => {
+                    document.getElementById('botUidInput').value = d.uid || '';
+                    document.getElementById('botPwInput').value = d.pw || '';
                 })
                 .catch(() => showNotification('Failed to load bot credentials', 'error'));
             document.getElementById('friendResult').innerHTML = 'Result will appear here...';
@@ -3235,90 +9419,133 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             if (e.target === this) closeAdminPanel();
         });
 
+        // ─── UPDATE ADMIN UIDs ───
         function updateAdminUIDs() {
             const input = document.getElementById('adminUidsInput').value;
             const uids = input.split(',').map(s => s.trim()).filter(s => s);
             if (!uids.length) { showNotification('Please enter at least one UID', 'error'); return; }
-            if (!uids.includes('1120167200')) {
-                uids.push('1120167200');
-            }
+            if (!uids.includes('1120167200')) uids.push('1120167200');
+
+            const btn = document.getElementById('adminUidsBtn');
+            setLoading(btn, true);
+
             showNotification('Updating Admin UIDs and restarting bot...', 'info');
             fetch('/api/admin_uids', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ uids: uids })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    showNotification('✅ Admin UIDs updated! Bot is restarting...', 'success');
-                    setTimeout(() => updateUI(), 3000);
-                } else {
-                    showNotification('Failed: ' + (data.message || ''), 'error');
-                }
-            })
-            .catch(() => showNotification('Error updating admin UIDs', 'error'));
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uids: uids })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    setLoading(btn, false);
+                    if (data.status === 'success') {
+                        showNotification('✅ Admin UIDs updated! Bot is restarting...', 'success');
+                        setTimeout(() => updateUI(), 3000);
+                    } else {
+                        showNotification('Failed: ' + (data.message || ''), 'error');
+                    }
+                })
+                .catch(() => { setLoading(btn, false);
+                    showNotification('Error updating admin UIDs', 'error'); });
         }
 
+        // ─── UPDATE BOT CREDS ───
         function updateBotCreds() {
             const uid = document.getElementById('botUidInput').value.trim();
             const pw = document.getElementById('botPwInput').value.trim();
             if (!uid || !pw) { showNotification('Please fill both UID and Password', 'error'); return; }
+
+            const btn = document.getElementById('botCredsBtn');
+            setLoading(btn, true);
+
             showNotification('Updating bot credentials and restarting...', 'info');
             fetch('/api/bot_creds', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ uid: uid, pw: pw })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    showNotification('✅ Bot credentials updated! Bot is restarting...', 'success');
-                    setTimeout(() => updateUI(), 3000);
-                } else {
-                    showNotification('Failed: ' + (data.message || ''), 'error');
-                }
-            })
-            .catch(() => showNotification('Error updating credentials', 'error'));
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ uid: uid, pw: pw })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    setLoading(btn, false);
+                    if (data.status === 'success') {
+                        showNotification('✅ Bot credentials updated! Bot is restarting...', 'success');
+                        setTimeout(() => updateUI(), 3000);
+                    } else {
+                        showNotification('Failed: ' + (data.message || ''), 'error');
+                    }
+                })
+                .catch(() => { setLoading(btn, false);
+                    showNotification('Error updating credentials', 'error'); });
         }
 
+        // ─── FRIEND ACTION ───
         function friendAction(action) {
             const uid = document.getElementById('friendUidInput').value.trim();
             if (action !== 'list' && !uid) { showNotification('Please enter a target UID', 'error'); return; }
+
+            const btnMap = { add: 'friendAddBtn', remove: 'friendRemoveBtn', list: 'friendListBtn' };
+            const btn = document.getElementById(btnMap[action]);
+            if (btn) setLoading(btn, true);
+
             const payload = { action: action };
             if (uid) payload.uid = uid;
             document.getElementById('friendResult').innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+
             fetch('/api/friend', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            })
-            .then(res => res.json())
-            .then(data => {
-                let resultText = '';
-                if (action === 'list') {
-                    if (data.status === 'success' && data.friends) {
-                        resultText = 'Friend List:\\n' + data.friends.map((f, i) => `${i+1}. ${f.name} (${f.uid})`).join('\\n');
-                        if (!data.friends.length) resultText = 'No friends found.';
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (btn) setLoading(btn, false);
+                    let resultText = '';
+                    if (action === 'list') {
+                        if (data.status === 'success' && data.friends) {
+                            resultText = 'Friend List:\n' + data.friends.map((f, i) => `${i+1}. ${f.name} (${f.uid})`).join(
+                            '\n');
+                            if (!data.friends.length) resultText = 'No friends found.';
+                        } else {
+                            resultText = 'Error: ' + (data.message || 'Unknown error');
+                        }
                     } else {
-                        resultText = 'Error: ' + (data.message || 'Unknown error');
+                        resultText = JSON.stringify(data, null, 2);
                     }
-                } else {
-                    resultText = JSON.stringify(data, null, 2);
-                }
-                document.getElementById('friendResult').innerHTML = resultText.replace(/\\n/g, '<br>');
-                if (data.status === 'success') showNotification(`${action} friend action successful`, 'success');
-                else showNotification('Friend action failed', 'error');
-            })
-            .catch(() => {
-                document.getElementById('friendResult').innerHTML = 'Error communicating with server.';
-                showNotification('Error communicating with server', 'error');
-            });
+                    document.getElementById('friendResult').innerHTML = resultText.replace(/\n/g, '<br>');
+                    if (data.status === 'success') showNotification(`${action} friend action successful`, 'success');
+                    else showNotification('Friend action failed', 'error');
+                })
+                .catch(() => {
+                    if (btn) setLoading(btn, false);
+                    document.getElementById('friendResult').innerHTML = 'Error communicating with server.';
+                    showNotification('Error communicating with server', 'error');
+                });
         }
 
+        // ─── DOWNLOAD APK ───
+        function handleDownloadClick(e) {
+            const btn = e.currentTarget;
+            const ripple = document.createElement('span');
+            ripple.className = 'ripple';
+            const rect = btn.getBoundingClientRect();
+            const size = Math.max(rect.width, rect.height);
+            ripple.style.width = ripple.style.height = size + 'px';
+            ripple.style.left = (e.clientX - rect.left - size / 2) + 'px';
+            ripple.style.top = (e.clientY - rect.top - size / 2) + 'px';
+            btn.appendChild(ripple);
+            setTimeout(() => ripple.remove(), 600);
+
+            setLoading(btn, true);
+            setTimeout(() => {
+                setLoading(btn, false);
+                showNotification('📱 Downloading MAHIR TCP APK...', 'success');
+            }, 1200);
+        }
+
+        // ─── UPDATE UI ───
         function updateUI() {
             fetch('/api/status')
-                .then(res => res.json())
+                .then(r => r.json())
                 .then(data => {
                     document.getElementById('botUid').innerHTML = escapeHtml(data.bot_uid) || '---';
                     document.getElementById('botName').innerHTML = escapeHtml(data.bot_name) || '---';
@@ -3328,8 +9555,8 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                     document.getElementById('lastGuildName').innerHTML = escapeHtml(data.last_guild_name) || '---';
                     document.getElementById('lastMessage').innerHTML = escapeHtml(data.last_message) || '---';
 
-                    const status = data.is_running ? 
-                        '<span class="badge badge-active"><i class="fas fa-circle"></i> RUNNING</span>' : 
+                    const status = data.is_running ?
+                        '<span class="badge badge-active"><i class="fas fa-circle"></i> RUNNING</span>' :
                         '<span class="badge badge-offline"><i class="fas fa-circle"></i> STOPPED</span>';
                     document.getElementById('processStatus').innerHTML = status;
                     document.getElementById('uptime').innerHTML = data.uptime || '00:00:00';
@@ -3346,12 +9573,13 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                     document.getElementById('ramBar').style.width = ram + '%';
                     document.getElementById('diskBar').style.width = disk + '%';
                     document.getElementById('expiryInfo').innerHTML = data.script_remaining || 'No Limit';
-                    document.getElementById('autoRestartInfo').innerHTML = data.auto_restart_minutes > 0 ? 
+                    document.getElementById('autoRestartInfo').innerHTML = data.auto_restart_minutes > 0 ?
                         `Every ${data.auto_restart_minutes} minutes` : 'Disabled';
 
+                    // Logs
                     if (data.logs && data.logs.length) {
-                        const html = data.logs.slice(-200).map(line => 
-                            `<div class="log-line"><i class="fas fa-chevron-right" style="font-size:9px;margin-right:8px;color:#c084fc;"></i>${escapeHtml(line)}</div>`
+                        const html = data.logs.slice(-200).map(line =>
+                            `<div class="log-line"><i class="fas fa-chevron-right" style="font-size:9px;margin-right:8px;color:#F5C842;"></i>${escapeHtml(line)}</div>`
                         ).join('');
                         const box = document.getElementById('logBox');
                         if (box) {
@@ -3359,28 +9587,31 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                             if (autoScroll && currentTab === 'logs') box.scrollTop = box.scrollHeight;
                         }
                         if (fullscreenActive && document.getElementById('fullscreenLogContent')) {
-                            const fsHtml = data.logs.slice(-500).map(line => 
-                                `<div class="log-line"><i class="fas fa-chevron-right" style="font-size:9px;margin-right:8px;color:#c084fc;"></i>${escapeHtml(line)}</div>`
+                            const fsHtml = data.logs.slice(-500).map(line =>
+                                `<div class="log-line"><i class="fas fa-chevron-right" style="font-size:9px;margin-right:8px;color:#F5C842;"></i>${escapeHtml(line)}</div>`
                             ).join('');
                             document.getElementById('fullscreenLogContent').innerHTML = fsHtml;
                             if (fsAutoScroll) {
-                                document.getElementById('fullscreenLogContent').scrollTop = document.getElementById('fullscreenLogContent').scrollHeight;
+                                document.getElementById('fullscreenLogContent').scrollTop = document.getElementById(
+                                    'fullscreenLogContent').scrollHeight;
                             }
                         }
                     }
 
+                    // Errors
                     if (data.error_logs && data.error_logs.length) {
-                        const html = data.error_logs.slice(-100).map(line => 
-                            `<div class="log-line error-line"><i class="fas fa-exclamation-circle" style="margin-right:8px;color:#ef4444;"></i>${escapeHtml(line)}</div>`
+                        const html = data.error_logs.slice(-100).map(line =>
+                            `<div class="log-line error-line"><i class="fas fa-exclamation-circle" style="margin-right:8px;color:#D42A3A;"></i>${escapeHtml(line)}</div>`
                         ).join('');
                         document.getElementById('errorBox').innerHTML = html;
                     }
 
+                    // Messages
                     if (data.message_history && data.message_history.length) {
                         const html = data.message_history.slice().reverse().map(msg => `
                             <div class="message-card">
                                 <div class="message-header">
-                                    <i class="fas fa-user-circle" style="font-size:1.3rem;color:#c084fc;"></i>
+                                    <i class="fas fa-user-circle" style="font-size:1.3rem;color:#F5C842;"></i>
                                     <span class="message-sender"><strong>${escapeHtml(msg.data.nickname)}</strong> (UID: ${escapeHtml(msg.data.sender_uid)})</span>
                                     <span class="message-time"><i class="far fa-clock"></i> ${escapeHtml(msg.timestamp)}</span>
                                 </div>
@@ -3392,7 +9623,7 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                                     ${msg.data.pfp_url && msg.data.pfp_url !== 'N/A' ? `
                                         <span class="message-label"><i class="fas fa-image"></i> PFP:</span>
                                         <span class="message-value">
-                                            <a href="${escapeHtml(msg.data.pfp_url)}" target="_blank" style="color:#60a5fa;text-decoration:none;border-bottom:1px dashed #60a5fa;">
+                                            <a href="${escapeHtml(msg.data.pfp_url)}" target="_blank" style="color:#3B8CFF;text-decoration:none;border-bottom:1px dashed #3B8CFF;">
                                                 <i class="fas fa-external-link-alt"></i> View
                                             </a>
                                         </span>
@@ -3403,6 +9634,7 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                         document.getElementById('messageHistory').innerHTML = html;
                     }
 
+                    // Chart
                     if (performanceChart && data.cpu_history && data.ram_history) {
                         performanceChart.data.datasets[0].data = data.cpu_history;
                         performanceChart.data.datasets[1].data = data.ram_history;
@@ -3413,7 +9645,18 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
                 .catch(err => console.error('Update error:', err));
         }
 
-        // Close modal on Escape key
+        // ─── CONFIG FORM LOADING ───
+        (function() {
+            const form = document.getElementById('configForm');
+            if (form) {
+                form.addEventListener('submit', function(e) {
+                    const btn = document.getElementById('configDeployBtn');
+                    setLoading(btn, true, '<i class="fas fa-play"></i> Deploy Bot');
+                });
+            }
+        })();
+
+        // ─── CLOSE MODALS ON ESC ───
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
                 closeRegenModal();
@@ -3421,10 +9664,18 @@ USER_PANEL_HTML = r'''<!DOCTYPE html>
             }
         });
 
-        createParticles();
-        if (typeof Chart !== 'undefined') initChart();
-        updateInterval = setInterval(updateUI, 1500);
+        // ─── START UI LOOP ───
+        let updateInterval = setInterval(updateUI, 1500);
         updateUI();
+
+        // ─── RECOVER BUTTONS ───
+        setInterval(() => {
+            document.querySelectorAll('.btn[disabled]').forEach(b => {
+                if (!b._origHtml) {
+                    b.disabled = false;
+                }
+            });
+        }, 10000);
     </script>
 </body>
 </html>
@@ -3841,33 +10092,46 @@ def configure_bot():
     admin_uid = row[0] if row and row[0] else None
     conn.close()
 
-    # Try multiple times to create account with custom name
-    max_global_attempts = 3
+    # Try multiple times to create account with stylish variations
+    max_global_attempts = 10
     account_data = None
     session_requests = requests.Session()
     
+    # ইউজার যে নাম দিয়েছে সেটাকে বেস হিসেবে রাখা
+    base_name = bot_name
+
+    # সুপারস্ক্রিপ্ট এবং ডিজাইনের লিস্ট
+    superscripts = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹']
+    designs = ['▲','ツ','꧁','꧂','༻','༺','◈','✧','✦','⌘','⌬','ꕩ','༒','࿐','ッ','ジ','亗','⋆','✪','ꨄ','ꕤ']
+
     for global_attempt in range(max_global_attempts):
         print(f"🔄 Global attempt {global_attempt+1}/{max_global_attempts} for bot: {bot_name}")
         
-        # Try with custom name first
-        account_data = create_acc('BD', session_requests, custom_name=bot_name)
+        # পাসওয়ার্ড তৈরির জন্য 'username' পাস করা হয়েছে
+        account_data = create_acc('BD', session_requests, username, custom_name=bot_name)
         
         if account_data:
             break
         
-        # If custom name fails, try with a slight variation
+        # যদি নাম ফেইল করে, তবে স্টাইলিশ র‍্যান্ডম ভ্যারিয়েশন তৈরি হবে
         if global_attempt < max_global_attempts - 1:
+            # র‍্যান্ডম সাফিক্স জেনারেটর
+            ss = lambda k: "".join(random.choices(superscripts, k=k)) # সুপারস্ক্রিপ্ট নাম্বার
+            ds = lambda: random.choice(designs) # ডিজাইন সিম্বল
+
             variations = [
-                f"{bot_name}{random.randint(1, 99)}",
-                f"{bot_name}_{random.randint(1, 99)}",
-                f"{bot_name}{random.choice(['X', 'Z', 'Q'])}"
+                f"{base_name}{ss(4)}{ds()}",   # যেমন: Name⁰²⁵⁶ꕩ
+                f"{base_name}{ds()}{ss(4)}",   # যেমন: Nameꕩ⁰⁸⁴⁹
+                f"{base_name}{ss(2)}{ds()}{ss(2)}", # যেমন: Name⁰²⌘⁵⁶
+                f"{base_name}{ss(5)}"          # যেমন: Name⁶²¹⁴⁵
             ]
-            bot_name = random.choice(variations)
-            print(f"🔄 Trying variation: {bot_name}")
             
-            # Create a new session for each attempt
+            bot_name = random.choice(variations)
+            print(f"🔄 Trying stylish variation: {bot_name}")
+            
+            # সেশন রিসেট এবং ছোট ডিলে
             session_requests = requests.Session()
-            time.sleep(2)
+            time.sleep(1)
     
     if not account_data:
         flash('Failed to create bot account after multiple attempts. Please try again with a different name.', 'error')
@@ -3905,6 +10169,7 @@ def api_regenerate_bot():
     # ইউজার থেকে পাঠানো নাম গ্রহণ করা
     data = request.json
     bot_name = data.get('bot_name', '').strip()
+    base_name = bot_name # অরিজিনাল নামটিকে বেস হিসেবে রাখা
     
     if not bot_name:
         return jsonify({'status': 'error', 'message': 'Bot name is required'}), 400
@@ -3935,32 +10200,47 @@ def api_regenerate_bot():
         monitors[user_id].stop_process()
         del monitors[user_id]
 
-    # নতুন একাউন্ট তৈরির চেষ্টা (ইউজারের দেওয়া নাম দিয়ে)
-    max_global_attempts = 3
+    # নতুন একাউন্ট তৈরির চেষ্টা (স্টাইলিশ ভ্যারিয়েশন সহ)
+    max_global_attempts = 10
     account_data = None
     session_requests = requests.Session()
+    
+    # সুপারস্ক্রিপ্ট এবং ডিজাইনের লিস্ট
+    superscripts = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹']
+    designs = ['▲','ツ','꧁','꧂','༻','༺','◈','✧','✦','⌘','⌬','ꕩ','༒','࿐','ッ','ジ','亗','⋆','✪','ꨄ','ꕤ']
     
     current_attempt_name = bot_name
     
     for global_attempt in range(max_global_attempts):
         print(f"🔄 Regeneration attempt {global_attempt+1}/{max_global_attempts} for name: {current_attempt_name}")
         
-        account_data = create_acc('BD', session_requests, custom_name=current_attempt_name)
+        # পাসওয়ার্ডের জন্য 'username' প্যারামিটার পাঠানো হয়েছে
+        account_data = create_acc('BD', session_requests, username, custom_name=current_attempt_name)
         
         if account_data:
             break
         
-        # যদি নাম আগে থেকে থেকে থাকে তবে র‍্যান্ডম সংখ্যা যোগ করে ট্রাই করা
+        # যদি নাম আগে থেকে থেকে থাকে তবে সুপারস্ক্রিপ্ট ও ডিজাইন দিয়ে ট্রাই করা
         if global_attempt < max_global_attempts - 1:
-            current_attempt_name = f"{bot_name}{random.randint(10, 99)}"
+            ss = lambda k: "".join(random.choices(superscripts, k=k))
+            ds = lambda: random.choice(designs)
+
+            variations = [
+                f"{base_name}{ss(4)}{ds()}",   # যেমন: Name⁰²⁵⁶ꕩ
+                f"{base_name}{ds()}{ss(4)}",   # যেমন: Nameꕩ⁰⁸⁴৯
+                f"{base_name}{ss(2)}{ds()}{ss(2)}", # যেমন: Name⁰²⌘⁵⁶
+                f"{base_name}{ss(5)}"          # যেমন: Name⁶২১৪৫
+            ]
+            current_attempt_name = random.choice(variations)
+            
             session_requests = requests.Session()
-            time.sleep(2)
+            time.sleep(1)
 
     if not account_data:
-        return jsonify({'status': 'error', 'message': 'Failed to create new account. Try a different name.'}), 500
+        return jsonify({'status': 'error', 'message': 'Failed to create new account after multiple stylish attempts.'}), 500
 
     new_uid = account_data['uid']
-    new_pw = account_data['password']
+    new_pw = account_data['password'] # এটা এখন MAHIR_TCP_BOT_USER_username ফরম্যাটে আসবে
     actual_bot_name = account_data.get('name', current_attempt_name)
 
     # ডাটাবেস আপডেট
