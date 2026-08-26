@@ -106,7 +106,7 @@ def check_password(stored, provided):
 # ========== Bio Update Function ==========
 def update_bot_bio(uid, password, username):
     """Update bot bio via MAHIR long-bio API."""
-    bio_text = f"[c][b][i][00BFFF]{username} [00FF00]বটে আপনাকে স্বাগতম। [FFFF00]নিজের জন্য এমন একটি Bot কিনতে চাইলে যোগাযোগ করুন আমাদের WEBSITE NAME: [00FFFF]MAHIR.XO.JE"
+    bio_text = f"[c][b][i][00BFFF]{username} [00FF00]বটে আপনাকে স্বাগতম। [FFFF00]নিজের জন্য এমন একটি Bot কিনতে চাইলে যোগাযোগ করুন আমাদের [7CFC00]WEBSITE NAME: [00FFFF]MAHIR.XO.JE [00FF00]TIKTOK [00FFFF]: [00FFFF]MAHIR__222"
     encoded = requests.utils.quote(bio_text)
     url = f"https://mahir-long-bio.vercel.app/bio_upload?bio={encoded}&uid={uid}&pass={password}"
     try:
@@ -4120,10 +4120,57 @@ def admin_delete_agent(agent_id):
 def admin_delete_key(key_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('DELETE FROM keys WHERE id=?', (key_id,))
-    conn.commit()
+    
+    # ১. কি-এর টেক্সট সংগ্রহ করা
+    c.execute('SELECT key FROM keys WHERE id=?', (key_id,))
+    key_row = c.fetchone()
+    
+    if key_row:
+        reg_key = key_row[0]
+        
+        # ২. এই কি ব্যবহারকারী ইউজারদের তথ্য নেওয়া
+        c.execute('SELECT id, bot_file FROM users WHERE registration_key = ?', (reg_key,))
+        associated_users = c.fetchall()
+        
+        for user_id, bot_file in associated_users:
+            # ৩. রানিং বট বন্ধ করা
+            if user_id in monitors:
+                try:
+                    monitors[user_id].stop_process()
+                    del monitors[user_id]
+                except:
+                    pass
+            
+            if bot_file:
+                # ৪. মেইন বট ফাইল ডিলিট করা (যেমন: username_mahir.py)
+                bot_path = os.path.join(USER_BOTS_DIR, bot_file)
+                if os.path.exists(bot_path):
+                    try:
+                        os.remove(bot_path)
+                    except:
+                        pass
+                
+                login_filename = bot_file.replace(".py", "_login.py")
+                login_path = os.path.join(USER_BOTS_DIR, login_filename)
+                
+                if os.path.exists(login_path):
+                    try:
+                        os.remove(login_path)
+                        print(f"✅ Deleted login file: {login_filename}")
+                    except Exception as e:
+                        print(f"❌ Error deleting login file: {e}")
+            
+            # ৬. ডাটাবেস থেকে ইউজার ডিলিট
+            c.execute('DELETE FROM users WHERE id = ?', (user_id,))
+        
+        # ৭. কি (Key) ডিলিট করা
+        c.execute('DELETE FROM keys WHERE id = ?', (key_id,))
+        conn.commit()
+        flash('কি, সংশ্লিষ্ট ইউজার এবং তাদের সকল ফাইল (Bot + Login) ডিলিট করা হয়েছে।', 'success')
+    else:
+        flash('কি খুঁজে পাওয়া যায়নি!', 'error')
+        
     conn.close()
-    flash('Key deleted', 'success')
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/create_key', methods=['POST'])
