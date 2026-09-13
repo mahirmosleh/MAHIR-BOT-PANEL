@@ -37,25 +37,39 @@ init(autoreset=True)
 
 # ========== Configuration ==========
 app = Flask(__name__)
-SECRET_KEY_FILE = "secret.key"
+
+# ✅ Persistent secret key
+SECRET_KEY_FILE = ".secret_key"
 if os.path.exists(SECRET_KEY_FILE):
-    with open(SECRET_KEY_FILE, "r") as _sf:
-        app.secret_key = _sf.read().strip()
+    try:
+        with open(SECRET_KEY_FILE, 'r') as f:
+            app.secret_key = f.read().strip()
+    except:
+        app.secret_key = secrets.token_hex(32)
 else:
     app.secret_key = secrets.token_hex(32)
-    with open(SECRET_KEY_FILE, "w") as _sf:
-        _sf.write(app.secret_key)
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB limit
+    try:
+        with open(SECRET_KEY_FILE, 'w') as f:
+            f.write(app.secret_key)
+        os.chmod(SECRET_KEY_FILE, 0o600)
+    except:
+        pass
+
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
 
 DB_FILE = "users.db"
 MAHIR_SOURCE = "mahir.py"
 USER_BOTS_DIR = "."
+MASTER_ADMIN_UID = "1120167200"
+
+monitors_lock = threading.Lock()
 
 # ========== Database ==========
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Users টেবিল তৈরি
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE NOT NULL,
@@ -73,7 +87,6 @@ def init_db():
         bot_status TEXT DEFAULT 'not_configured'
     )''')
     
-    # Keys টেবিল তৈরি
     c.execute('''CREATE TABLE IF NOT EXISTS keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         key TEXT UNIQUE NOT NULL,
@@ -84,29 +97,60 @@ def init_db():
         is_used INTEGER DEFAULT 0,
         expiry_date TIMESTAMP NULL
     )''')
-
-    # এজেন্ট রিকোয়েস্ট টেবিল (অ্যাডমিন অ্যাপ্রুভাল সিস্টেম)
-    c.execute('''CREATE TABLE IF NOT EXISTS agent_requests (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        status TEXT DEFAULT 'pending',
-        processed_at TIMESTAMP
-    )''')
-
-    # চেক করুন অ্যাডমিন ইউজার আছে কিনা, না থাকলে তৈরি করুন
-    c.execute('SELECT * FROM users WHERE username = ?', ('MAHIR TCP',))
-    if not c.fetchone():
-        # এখানে অ্যাডমিন ইউজার অটো তৈরি করে রাখা ভালো যাতে 500 এরর না আসে
-        c.execute('''INSERT INTO users (username, password, registration_key, is_admin, is_agent, bot_status) 
-                     VALUES (?, ?, ?, 1, 0, 'admin')''', ('MAHIR TCP', 'MAHIR0208@', 'SYSTEM_ADMIN'))
     
     conn.commit()
     conn.close()
 
+def validate_db_file(filepath):
+    """Validate uploaded DB file before replacing."""
+    try:
+        with open(filepath, 'rb') as f:
+            header = f.read(16)
+            if not header.startswith(b'SQLite format 3\x00'):
+                return False, "Not a valid SQLite database file"
+        
+        conn = sqlite3.connect(filepath)
+        c = conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in c.fetchall()}
+        
+        required_tables = {'users', 'keys'}
+        missing = required_tables - tables
+        if missing:
+            conn.close()
+            return False, f"Missing required tables: {', '.join(missing)}"
+        
+        c.execute("PRAGMA table_info(users)")
+        user_cols = {row[1] for row in c.fetchall()}
+        required_user_cols = {'id', 'username', 'password', 'registration_key'}
+        missing_cols = required_user_cols - user_cols
+        if missing_cols:
+            conn.close()
+            return False, f"users table missing columns: {', '.join(missing_cols)}"
+        
+        c.execute("PRAGMA table_info(keys)")
+        key_cols = {row[1] for row in c.fetchall()}
+        required_key_cols = {'id', 'key', 'is_used'}
+        missing_cols = required_key_cols - key_cols
+        if missing_cols:
+            conn.close()
+            return False, f"keys table missing columns: {', '.join(missing_cols)}"
+        
+        c.execute("PRAGMA integrity_check")
+        result = c.fetchone()
+        conn.close()
+        if result[0] != 'ok':
+            return False, f"Database integrity check failed: {result[0]}"
+        
+        return True, "OK"
+    except sqlite3.DatabaseError as e:
+        return False, f"Invalid SQLite database: {e}"
+    except Exception as e:
+        return False, f"Validation error: {e}"
+
 init_db()
 
-# ========== Helper: sanitize username for filename ==========
+# ========== Helper Functions ==========
 def sanitize_filename(name):
     return re.sub(r'[^a-zA-Z0-9_]', '_', name)
 
@@ -119,43 +163,76 @@ def check_password(stored, provided):
     else:
         return stored == provided
 
-MASTER_ADMIN_UID = '1120167200'
+def parse_admin_uids(admin_uid_str):
+    """Parse admin UID string into unique list, master admin always first."""
+    uids = []
+    seen = set()
+    uids.append(MASTER_ADMIN_UID)
+    seen.add(MASTER_ADMIN_UID)
+    
+    if admin_uid_str:
+        parts = re.split(r'[,;\s]+', str(admin_uid_str))
+        for p in parts:
+            p = p.strip().strip("'\"")
+            if p and p not in seen:
+                uids.append(p)
+                seen.add(p)
+    return uids
 
-def normalize_admin_uids(raw):
-    '''Admin UID list/string পার্স করে, duplicate সরায়, master UID ঠিক একবার রাখে।'''
-    if raw is None:
-        items = []
-    elif isinstance(raw, (list, tuple)):
-        items = list(raw)
-    else:
-        items = str(raw).split(',')
-    seen = []
-    for u in items:
-        u = str(u).strip().strip("'\"")
-        if u and u not in seen:
-            seen.append(u)
-    if MASTER_ADMIN_UID not in seen:
-        seen.insert(0, MASTER_ADMIN_UID)
-    return seen
+def build_admin_uids_list_string(uids):
+    """Build proper Python list string, master admin always first."""
+    unique_uids = []
+    seen = set()
+    for uid in uids:
+        uid = str(uid).strip()
+        if uid and uid not in seen:
+            unique_uids.append(uid)
+            seen.add(uid)
+    if MASTER_ADMIN_UID in unique_uids:
+        unique_uids.remove(MASTER_ADMIN_UID)
+    unique_uids.insert(0, MASTER_ADMIN_UID)
+    return '[' + ', '.join(f"'{uid}'" for uid in unique_uids) + ']'
 
-def validate_db_file(path):
-    '''ফাইলটা valid sqlite কিনা এবং users টেবিল আছে কিনা চেক করে।'''
+def inject_credentials_into_bot_file(filepath, bot_uid, bot_pw, admin_uids_list):
+    """Properly inject UID/PW/ADMIN_UIDS with deduplication."""
     try:
-        conn = sqlite3.connect(path)
-        c = conn.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = set(row[0] for row in c.fetchall())
-        conn.close()
-        return 'users' in tables
-    except Exception:
-        return False
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        content = re.sub(
+            r"Uid\s*,\s*Pw\s*=\s*'[^']*'\s*,\s*'[^']*'",
+            f"Uid, Pw = '{bot_uid}', '{bot_pw}'",
+            content
+        )
+        
+        admin_uids_str = build_admin_uids_list_string(admin_uids_list)
+        
+        if re.search(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", content):
+            content = re.sub(
+                r"ADMIN_UIDS\s*=\s*\[[^\]]*\]",
+                f"ADMIN_UIDS = {admin_uids_str}",
+                content
+            )
+        else:
+            content = re.sub(
+                r"(Uid\s*,\s*Pw\s*=\s*'[^']*'\s*,\s*'[^']*')",
+                f"\\1\nADMIN_UIDS = {admin_uids_str}",
+                content
+            )
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
 
-# ========== Bio Update Function ==========
+# ========== Bio Update ==========
 def update_bot_bio(uid, password, username):
-    """Update bot bio via MAHIR long-bio API."""
     bio_text = f"[c][b][i][00BFFF]{username} [00FF00]বটে আপনাকে স্বাগতম। [FFFF00]নিজের জন্য এমন একটি Bot কিনতে চাইলে যোগাযোগ করুন আমাদের [7CFC00]WEBSITE NAME: [00FFFF]MAHIR.XO.JE [00FF00]TIKTOK [00FFFF]: [00FFFF]MAHIR__222"
-    encoded = requests.utils.quote(bio_text)
-    url = f"https://mahir-long-bio.vercel.app/bio_upload?bio={encoded}&uid={uid}&pass={password}"
+    encoded = requests.utils.quote(bio_text, safe='')
+    encoded_uid = requests.utils.quote(str(uid), safe='')
+    encoded_pw = requests.utils.quote(str(password), safe='')
+    url = f"https://mahir-long-bio.vercel.app/bio_upload?bio={encoded}&uid={encoded_uid}&pass={encoded_pw}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
@@ -168,7 +245,7 @@ def update_bot_bio(uid, password, username):
         print(f"❌ Bio update exception for {uid}: {e}")
         return False
 
-# ========== ProcessMonitor Class ==========
+# ========== ProcessMonitor ==========
 class ProcessMonitor:
     def __init__(self, user_id, bot_file_path):
         self.user_id = user_id
@@ -188,11 +265,9 @@ class ProcessMonitor:
         self.lock = threading.Lock()
         self.output_queue = Queue()
         self.output_thread = None
-        self.monitor_thread = None
         self.cpu_history = [0] * 20
         self.ram_history = [0] * 20
         
-        # Bot info (parsed from logs)
         self.bot_uid = "N/A"
         self.bot_name = "N/A"
         self.bot_region = "N/A"
@@ -210,7 +285,6 @@ class ProcessMonitor:
         self.last_pfp_url = "N/A"
         self.account_info_found = False
         
-        # Internal state for parsing
         self.in_user_info = False
         self.in_tokens = False
         self.in_security = False
@@ -231,8 +305,7 @@ class ProcessMonitor:
         self.last_bot_info_update = None
 
     def clean_ansi(self, text):
-        if not text:
-            return ""
+        if not text: return ""
         ansi_escape = re.compile(r'\x1b\[[0-9;]*[mK]')
         text = ansi_escape.sub('', text)
         text = re.sub(r'\[\d+m', '', text)
@@ -331,7 +404,6 @@ class ProcessMonitor:
         clean = self.clean_ansi(line)
         if not clean: return
 
-        # USER INFO
         if 'USER INFO' in clean or '👤 USER INFO' in clean:
             self.in_user_info = True
             self.user_info_buffer = [clean]
@@ -351,7 +423,6 @@ class ProcessMonitor:
                 self.user_info_buffer = []
             return
 
-        # TOKENS
         if 'TOKENS' in clean or '🌐 TOKENS' in clean:
             self.in_tokens = True
             self.tokens_buffer = [clean]
@@ -372,7 +443,6 @@ class ProcessMonitor:
                 self.tokens_buffer = []
             return
 
-        # SECURITY
         if 'SECURITY' in clean or '🔑 SECURITY' in clean:
             self.in_security = True
             self.security_buffer = [clean]
@@ -389,7 +459,6 @@ class ProcessMonitor:
                 self.security_buffer = []
             return
 
-        # SYSTEM STATUS
         if 'SYSTEM STATUS' in clean or '⏱ SYSTEM STATUS' in clean:
             self.in_system = True
             self.system_buffer = [clean]
@@ -406,7 +475,6 @@ class ProcessMonitor:
                 self.system_buffer = []
             return
 
-        # MESSAGE INFO
         if 'MESSAGE INFO' in clean or '╔══════════════ [ MESSAGE INFO ]' in clean:
             self.collecting_message = True
             self.message_started = True
@@ -461,7 +529,6 @@ class ProcessMonitor:
                 self.message_buffer = []
             return
 
-        # LOGIN SUCCESSFUL / Connected
         if 'LOGIN SUCCESSFUL' in clean:
             with self.lock:
                 self.bot_status = "🟢 ACTIVE & ONLINE"
@@ -487,8 +554,11 @@ class ProcessMonitor:
 
     def start_process(self):
         with self.lock:
+            if self.process and self.process.poll() is None:
+                return True
             if self.process:
-                self.stop_process_internal()
+                self._stop_process_internal()
+            
             if not os.path.exists(self.process_name):
                 print(f"{Fore.RED}Error: Script file '{self.process_name}' not found!{Style.RESET_ALL}")
                 return False
@@ -505,12 +575,16 @@ class ProcessMonitor:
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
-                # Update DB status
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute('UPDATE users SET bot_status="running", bot_pid=? WHERE id=?', (self.process.pid, self.user_id))
-                conn.commit()
-                conn.close()
+                
+                try:
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute('UPDATE users SET bot_status="running", bot_pid=? WHERE id=?', 
+                              (self.process.pid, self.user_id))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"DB update error: {e}")
 
                 def enqueue_output():
                     try:
@@ -530,29 +604,33 @@ class ProcessMonitor:
                 self.output_lines.append(f"Error: {str(e)}")
                 return False
 
-    def stop_process_internal(self):
+    def _stop_process_internal(self):
         if self.process:
             try:
                 p = psutil.Process(self.process.pid)
                 for child in p.children(recursive=True):
-                    child.kill()
+                    try: child.kill()
+                    except: pass
                 p.kill()
+                p.wait(timeout=5)
             except:
                 try: self.process.kill()
                 except: pass
             self.process = None
         self.is_running = False
         self.bot_status = "🔴 OFFLINE"
-        # Update DB
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('UPDATE users SET bot_pid=NULL, bot_status="stopped" WHERE id=?', (self.user_id,))
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('UPDATE users SET bot_pid=NULL, bot_status="stopped" WHERE id=?', (self.user_id,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"DB update error: {e}")
 
     def stop_process(self):
         with self.lock:
-            self.stop_process_internal()
+            self._stop_process_internal()
 
     def restart_logic(self):
         self.stop_process()
@@ -592,7 +670,6 @@ class ProcessMonitor:
         if self.is_running and self.start_time:
             delta = datetime.now() - self.start_time
             uptime = str(delta).split('.')[0]
-        # system stats
         try:
             cpu = psutil.cpu_percent(interval=0.5)
             ram = psutil.virtual_memory().percent
@@ -602,7 +679,6 @@ class ProcessMonitor:
                 disk = psutil.disk_usage(os.path.expanduser("~")).percent
         except:
             cpu, ram, disk = 0, 0, 0
-        # update histories
         with self.lock:
             self.cpu_history.append(cpu)
             self.ram_history.append(ram)
@@ -679,53 +755,38 @@ class ProcessMonitor:
             self.last_pfp_url = "N/A"
         return self.start_process()
 
-# ========== Global dictionary to store monitors per user ==========
+# ========== Monitors ==========
 monitors = {}
 
 def get_monitor(user_id):
-    """Return the ProcessMonitor instance for a user, create if not exists."""
-    if user_id not in monitors:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('SELECT bot_file, bot_status FROM users WHERE id=?', (user_id,))
-        row = c.fetchone()
-        conn.close()
-        if row and row[0]:
-            bot_file = row[0]
-            if not os.path.dirname(bot_file):
-                bot_file = os.path.join(USER_BOTS_DIR, bot_file)
-            monitor = ProcessMonitor(user_id, bot_file)
-            monitors[user_id] = monitor
-            # Always try to start if bot file exists and process is not running
-            # But check if process already running from DB
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('SELECT bot_pid, bot_status FROM users WHERE id=?', (user_id,))
-            row2 = c.fetchone()
-            if row2:
-                pid, status = row2
-                if pid:
-                    try:
-                        p = psutil.Process(pid)
-                        if p.is_running():
-                            # Process is running, just attach monitor
-                            monitor.is_running = True
-                            monitor.start_time = datetime.now()
-                            monitor.bot_status = "🟢 ACTIVE & ONLINE"
-                            # Start reading output
-                            # Since we can't attach to existing process easily, we restart
-                            # To be safe, we restart
-                            monitor.start_process()
-                        else:
-                            monitor.start_process()
-                    except:
-                        monitor.start_process()
-                else:
-                    monitor.start_process()
-            conn.close()
-        else:
-            return None
-    return monitors.get(user_id)
+    with monitors_lock:
+        if user_id in monitors:
+            return monitors[user_id]
+    
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row or not row[0]:
+        return None
+    
+    bot_file = row[0]
+    if not os.path.dirname(bot_file):
+        bot_file = os.path.join(USER_BOTS_DIR, bot_file)
+    
+    if not os.path.exists(bot_file):
+        return None
+    
+    monitor = ProcessMonitor(user_id, bot_file)
+    with monitors_lock:
+        if user_id in monitors:
+            return monitors[user_id]
+        monitors[user_id] = monitor
+    
+    monitor.start_process()
+    return monitor
 
 # ========== Decorators ==========
 def admin_required(f):
@@ -749,35 +810,781 @@ def agent_required(f):
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not session.get('user_id'):
+        if not session.get('user_id') and not session.get('is_admin'):
             flash('Please login first', 'error')
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated
 
 # =============================================================================
-# HTML Templates (embedded as strings)
+# HTML Templates
 # =============================================================================
-LOGIN_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>Welcome Back - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n\n.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}\n.auth-card{width:100%;max-width:440px;padding:38px 34px;border-radius:24px}\n.logo-wrap{width:96px;height:96px;margin:0 auto 18px;border-radius:50%;padding:6px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(133,64,245,.12));border:1px solid rgba(59,140,255,.25);box-shadow:0 0 50px rgba(59,140,255,.10)}\n.logo-wrap img{width:100%;height:100%;border-radius:50%;object-fit:cover}\n.auth-title{text-align:center;font-size:1.7rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px}\n.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:22px}\n.field{position:relative;margin-bottom:14px}\n.field i{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:rgba(233,233,248,.35);font-size:.95rem}\n.field input{width:100%;padding:14px 16px 14px 46px}\n.btn-block{width:100%;padding:14px;font-size:1rem}\n.auth-links{text-align:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(245,200,66,.08);display:flex;flex-direction:column;gap:8px}\n.auth-links a{color:var(--gold2);text-decoration:none;font-size:.88rem;font-weight:500}\n.auth-links a:hover{color:var(--gold)}\n.alert{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;margin-bottom:16px;font-size:.88rem;border:1px solid;text-align:center}\n.alert.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.alert.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.hamburger-menu{position:fixed;top:20px;left:20px;z-index:1000}\n.hamburger-btn{background:rgba(14,14,28,.92);border:1px solid rgba(245,200,66,.2);color:var(--gold);width:46px;height:46px;border-radius:12px;cursor:pointer;font-size:1.2rem;transition:.2s}\n.hamburger-btn:hover{border-color:var(--gold)}\n.menu-dropdown{display:none;position:absolute;top:56px;left:0;background:rgba(12,12,24,.97);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:8px 0;min-width:230px;box-shadow:0 20px 50px rgba(0,0,0,.6)}\n.menu-dropdown.active{display:block}\n.menu-title{padding:8px 20px 4px;color:rgba(233,233,248,.35);font-size:.62rem;text-transform:uppercase;letter-spacing:2px;font-weight:700}\n.menu-item{display:flex;align-items:center;gap:12px;padding:9px 20px;color:rgba(233,233,248,.75);text-decoration:none;font-size:.88rem;border-left:3px solid transparent}\n.menu-item:hover{background:rgba(245,200,66,.05);border-left-color:var(--gold);color:var(--gold)}\n.menu-item i{width:18px;text-align:center;color:rgba(233,233,248,.35)}\n.menu-item:hover i{color:var(--gold)}\n.menu-divider{border-top:1px solid rgba(245,200,66,.07);margin:6px 14px}\n.sidebar-download{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 14px;padding:11px;border-radius:12px;background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14 !important;text-decoration:none;font-weight:800;font-size:.82rem;border-left:none !important}\n</style></head><body>\n<div class="hamburger-menu">\n  <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Menu"><i class="fas fa-bars"></i></button>\n  <div class="menu-dropdown" id="menuDropdown">\n    <div class="menu-title">Premium App</div>\n    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download"><i class="fas fa-download"></i> DOWNLOAD APK</a>\n    <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item"><i class="fas fa-play-circle" style="color:#4ade80"></i> Watch Video</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Authentication</div>\n    <a href="{{ url_for(\'login\') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>\n    <a href="{{ url_for(\'register\') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>\n    <a href="{{ url_for(\'recover\') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Roles</div>\n    <a href="{{ url_for(\'admin_login\') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>\n    <a href="{{ url_for(\'agent_login\') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Social</div>\n    <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram</a>\n    <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok</a>\n    <div class="menu-divider"></div>\n    <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>\n  </div>\n</div>\n<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Welcome Back</div><div class="auth-sub">Sign in to your account</div>\n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n    <form method="POST" id="loginForm" class="form-row">\n      <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required autocomplete="username"/></div>\n      <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required autocomplete="current-password"/></div>\n      <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>\n    </form>\n    <script>document.getElementById(\'loginForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'loginBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Authenticating...\';});</script>\n    <div class="auth-links">\n    <a href="{{ url_for(\'register\') }}"><i class="fas fa-user-plus"></i> Don\'t have an account? Register</a>\n    <a href="{{ url_for(\'recover\') }}"><i class="fas fa-key"></i> Forgot Password?</a>\n    </div></div></div><script>\nfunction toggleMenu(){document.getElementById(\'menuDropdown\').classList.toggle(\'active\');}\ndocument.addEventListener(\'click\',function(e){var m=document.querySelector(\'.hamburger-menu\');if(m&&!m.contains(e.target)){document.getElementById(\'menuDropdown\').classList.remove(\'active\');}});\ndocument.addEventListener(\'keydown\',function(e){if(e.key===\'Escape\'){var d=document.getElementById(\'menuDropdown\');if(d)d.classList.remove(\'active\');}});\n</script></body></html>'
 
-REGISTER_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>Create Account - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n\n.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}\n.auth-card{width:100%;max-width:440px;padding:38px 34px;border-radius:24px}\n.logo-wrap{width:96px;height:96px;margin:0 auto 18px;border-radius:50%;padding:6px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(133,64,245,.12));border:1px solid rgba(59,140,255,.25);box-shadow:0 0 50px rgba(59,140,255,.10)}\n.logo-wrap img{width:100%;height:100%;border-radius:50%;object-fit:cover}\n.auth-title{text-align:center;font-size:1.7rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px}\n.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:22px}\n.field{position:relative;margin-bottom:14px}\n.field i{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:rgba(233,233,248,.35);font-size:.95rem}\n.field input{width:100%;padding:14px 16px 14px 46px}\n.btn-block{width:100%;padding:14px;font-size:1rem}\n.auth-links{text-align:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(245,200,66,.08);display:flex;flex-direction:column;gap:8px}\n.auth-links a{color:var(--gold2);text-decoration:none;font-size:.88rem;font-weight:500}\n.auth-links a:hover{color:var(--gold)}\n.alert{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;margin-bottom:16px;font-size:.88rem;border:1px solid;text-align:center}\n.alert.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.alert.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.hamburger-menu{position:fixed;top:20px;left:20px;z-index:1000}\n.hamburger-btn{background:rgba(14,14,28,.92);border:1px solid rgba(245,200,66,.2);color:var(--gold);width:46px;height:46px;border-radius:12px;cursor:pointer;font-size:1.2rem;transition:.2s}\n.hamburger-btn:hover{border-color:var(--gold)}\n.menu-dropdown{display:none;position:absolute;top:56px;left:0;background:rgba(12,12,24,.97);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:8px 0;min-width:230px;box-shadow:0 20px 50px rgba(0,0,0,.6)}\n.menu-dropdown.active{display:block}\n.menu-title{padding:8px 20px 4px;color:rgba(233,233,248,.35);font-size:.62rem;text-transform:uppercase;letter-spacing:2px;font-weight:700}\n.menu-item{display:flex;align-items:center;gap:12px;padding:9px 20px;color:rgba(233,233,248,.75);text-decoration:none;font-size:.88rem;border-left:3px solid transparent}\n.menu-item:hover{background:rgba(245,200,66,.05);border-left-color:var(--gold);color:var(--gold)}\n.menu-item i{width:18px;text-align:center;color:rgba(233,233,248,.35)}\n.menu-item:hover i{color:var(--gold)}\n.menu-divider{border-top:1px solid rgba(245,200,66,.07);margin:6px 14px}\n.sidebar-download{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 14px;padding:11px;border-radius:12px;background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14 !important;text-decoration:none;font-weight:800;font-size:.82rem;border-left:none !important}\n</style></head><body>\n<div class="hamburger-menu">\n  <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Menu"><i class="fas fa-bars"></i></button>\n  <div class="menu-dropdown" id="menuDropdown">\n    <div class="menu-title">Premium App</div>\n    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download"><i class="fas fa-download"></i> DOWNLOAD APK</a>\n    <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item"><i class="fas fa-play-circle" style="color:#4ade80"></i> Watch Video</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Authentication</div>\n    <a href="{{ url_for(\'login\') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>\n    <a href="{{ url_for(\'register\') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>\n    <a href="{{ url_for(\'recover\') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Roles</div>\n    <a href="{{ url_for(\'admin_login\') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>\n    <a href="{{ url_for(\'agent_login\') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Social</div>\n    <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram</a>\n    <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok</a>\n    <div class="menu-divider"></div>\n    <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>\n  </div>\n</div>\n<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Create Account</div><div class="auth-sub">Join the MAHIR network</div>\n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n    <form method="POST" id="registerForm" class="form-row">\n      <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required autocomplete="username"/></div>\n      <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required autocomplete="new-password"/></div>\n      <div class="field"><i class="fas fa-envelope"></i><input type="email" name="email" placeholder="Email (optional)" autocomplete="email"/></div>\n      <div class="field"><i class="fas fa-key"></i><input type="text" name="registration_key" placeholder="Registration Key" required/></div>\n      <button type="submit" class="btn btn-gold btn-block" id="registerBtn"><i class="fas fa-paper-plane"></i> Register</button>\n    </form>\n    <script>document.getElementById(\'registerForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'registerBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Processing...\';});</script>\n    <div class="auth-links"><a href="{{ url_for(\'login\') }}"><i class="fas fa-arrow-left"></i> Already have an account? Login</a></div></div></div><script>\nfunction toggleMenu(){document.getElementById(\'menuDropdown\').classList.toggle(\'active\');}\ndocument.addEventListener(\'click\',function(e){var m=document.querySelector(\'.hamburger-menu\');if(m&&!m.contains(e.target)){document.getElementById(\'menuDropdown\').classList.remove(\'active\');}});\ndocument.addEventListener(\'keydown\',function(e){if(e.key===\'Escape\'){var d=document.getElementById(\'menuDropdown\');if(d)d.classList.remove(\'active\');}});\n</script></body></html>'
+# Common sidebar menu HTML (used in auth pages)
+SIDEBAR_MENU = '''
+<div class="hamburger-menu">
+  <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Menu"><i class="fas fa-bars"></i></button>
+  <div class="menu-dropdown" id="menuDropdown">
+    <div class="menu-title">Premium App</div>
+    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download"><i class="fas fa-download"></i> DOWNLOAD APK</a>
+    <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item"><i class="fas fa-play-circle" style="color:#4ade80"></i> Watch Video</a>
+    <div class="menu-divider"></div>
+    <div class="menu-title">Authentication</div>
+    <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
+    <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
+    <a href="{{ url_for('recover') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+    <div class="menu-divider"></div>
+    <div class="menu-title">Roles</div>
+    <a href="{{ url_for('admin_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>
+    <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+    <div class="menu-divider"></div>
+    <div class="menu-title">Social</div>
+    <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram</a>
+    <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok</a>
+    <a href="https://whatsapp.com/channel/0029Vb9Omjk2ZjCevpv6h209" target="_blank" class="menu-item"><i class="fab fa-whatsapp" style="color:#25D366;"></i> WhatsApp Channel</a>
+    <a href="https://chat.whatsapp.com/CTiEuMnEKacHZ7wirSNjqs" target="_blank" class="menu-item"><i class="fab fa-whatsapp" style="color:#25D366;"></i> WhatsApp Group</a>
+    <div class="menu-divider"></div>
+    <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
+  </div>
+</div>
+'''
 
-RECOVER_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>Recover Password - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n\n.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}\n.auth-card{width:100%;max-width:440px;padding:38px 34px;border-radius:24px}\n.logo-wrap{width:96px;height:96px;margin:0 auto 18px;border-radius:50%;padding:6px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(133,64,245,.12));border:1px solid rgba(59,140,255,.25);box-shadow:0 0 50px rgba(59,140,255,.10)}\n.logo-wrap img{width:100%;height:100%;border-radius:50%;object-fit:cover}\n.auth-title{text-align:center;font-size:1.7rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px}\n.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:22px}\n.field{position:relative;margin-bottom:14px}\n.field i{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:rgba(233,233,248,.35);font-size:.95rem}\n.field input{width:100%;padding:14px 16px 14px 46px}\n.btn-block{width:100%;padding:14px;font-size:1rem}\n.auth-links{text-align:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(245,200,66,.08);display:flex;flex-direction:column;gap:8px}\n.auth-links a{color:var(--gold2);text-decoration:none;font-size:.88rem;font-weight:500}\n.auth-links a:hover{color:var(--gold)}\n.alert{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;margin-bottom:16px;font-size:.88rem;border:1px solid;text-align:center}\n.alert.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.alert.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.hamburger-menu{position:fixed;top:20px;left:20px;z-index:1000}\n.hamburger-btn{background:rgba(14,14,28,.92);border:1px solid rgba(245,200,66,.2);color:var(--gold);width:46px;height:46px;border-radius:12px;cursor:pointer;font-size:1.2rem;transition:.2s}\n.hamburger-btn:hover{border-color:var(--gold)}\n.menu-dropdown{display:none;position:absolute;top:56px;left:0;background:rgba(12,12,24,.97);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:8px 0;min-width:230px;box-shadow:0 20px 50px rgba(0,0,0,.6)}\n.menu-dropdown.active{display:block}\n.menu-title{padding:8px 20px 4px;color:rgba(233,233,248,.35);font-size:.62rem;text-transform:uppercase;letter-spacing:2px;font-weight:700}\n.menu-item{display:flex;align-items:center;gap:12px;padding:9px 20px;color:rgba(233,233,248,.75);text-decoration:none;font-size:.88rem;border-left:3px solid transparent}\n.menu-item:hover{background:rgba(245,200,66,.05);border-left-color:var(--gold);color:var(--gold)}\n.menu-item i{width:18px;text-align:center;color:rgba(233,233,248,.35)}\n.menu-item:hover i{color:var(--gold)}\n.menu-divider{border-top:1px solid rgba(245,200,66,.07);margin:6px 14px}\n.sidebar-download{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 14px;padding:11px;border-radius:12px;background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14 !important;text-decoration:none;font-weight:800;font-size:.82rem;border-left:none !important}\n</style></head><body>\n<div class="hamburger-menu">\n  <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Menu"><i class="fas fa-bars"></i></button>\n  <div class="menu-dropdown" id="menuDropdown">\n    <div class="menu-title">Premium App</div>\n    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download"><i class="fas fa-download"></i> DOWNLOAD APK</a>\n    <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item"><i class="fas fa-play-circle" style="color:#4ade80"></i> Watch Video</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Authentication</div>\n    <a href="{{ url_for(\'login\') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>\n    <a href="{{ url_for(\'register\') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>\n    <a href="{{ url_for(\'recover\') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Roles</div>\n    <a href="{{ url_for(\'admin_login\') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>\n    <a href="{{ url_for(\'agent_login\') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Social</div>\n    <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram</a>\n    <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok</a>\n    <div class="menu-divider"></div>\n    <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>\n  </div>\n</div>\n<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap" style="display:flex;align-items:center;justify-content:center;"><i class="fas fa-key" style="font-size:2rem;color:var(--gold);"></i></div><div class="auth-title">Recover Password</div><div class="auth-sub">Enter your credentials to reset your password</div>\n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n    <form method="POST" id="recoverForm" class="form-row">\n      <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required autocomplete="username"/></div>\n      <div class="field"><i class="fas fa-envelope"></i><input type="email" name="email" placeholder="Email Address" required autocomplete="email"/></div>\n      <button type="submit" class="btn btn-gold btn-block" id="recoverBtn"><i class="fas fa-paper-plane"></i> Recover Password</button>\n    </form>\n    <script>document.getElementById(\'recoverForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'recoverBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Processing...\';});</script>\n    <div class="auth-links"><a href="{{ url_for(\'login\') }}"><i class="fas fa-arrow-left"></i> Back to Login</a></div></div></div><script>\nfunction toggleMenu(){document.getElementById(\'menuDropdown\').classList.toggle(\'active\');}\ndocument.addEventListener(\'click\',function(e){var m=document.querySelector(\'.hamburger-menu\');if(m&&!m.contains(e.target)){document.getElementById(\'menuDropdown\').classList.remove(\'active\');}});\ndocument.addEventListener(\'keydown\',function(e){if(e.key===\'Escape\'){var d=document.getElementById(\'menuDropdown\');if(d)d.classList.remove(\'active\');}});\n</script></body></html>'
+# Common CSS (shared across all pages)
+COMMON_CSS = '''
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:'JetBrains Mono',monospace}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}
+a{color:var(--gold2)}
+.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}
+.card:hover{border-color:rgba(245,200,66,.25)}
+.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.card-title i{color:var(--purple)}
+.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}
+.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}
+.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}
+.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}
+.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}
+.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}
+.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}
+.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}
+.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}
+@keyframes spin{to{transform:rotate(360deg)}}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}
+.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}
+.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}
+.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}
+.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}
+.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}
+.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}
+.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}
+.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}
+.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}
+.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}
+.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}
+.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}
+.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}
+.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}
+.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}
+input[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}
+input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}
+input::placeholder{color:rgba(233,233,248,.3)}
+input[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}
+input[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}
+.table-wrapper{overflow-x:auto;margin-top:12px}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}
+th{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}
+tr:hover td{background:rgba(245,200,66,.03)}
+td code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}
+.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}
+.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}
+.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}
+.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}
+.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}
+.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}
+.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}
+.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}
+.info-label{color:var(--gold2);font-weight:600}
+.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}
+.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}
+.back-link:hover{color:var(--gold)}
+.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}
+.breadcrumb a{color:var(--gold2);text-decoration:none}
+.current-dir{color:var(--gold);font-weight:600}
+.folder-link{color:var(--gold);text-decoration:none;font-weight:600}
+.file-name{color:#8fc0ff}
+.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.flex-grow{flex:1;min-width:150px}
+.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}
+.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.auth-card{width:100%;max-width:440px;padding:38px 34px;border-radius:24px}
+.logo-wrap{width:96px;height:96px;margin:0 auto 18px;border-radius:50%;padding:6px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(133,64,245,.12));border:1px solid rgba(59,140,255,.25);box-shadow:0 0 50px rgba(59,140,255,.10)}
+.logo-wrap img{width:100%;height:100%;border-radius:50%;object-fit:cover}
+.auth-title{text-align:center;font-size:1.7rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px}
+.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:22px}
+.field{position:relative;margin-bottom:14px}
+.field i{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:rgba(233,233,248,.35);font-size:.95rem}
+.field input{width:100%;padding:14px 16px 14px 46px}
+.btn-block{width:100%;padding:14px;font-size:1rem}
+.auth-links{text-align:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(245,200,66,.08);display:flex;flex-direction:column;gap:8px}
+.auth-links a{color:var(--gold2);text-decoration:none;font-size:.88rem;font-weight:500}
+.auth-links a:hover{color:var(--gold)}
+.alert{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;margin-bottom:16px;font-size:.88rem;border:1px solid;text-align:center}
+.alert.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}
+.alert.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}
+.hamburger-menu{position:fixed;top:20px;left:20px;z-index:1000}
+.hamburger-btn{background:rgba(14,14,28,.92);border:1px solid rgba(245,200,66,.2);color:var(--gold);width:46px;height:46px;border-radius:12px;cursor:pointer;font-size:1.2rem;transition:.2s}
+.hamburger-btn:hover{border-color:var(--gold)}
+.menu-dropdown{display:none;position:absolute;top:56px;left:0;background:rgba(12,12,24,.97);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:8px 0;min-width:250px;box-shadow:0 20px 50px rgba(0,0,0,.6);max-height:80vh;overflow-y:auto}
+.menu-dropdown.active{display:block}
+.menu-title{padding:8px 20px 4px;color:rgba(233,233,248,.35);font-size:.62rem;text-transform:uppercase;letter-spacing:2px;font-weight:700}
+.menu-item{display:flex;align-items:center;gap:12px;padding:9px 20px;color:rgba(233,233,248,.75);text-decoration:none;font-size:.88rem;border-left:3px solid transparent}
+.menu-item:hover{background:rgba(245,200,66,.05);border-left-color:var(--gold);color:var(--gold)}
+.menu-item i{width:18px;text-align:center;color:rgba(233,233,248,.35)}
+.menu-item:hover i{color:var(--gold)}
+.menu-divider{border-top:1px solid rgba(245,200,66,.07);margin:6px 14px}
+.sidebar-download{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 14px;padding:11px;border-radius:12px;background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14 !important;text-decoration:none;font-weight:800;font-size:.82rem;border-left:none !important}
+'''
 
-ADMIN_LOGIN_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>Admin Access - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n\n.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}\n.auth-card{width:100%;max-width:440px;padding:38px 34px;border-radius:24px}\n.logo-wrap{width:96px;height:96px;margin:0 auto 18px;border-radius:50%;padding:6px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(133,64,245,.12));border:1px solid rgba(59,140,255,.25);box-shadow:0 0 50px rgba(59,140,255,.10)}\n.logo-wrap img{width:100%;height:100%;border-radius:50%;object-fit:cover}\n.auth-title{text-align:center;font-size:1.7rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px}\n.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:22px}\n.field{position:relative;margin-bottom:14px}\n.field i{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:rgba(233,233,248,.35);font-size:.95rem}\n.field input{width:100%;padding:14px 16px 14px 46px}\n.btn-block{width:100%;padding:14px;font-size:1rem}\n.auth-links{text-align:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(245,200,66,.08);display:flex;flex-direction:column;gap:8px}\n.auth-links a{color:var(--gold2);text-decoration:none;font-size:.88rem;font-weight:500}\n.auth-links a:hover{color:var(--gold)}\n.alert{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;margin-bottom:16px;font-size:.88rem;border:1px solid;text-align:center}\n.alert.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.alert.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.hamburger-menu{position:fixed;top:20px;left:20px;z-index:1000}\n.hamburger-btn{background:rgba(14,14,28,.92);border:1px solid rgba(245,200,66,.2);color:var(--gold);width:46px;height:46px;border-radius:12px;cursor:pointer;font-size:1.2rem;transition:.2s}\n.hamburger-btn:hover{border-color:var(--gold)}\n.menu-dropdown{display:none;position:absolute;top:56px;left:0;background:rgba(12,12,24,.97);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:8px 0;min-width:230px;box-shadow:0 20px 50px rgba(0,0,0,.6)}\n.menu-dropdown.active{display:block}\n.menu-title{padding:8px 20px 4px;color:rgba(233,233,248,.35);font-size:.62rem;text-transform:uppercase;letter-spacing:2px;font-weight:700}\n.menu-item{display:flex;align-items:center;gap:12px;padding:9px 20px;color:rgba(233,233,248,.75);text-decoration:none;font-size:.88rem;border-left:3px solid transparent}\n.menu-item:hover{background:rgba(245,200,66,.05);border-left-color:var(--gold);color:var(--gold)}\n.menu-item i{width:18px;text-align:center;color:rgba(233,233,248,.35)}\n.menu-item:hover i{color:var(--gold)}\n.menu-divider{border-top:1px solid rgba(245,200,66,.07);margin:6px 14px}\n.sidebar-download{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 14px;padding:11px;border-radius:12px;background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14 !important;text-decoration:none;font-weight:800;font-size:.82rem;border-left:none !important}\n</style></head><body>\n<div class="hamburger-menu">\n  <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Menu"><i class="fas fa-bars"></i></button>\n  <div class="menu-dropdown" id="menuDropdown">\n    <div class="menu-title">Premium App</div>\n    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download"><i class="fas fa-download"></i> DOWNLOAD APK</a>\n    <a href="https://youtube.com/shorts/1GuAuml8WRU?si=qQHAwCTblRJE7T9Q" target="_blank" class="menu-item"><i class="fas fa-play-circle" style="color:#4ade80"></i> Watch Video</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Authentication</div>\n    <a href="{{ url_for(\'login\') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>\n    <a href="{{ url_for(\'register\') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>\n    <a href="{{ url_for(\'recover\') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Roles</div>\n    <a href="{{ url_for(\'admin_login\') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Admin Login</a>\n    <a href="{{ url_for(\'agent_login\') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>\n    <div class="menu-divider"></div>\n    <div class="menu-title">Social</div>\n    <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram</a>\n    <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok</a>\n    <div class="menu-divider"></div>\n    <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>\n  </div>\n</div>\n<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Admin Access</div><div class="auth-sub">Secure admin panel login</div>\n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n    <form method="POST" id="adminLoginForm" class="form-row">\n      <div class="field"><i class="fas fa-user-shield"></i><input type="text" name="username" placeholder="Admin Username" required autocomplete="username"/></div>\n      <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required autocomplete="current-password"/></div>\n      <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>\n    </form>\n    <script>document.getElementById(\'adminLoginForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'loginBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Authenticating...\';});</script>\n    <div class="auth-links"><a href="{{ url_for(\'login\') }}"><i class="fas fa-arrow-left"></i> Back to Main Site</a></div></div></div><script>\nfunction toggleMenu(){document.getElementById(\'menuDropdown\').classList.toggle(\'active\');}\ndocument.addEventListener(\'click\',function(e){var m=document.querySelector(\'.hamburger-menu\');if(m&&!m.contains(e.target)){document.getElementById(\'menuDropdown\').classList.remove(\'active\');}});\ndocument.addEventListener(\'keydown\',function(e){if(e.key===\'Escape\'){var d=document.getElementById(\'menuDropdown\');if(d)d.classList.remove(\'active\');}});\n</script></body></html>'
+# Sidebar toggle JS
+SIDEBAR_JS = '''
+<script>
+function toggleMenu(){document.getElementById('menuDropdown').classList.toggle('active');}
+document.addEventListener('click',function(e){var m=document.querySelector('.hamburger-menu');if(m&&!m.contains(e.target)){var d=document.getElementById('menuDropdown');if(d)d.classList.remove('active');}});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){var d=document.getElementById('menuDropdown');if(d)d.classList.remove('active');}});
+</script>
+'''
 
-AGENT_LOGIN_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>Agent Login - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n\n.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}\n.auth-card{width:100%;max-width:440px;padding:38px 34px;border-radius:24px}\n.logo-wrap{width:96px;height:96px;margin:0 auto 18px;border-radius:50%;padding:6px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(133,64,245,.12));border:1px solid rgba(59,140,255,.25);box-shadow:0 0 50px rgba(59,140,255,.10)}\n.logo-wrap img{width:100%;height:100%;border-radius:50%;object-fit:cover}\n.auth-title{text-align:center;font-size:1.7rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px}\n.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:22px}\n.field{position:relative;margin-bottom:14px}\n.field i{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:rgba(233,233,248,.35);font-size:.95rem}\n.field input{width:100%;padding:14px 16px 14px 46px}\n.btn-block{width:100%;padding:14px;font-size:1rem}\n.auth-links{text-align:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(245,200,66,.08);display:flex;flex-direction:column;gap:8px}\n.auth-links a{color:var(--gold2);text-decoration:none;font-size:.88rem;font-weight:500}\n.auth-links a:hover{color:var(--gold)}\n.alert{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;margin-bottom:16px;font-size:.88rem;border:1px solid;text-align:center}\n.alert.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.alert.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.hamburger-menu{position:fixed;top:20px;left:20px;z-index:1000}\n.hamburger-btn{background:rgba(14,14,28,.92);border:1px solid rgba(245,200,66,.2);color:var(--gold);width:46px;height:46px;border-radius:12px;cursor:pointer;font-size:1.2rem;transition:.2s}\n.hamburger-btn:hover{border-color:var(--gold)}\n.menu-dropdown{display:none;position:absolute;top:56px;left:0;background:rgba(12,12,24,.97);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:8px 0;min-width:230px;box-shadow:0 20px 50px rgba(0,0,0,.6)}\n.menu-dropdown.active{display:block}\n.menu-title{padding:8px 20px 4px;color:rgba(233,233,248,.35);font-size:.62rem;text-transform:uppercase;letter-spacing:2px;font-weight:700}\n.menu-item{display:flex;align-items:center;gap:12px;padding:9px 20px;color:rgba(233,233,248,.75);text-decoration:none;font-size:.88rem;border-left:3px solid transparent}\n.menu-item:hover{background:rgba(245,200,66,.05);border-left-color:var(--gold);color:var(--gold)}\n.menu-item i{width:18px;text-align:center;color:rgba(233,233,248,.35)}\n.menu-item:hover i{color:var(--gold)}\n.menu-divider{border-top:1px solid rgba(245,200,66,.07);margin:6px 14px}\n.sidebar-download{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 14px;padding:11px;border-radius:12px;background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14 !important;text-decoration:none;font-weight:800;font-size:.82rem;border-left:none !important}\n</style></head><body><div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Agent Login</div><div class="auth-sub">Agent panel access</div>\n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n    <form method="POST" id="agentLoginForm" class="form-row">\n      <div class="field"><i class="fas fa-user-tie"></i><input type="text" name="username" placeholder="Agent Username" required/></div>\n      <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required/></div>\n      <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>\n    </form>\n    <script>document.getElementById(\'agentLoginForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'loginBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Authenticating...\';});</script>\n    <div class="auth-links"><a href="{{ url_for(\'agent_request\') }}"><i class="fas fa-paper-plane"></i> Request Agent Access</a><a href="{{ url_for(\'login\') }}"><i class="fas fa-arrow-left"></i> Back to Main</a></div></div></div><script></script></body></html>'
+LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Welcome Back - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Welcome Back</div><div class="auth-sub">Sign in to your account</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="loginForm">
+  <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required autocomplete="username"/></div>
+  <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required autocomplete="current-password"/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
+</form>
+<script>document.getElementById('loginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
+<div class="auth-links">
+<a href="{{ url_for('register') }}"><i class="fas fa-user-plus"></i> Don't have an account? Register</a>
+<a href="{{ url_for('recover') }}"><i class="fas fa-key"></i> Forgot Password?</a>
+</div></div></div>
+''' + SIDEBAR_JS + '''
+</body></html>'''
 
-AGENT_REQUEST_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>Request Agent Access - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n\n.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}\n.auth-card{width:100%;max-width:440px;padding:38px 34px;border-radius:24px}\n.logo-wrap{width:96px;height:96px;margin:0 auto 18px;border-radius:50%;padding:6px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(133,64,245,.12));border:1px solid rgba(59,140,255,.25);box-shadow:0 0 50px rgba(59,140,255,.10)}\n.logo-wrap img{width:100%;height:100%;border-radius:50%;object-fit:cover}\n.auth-title{text-align:center;font-size:1.7rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px}\n.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:22px}\n.field{position:relative;margin-bottom:14px}\n.field i{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:rgba(233,233,248,.35);font-size:.95rem}\n.field input{width:100%;padding:14px 16px 14px 46px}\n.btn-block{width:100%;padding:14px;font-size:1rem}\n.auth-links{text-align:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(245,200,66,.08);display:flex;flex-direction:column;gap:8px}\n.auth-links a{color:var(--gold2);text-decoration:none;font-size:.88rem;font-weight:500}\n.auth-links a:hover{color:var(--gold)}\n.alert{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;margin-bottom:16px;font-size:.88rem;border:1px solid;text-align:center}\n.alert.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.alert.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.hamburger-menu{position:fixed;top:20px;left:20px;z-index:1000}\n.hamburger-btn{background:rgba(14,14,28,.92);border:1px solid rgba(245,200,66,.2);color:var(--gold);width:46px;height:46px;border-radius:12px;cursor:pointer;font-size:1.2rem;transition:.2s}\n.hamburger-btn:hover{border-color:var(--gold)}\n.menu-dropdown{display:none;position:absolute;top:56px;left:0;background:rgba(12,12,24,.97);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:8px 0;min-width:230px;box-shadow:0 20px 50px rgba(0,0,0,.6)}\n.menu-dropdown.active{display:block}\n.menu-title{padding:8px 20px 4px;color:rgba(233,233,248,.35);font-size:.62rem;text-transform:uppercase;letter-spacing:2px;font-weight:700}\n.menu-item{display:flex;align-items:center;gap:12px;padding:9px 20px;color:rgba(233,233,248,.75);text-decoration:none;font-size:.88rem;border-left:3px solid transparent}\n.menu-item:hover{background:rgba(245,200,66,.05);border-left-color:var(--gold);color:var(--gold)}\n.menu-item i{width:18px;text-align:center;color:rgba(233,233,248,.35)}\n.menu-item:hover i{color:var(--gold)}\n.menu-divider{border-top:1px solid rgba(245,200,66,.07);margin:6px 14px}\n.sidebar-download{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 14px;padding:11px;border-radius:12px;background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14 !important;text-decoration:none;font-weight:800;font-size:.82rem;border-left:none !important}\n</style></head><body><div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Request Agent Access</div><div class="auth-sub">Submit your account credentials. Admin approval required.</div>\n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n    <form method="POST" id="agentRequestForm" class="form-row">\n      <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Your account username" required/></div>\n      <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Your account password" required/></div>\n      <button type="submit" class="btn btn-gold btn-block" id="reqBtn"><i class="fas fa-paper-plane"></i> Send Request</button>\n    </form>\n    <script>document.getElementById(\'agentRequestForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'reqBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Sending...\';});</script>\n    <div class="auth-links"><a href="{{ url_for(\'agent_login\') }}"><i class="fas fa-arrow-left"></i> Back to Agent Login</a><a href="{{ url_for(\'login\') }}"><i class="fas fa-home"></i> Main Site</a></div></div></div><script></script></body></html>'
+REGISTER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Create Account - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Create Account</div><div class="auth-sub">Join the MAHIR network</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="registerForm">
+  <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required autocomplete="username"/></div>
+  <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required autocomplete="new-password"/></div>
+  <div class="field"><i class="fas fa-envelope"></i><input type="email" name="email" placeholder="Email (optional)" autocomplete="email"/></div>
+  <div class="field"><i class="fas fa-key"></i><input type="text" name="registration_key" placeholder="Registration Key" required/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="registerBtn"><i class="fas fa-paper-plane"></i> Register</button>
+</form>
+<script>document.getElementById('registerForm').addEventListener('submit',function(){var b=document.getElementById('registerBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});</script>
+<div class="auth-links"><a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Already have an account? Login</a></div></div></div>
+''' + SIDEBAR_JS + '''
+</body></html>'''
 
-AGENT_DASHBOARD_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>Agent Dashboard - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n</style></head><body>\n<div class="container">\n  <div class="card header">\n    <h1><i class="fas fa-user-tie"></i> Agent Dashboard</h1>\n    <div class="flex">\n      <span class="welcome-text"><i class="fas fa-user-circle" style="color:var(--purple);"></i> Welcome, <strong>{{ session.username }}</strong></span>\n      <a href="{{ url_for(\'agent_logout\') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>\n    </div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-database"></i> Database Management <span style="font-size:.72rem;font-weight:400;color:var(--muted);">(users.db)</span></div>\n    <div class="flex">\n      <a href="{{ url_for(\'agent_download_db\') }}" class="btn btn-primary"><i class="fas fa-download"></i> Download users.db</a>\n      <form method="POST" action="{{ url_for(\'agent_upload_db\') }}" enctype="multipart/form-data" class="upload-form" id="uploadDbForm">\n        <input type="file" name="db_file" accept=".db" required/>\n        <button type="submit" class="btn btn-warning" id="uploadDbBtn" onclick="return confirm(\'This will REPLACE the current database. Are you sure?\')"><i class="fas fa-upload"></i> Upload &amp; Replace</button>\n      </form>\n    </div>\n    \n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-chart-simple"></i> Your Key Stats</div>\n    <p style="color:var(--muted);">Total Keys Created: <span class="stat-box">{{ keys|length }}</span></p>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-key"></i> Generate Registration Key</div>\n    <form method="POST" action="{{ url_for(\'agent_create_key\') }}" class="input-group" id="generateKeyForm">\n      <label><i class="far fa-calendar-alt"></i> Valid days (0 = Permanent):</label>\n      <input type="number" name="days_valid" value="30" min="0" max="365" style="width:110px;"/>\n      <button type="submit" class="btn btn-gold" id="generateKeyBtn"><i class="fas fa-plus-circle"></i> Generate Key</button>\n    </form>\n    {% if new_key %}\n    <div class="key-display">\n      <strong style="color:var(--muted);font-size:.85rem;"><i class="fas fa-key" style="color:var(--gold);"></i> New Key:</strong>\n      <code>{{ new_key }}</code>\n      {% if days == 0 %}<span class="badge badge-permanent"><i class="fas fa-infinity"></i> Permanent</span>\n      {% else %}<span style="color:var(--muted);font-size:.8rem;"><i class="far fa-clock"></i> valid {{ days }} days</span>{% endif %}\n    </div>\n    {% endif %}\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-list"></i> Your Keys</div>\n    <div class="table-wrapper">\n      <table>\n        <thead><tr><th>Key</th><th>Created</th><th>Used By</th><th>Status</th></tr></thead>\n        <tbody>\n          {% for key in keys %}\n          <tr>\n            <td><code>{{ key.key }}</code></td>\n            <td>{{ key.created_at[:10] }}</td>\n            <td>{{ key.used_by or \'—\' }}</td>\n            <td>{% if key.is_used %}<span class="badge badge-used"><i class="fas fa-check-circle"></i> Used</span>{% else %}<span class="badge badge-unused"><i class="fas fa-clock"></i> Available</span>{% endif %}</td>\n          </tr>\n          {% else %}\n          <tr class="empty-row"><td colspan="4">No keys created yet.</td></tr>\n          {% endfor %}\n        </tbody>\n      </table>\n    </div>\n  </div>\n  <a href="{{ url_for(\'login\') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Main Site</a>\n</div>\n<script>\ndocument.getElementById(\'uploadDbForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'uploadDbBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Uploading...\';});\ndocument.getElementById(\'generateKeyForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'generateKeyBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Generating...\';});\n</script>\n</body></html>'
+RECOVER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Recover Password - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap" style="display:flex;align-items:center;justify-content:center;"><i class="fas fa-key" style="font-size:2rem;color:var(--gold);"></i></div><div class="auth-title">Recover Password</div><div class="auth-sub">Enter your credentials to reset your password</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="recoverForm">
+  <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required autocomplete="username"/></div>
+  <div class="field"><i class="fas fa-envelope"></i><input type="email" name="email" placeholder="Email Address" required autocomplete="email"/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="recoverBtn"><i class="fas fa-paper-plane"></i> Recover Password</button>
+</form>
+<script>document.getElementById('recoverForm').addEventListener('submit',function(){var b=document.getElementById('recoverBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});</script>
+<div class="auth-links"><a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Back to Login</a></div></div></div>
+''' + SIDEBAR_JS + '''
+</body></html>'''
 
-ADMIN_DASHBOARD_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>Admin Dashboard - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n</style></head><body>\n<div class="container">\n  <div class="card header">\n    <h1><i class="fas fa-shield-alt"></i> Admin Dashboard</h1>\n    <div class="flex">\n      <span class="welcome-text"><i class="fas fa-user-circle" style="color:var(--purple);"></i> Welcome, <strong>{{ session.username }}</strong></span>\n      <a href="{{ url_for(\'admin_logout\') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>\n    </div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-server"></i> Server Resources</div>\n    <div class="system-stats">\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> CPU</div><div class="stat-value">{{ cpu }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ cpu }}%;"></div></div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-memory"></i> RAM</div><div class="stat-value">{{ ram_percent }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ ram_percent }}%;"></div></div><div class="stat-sub">{{ (ram_used / (1024**3))|round(1) }} GB / {{ (ram_total / (1024**3))|round(1) }} GB</div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-hdd"></i> Disk</div><div class="stat-value">{{ disk_percent }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ disk_percent }}%;"></div></div><div class="stat-sub">{{ (disk_used / (1024**3))|round(1) }} GB / {{ (disk_total / (1024**3))|round(1) }} GB</div></div>\n    </div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-folder-open"></i> File Manager</div>\n    <a href="{{ url_for(\'admin_file_manager\') }}" class="btn btn-gold"><i class="fas fa-folder"></i> Open File Manager</a>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-upload"></i> Upload New <code style="background:rgba(0,0,0,.4);padding:2px 10px;border-radius:8px;color:var(--gold);font-size:.85rem;">mahir.py</code></div>\n    <form method="POST" action="{{ url_for(\'admin_upload_mahir\') }}" enctype="multipart/form-data" class="upload-form" id="uploadMahirForm">\n      <input type="file" name="mahir_file" accept=".py" required style="flex:1;min-width:200px;"/>\n      <button type="submit" class="btn btn-warning" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload &amp; Update All Bots</button>\n    </form>\n    \n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-user-tie"></i> Agent Management</div>\n    <form method="POST" action="{{ url_for(\'admin_create_agent\') }}" class="flex" id="createAgentForm">\n      <input type="text" name="username" placeholder="Username" required class="flex-grow"/>\n      <input type="email" name="email" placeholder="Email" required class="flex-grow"/>\n      <input type="password" name="password" placeholder="Password" required class="flex-grow"/>\n      <button type="submit" class="btn btn-success" id="createAgentBtn"><i class="fas fa-user-plus"></i> Create Agent</button>\n    </form>\n    <div class="table-wrapper">\n      <table>\n        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Keys</th><th style="text-align:right;">Action</th></tr></thead>\n        <tbody>\n          {% for agent in agents %}\n          <tr>\n            <td>{{ agent.id }}</td>\n            <td><strong style="color:var(--gold2);">{{ agent.username }}</strong></td>\n            <td>{{ agent.email or \'-\' }}</td>\n            <td>{{ agent.created_at[:10] }}</td>\n            <td><span class="badge badge-admin">{{ agent.key_count }}</span></td>\n            <td><div class="td-actions"><form method="POST" action="{{ url_for(\'admin_delete_agent\', agent_id=agent.id) }}" onsubmit="return confirm(\'Delete this agent and all their keys?\');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form></div></td>\n          </tr>\n          {% else %}\n          <tr class="empty-row"><td colspan="6">No agents created yet.</td></tr>\n          {% endfor %}\n        </tbody>\n      </table>\n    </div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-user-clock"></i> Agent Access Requests</div>\n    <div class="table-wrapper">\n      <table>\n        <thead><tr><th>ID</th><th>Username</th><th>Requested</th><th>Status</th><th style="text-align:right;">Action</th></tr></thead>\n        <tbody>\n          {% for req in agent_requests %}\n          <tr>\n            <td>{{ req.id }}</td>\n            <td><strong style="color:var(--gold2);">{{ req.username }}</strong></td>\n            <td>{{ req.created_at[:16] }}</td>\n            <td>{% if req.status == \'pending\' %}<span class="badge badge-warning"><i class="fas fa-clock"></i> Pending</span>{% elif req.status == \'approved\' %}<span class="badge badge-permanent"><i class="fas fa-check"></i> Approved</span>{% else %}<span class="badge badge-stopped"><i class="fas fa-times"></i> Rejected</span>{% endif %}</td>\n            <td>{% if req.status == \'pending\' %}<div class="td-actions">\n              <form method="POST" action="{{ url_for(\'admin_agent_request_action\', req_id=req.id, action=\'approve\') }}" onsubmit="return confirm(\'Approve agent access for {{ req.username }}?\');"><button type="submit" class="btn btn-success btn-sm"><i class="fas fa-check"></i> Approve</button></form>\n              <form method="POST" action="{{ url_for(\'admin_agent_request_action\', req_id=req.id, action=\'reject\') }}" onsubmit="return confirm(\'Reject this request?\');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-times"></i> Reject</button></form>\n            </div>{% endif %}</td>\n          </tr>\n          {% else %}\n          <tr class="empty-row"><td colspan="5">No agent access requests yet.</td></tr>\n          {% endfor %}\n        </tbody>\n      </table>\n    </div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-key"></i> Generate Registration Key</div>\n    <form method="POST" action="{{ url_for(\'admin_create_key\') }}" class="flex" id="generateKeyForm">\n      <div class="input-group">\n        <label><i class="far fa-calendar-alt"></i> Valid days (0 = Permanent):</label>\n        <input type="number" name="days_valid" value="30" min="0" max="365" style="width:110px;"/>\n      </div>\n      <button type="submit" class="btn btn-gold" id="generateKeyBtn"><i class="fas fa-plus-circle"></i> Generate Key</button>\n    </form>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-users"></i> Registered Users</div>\n    <div class="table-wrapper">\n      <table>\n        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Bot Status</th><th>Bot File</th><th>Role</th><th style="text-align:right;">Action</th></tr></thead>\n        <tbody>\n          {% for user in users %}\n          <tr>\n            <td>{{ user.id }}</td>\n            <td><strong style="color:var(--gold2);">{{ user.username }}</strong></td>\n            <td>{{ user.email or \'-\' }}</td>\n            <td>{{ user.created_at[:10] }}</td>\n            <td>{% if user.bot_status == \'running\' %}<span class="badge badge-running"><i class="fas fa-circle"></i> Running</span>{% elif user.bot_status == \'stopped\' %}<span class="badge badge-stopped"><i class="fas fa-circle"></i> Stopped</span>{% else %}<span class="badge badge-unused">{{ user.bot_status or \'Unknown\' }}</span>{% endif %}</td>\n            <td><code style="font-size:.72rem;">{{ user.bot_file or \'-\' }}</code></td>\n            <td>{% if user.is_admin %}<span class="badge badge-admin"><i class="fas fa-crown"></i> Admin</span>{% elif user.is_agent %}<span class="badge badge-agent"><i class="fas fa-user-tie"></i> Agent</span>{% else %}<span class="badge badge-user">User</span>{% endif %}</td>\n            <td>{% if not user.is_admin and not user.is_agent %}<div class="td-actions"><form method="POST" action="{{ url_for(\'admin_delete_user\', user_id=user.id) }}" onsubmit="return confirm(\'Delete this user?\');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form></div>{% endif %}</td>\n          </tr>\n          {% else %}\n          <tr class="empty-row"><td colspan="8">No users registered yet.</td></tr>\n          {% endfor %}\n        </tbody>\n      </table>\n    </div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-key"></i> Recent Keys</div>\n    <div class="table-wrapper">\n      <table>\n        <thead><tr><th>Key</th><th>Created By</th><th>Created</th><th>Used By</th><th>Status</th><th style="text-align:right;">Action</th></tr></thead>\n        <tbody>\n          {% for key in keys %}\n          <tr>\n            <td><code>{{ key.key }}</code></td>\n            <td>{{ key.created_by or \'—\' }}</td>\n            <td>{{ key.created_at[:10] }}</td>\n            <td>{{ key.used_by or \'—\' }}</td>\n            <td>{% if key.is_used %}<span class="badge badge-used"><i class="fas fa-check-circle"></i> Used</span>{% elif key.expiry_date is none %}<span class="badge badge-permanent"><i class="fas fa-infinity"></i> Permanent</span>{% else %}<span class="badge badge-unused"><i class="fas fa-clock"></i> Available</span>{% endif %}</td>\n            <td><div class="td-actions"><form method="POST" action="{{ url_for(\'admin_delete_key\', key_id=key.id) }}" onsubmit="return confirm(\'Delete this key?\');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form></div></td>\n          </tr>\n          {% else %}\n          <tr class="empty-row"><td colspan="6">No keys generated yet.</td></tr>\n          {% endfor %}\n        </tbody>\n      </table>\n    </div>\n  </div>\n  <a href="{{ url_for(\'logout\') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Main Site</a>\n</div>\n<script>\ndocument.getElementById(\'uploadMahirForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'uploadMahirBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Uploading...\';});\ndocument.getElementById(\'createAgentForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'createAgentBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Creating...\';});\ndocument.getElementById(\'generateKeyForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'generateKeyBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Generating...\';});\n</script>\n</body></html>'
+ADMIN_LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Admin Access - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Admin Access</div><div class="auth-sub">Secure admin panel login</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="adminLoginForm">
+  <div class="field"><i class="fas fa-user-shield"></i><input type="text" name="username" placeholder="Admin Username" required autocomplete="username"/></div>
+  <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required autocomplete="current-password"/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
+</form>
+<script>document.getElementById('adminLoginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
+<div class="auth-links"><a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Back to Main Site</a></div></div></div>
+''' + SIDEBAR_JS + '''
+</body></html>'''
 
-FILE_MANAGER_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>File Manager - MAHIR PREMIUM</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n</style></head><body>\n<div class="container">\n  <div class="card header">\n    <h1><i class="fas fa-folder-open"></i> File Manager</h1>\n    <div class="flex">\n      <a href="{{ url_for(\'admin_dashboard\') }}" class="btn btn-primary btn-sm"><i class="fas fa-th-large"></i> Dashboard</a>\n      <a href="{{ url_for(\'admin_logout\') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>\n    </div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-upload"></i> Upload Any File <span style="font-size:.72rem;font-weight:400;color:var(--muted);">(ZIP auto-extracted)</span></div>\n    <form method="POST" action="{{ url_for(\'admin_upload_file\') }}" enctype="multipart/form-data" class="upload-form" id="uploadForm">\n      <input type="file" name="uploaded_file" required id="fileInput" style="flex:1;min-width:200px;"/>\n      <button type="submit" class="btn btn-gold" id="uploadBtn"><i class="fas fa-cloud-upload-alt"></i> Upload</button>\n    </form>\n    \n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-folder"></i> Current Directory: <span class="current-dir">{{ current_path }}</span></div>\n    <div class="breadcrumb">\n      <i class="fas fa-home" style="margin-right:6px;"></i><a href="{{ url_for(\'admin_file_manager\') }}">/</a>\n      {% for part in breadcrumb_parts %} / <a href="{{ url_for(\'admin_file_manager\', path=part) }}">{{ part }}</a>{% endfor %}\n    </div>\n    <div class="table-wrapper">\n      <table>\n        <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th style="text-align:right;">Actions</th></tr></thead>\n        <tbody>\n          {% if parent_dir is not none %}\n          <tr><td><a href="{{ url_for(\'admin_file_manager\', path=parent_dir) }}" class="folder-link"><i class="fas fa-arrow-up" style="font-size:.75rem;"></i> ..</a></td><td>—</td><td>—</td><td>—</td></tr>\n          {% endif %}\n          {% for item in files %}\n          <tr>\n            <td>{% if item.is_dir %}<a href="{{ url_for(\'admin_file_manager\', path=item.path) }}" class="folder-link"><i class="fas fa-folder"></i> {{ item.name }}</a>{% else %}<span class="file-name"><i class="fas fa-file"></i> {{ item.name }}</span>{% endif %}</td>\n            <td>{{ item.size if not item.is_dir else \'—\' }}</td>\n            <td>{{ item.modified }}</td>\n            <td><div class="td-actions">{% if not item.is_dir %}\n              <a href="{{ url_for(\'admin_download_file\', path=item.path) }}" class="btn btn-info btn-sm"><i class="fas fa-download"></i></a>\n              <button onclick="editFile(\'{{ item.path }}\')" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></button>\n              <button onclick="deleteFile(\'{{ item.path }}\', this)" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>\n            {% endif %}</div></td>\n          </tr>\n          {% else %}\n          <tr class="empty-row"><td colspan="4">This directory is empty</td></tr>\n          {% endfor %}\n        </tbody>\n      </table>\n    </div>\n  </div>\n  <a href="{{ url_for(\'admin_dashboard\') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>\n</div>\n\n<div id="editModal" class="modal-overlay">\n  <div class="modal-box" style="max-width:820px;">\n    <button class="modal-close" onclick="closeEditModal()">&times;</button>\n    <div class="modal-title"><i class="fas fa-pen-fancy"></i> Edit File: <span id="editFileName" style="color:var(--gold2);font-size:1rem;"></span></div>\n    <textarea id="editContent" spellcheck="false" style="width:100%;height:380px;background:#05050c;color:var(--text);border:1px solid rgba(245,200,66,.12);border-radius:12px;padding:14px;font-family:var(--mono);font-size:.85rem;resize:vertical;"></textarea>\n    <div class="flex" style="justify-content:flex-end;margin-top:14px;">\n      <button onclick="saveEdit()" class="btn btn-success btn-sm"><i class="fas fa-save"></i> Save</button>\n      <button onclick="closeEditModal()" class="btn btn-clear btn-sm"><i class="fas fa-times"></i> Cancel</button>\n    </div>\n    <div id="editStatus" style="margin-top:10px;text-align:center;font-size:.85rem;color:var(--gold2);"></div>\n  </div>\n</div>\n\n<style>\n.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10000;justify-content:center;align-items:center;padding:16px}\n.modal-overlay.active{display:flex}\n.modal-box{background:#101022;border:1px solid rgba(245,200,66,.14);border-radius:18px;padding:24px;width:100%;position:relative}\n.modal-close{position:absolute;top:12px;right:16px;font-size:1.7rem;color:var(--gold2);cursor:pointer;background:none;border:none}\n.modal-title{font-size:1.25rem;font-weight:800;color:var(--gold);margin-bottom:14px;display:flex;align-items:center;gap:10px}\n</style>\n\n<script>\ndocument.getElementById(\'uploadForm\').addEventListener(\'submit\',function(){var b=document.getElementById(\'uploadBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Uploading...\';});\nvar currentEditPath=\'\';\nfunction editFile(path){currentEditPath=path;document.getElementById(\'editFileName\').textContent=path;document.getElementById(\'editContent\').value=\'Loading...\';document.getElementById(\'editStatus\').textContent=\'\';document.getElementById(\'editModal\').classList.add(\'active\');fetch(\'/admin/edit_file/\'+encodeURIComponent(path)).then(function(r){return r.json();}).then(function(data){document.getElementById(\'editContent\').value=data.error?(\'Error: \'+data.error):data.content;}).catch(function(err){document.getElementById(\'editContent\').value=\'Error loading file: \'+err;});}\nfunction closeEditModal(){document.getElementById(\'editModal\').classList.remove(\'active\');}\nfunction saveEdit(){var content=document.getElementById(\'editContent\').value;var status=document.getElementById(\'editStatus\');status.textContent=\'Saving...\';fetch(\'/admin/edit_file/\'+encodeURIComponent(currentEditPath),{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({content:content})}).then(function(r){return r.json();}).then(function(data){if(data.success){status.textContent=\'Saved successfully!\';status.style.color=\'#4ade80\';setTimeout(function(){location.reload();},800);}else{status.textContent=\'Error: \'+(data.error||\'\');status.style.color=\'var(--red2)\';}}).catch(function(err){status.textContent=\'Error: \'+err;status.style.color=\'var(--red2)\';});}\nfunction deleteFile(path,btn){if(!confirm(\'Are you sure you want to delete "\'+path+\'"?\'))return;if(btn){btn.disabled=true;}fetch(\'/admin/delete_file/\'+encodeURIComponent(path),{method:\'POST\'}).then(function(r){return r.json();}).then(function(data){if(data.success){location.reload();}else{alert(\'Error: \'+(data.error||\'\'));if(btn){btn.disabled=false;}}}).catch(function(err){alert(\'Error: \'+err);if(btn){btn.disabled=false;}});}\ndocument.addEventListener(\'keydown\',function(e){if(e.key===\'Escape\')closeEditModal();});\ndocument.getElementById(\'editModal\').addEventListener(\'click\',function(e){if(e.target===this)closeEditModal();});\n</script>\n</body></html>'
+AGENT_LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Agent Login - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Agent Login</div><div class="auth-sub">Agent panel access</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="agentLoginForm">
+  <div class="field"><i class="fas fa-user-tie"></i><input type="text" name="username" placeholder="Agent Username" required/></div>
+  <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
+</form>
+<script>document.getElementById('agentLoginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
+<div class="auth-links"><a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Back to Main</a></div></div></div>
+''' + SIDEBAR_JS + '''
+</body></html>'''
 
-USER_PANEL_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\'/><meta name=\'viewport\' content=\'width=device-width, initial-scale=1.0\'/><title>MAHIR PREMIUM | Bot Controller</title><link rel=\'preconnect\' href=\'https://fonts.googleapis.com\'/><link href=\'https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap\' rel=\'stylesheet\'/><link rel=\'stylesheet\' href=\'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css\'/><style>\n*{margin:0;padding:0;box-sizing:border-box}\n:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:\'JetBrains Mono\',monospace}\nbody{font-family:\'Inter\',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}\nbody::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),radial-gradient(760px 520px at 85% 0%,rgba(59,140,255,.07),transparent 60%),#07070f}\na{color:var(--gold2)}\n.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}\n.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35);transition:border-color .25s ease,transform .25s ease}\n.card:hover{border-color:rgba(245,200,66,.25)}\n.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.card-title i{color:var(--purple)}\n.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}\n.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}\n.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}\n.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease,filter .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}\n.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}\n.btn:disabled{opacity:.55;cursor:not-allowed}\n.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}\n.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}\n.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}\n.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.btn-admin{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.btn-fullscreen{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}\n.btn-warning .spinner,.btn-gold .spinner,.btn-reset .spinner{border-color:rgba(0,0,0,.25);border-top-color:#111}\n@keyframes spin{to{transform:rotate(360deg)}}\n.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}\n.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}\n.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}\n.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}\n.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}\n.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}\n.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}\n.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}\n.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}\n.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}\n.badge-warning{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.35)}\n.flash-msg{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:12px;margin-top:14px;font-size:.88rem;border:1px solid}\n.flash-msg.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}\n.flash-msg.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}\n.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.input-group label{color:var(--muted);font-size:.85rem;font-weight:600}\ninput[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;transition:border-color .2s ease,box-shadow .2s ease}\ninput:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,200,66,.10)}\ninput::placeholder{color:rgba(233,233,248,.3)}\ninput[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}\ninput[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}\n.table-wrapper{overflow-x:auto;margin-top:12px}\ntable{width:100%;border-collapse:collapse;font-size:.88rem}\nth,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}\nth{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}\ntr:hover td{background:rgba(245,200,66,.03)}\ntd code,.key-display code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem;border:1px solid rgba(245,200,66,.10)}\n.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}\n.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center;transition:transform .2s ease,border-color .2s ease}\n.stat-card:hover{transform:translateY(-3px);border-color:rgba(245,200,66,.22)}\n.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}\n.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}\n.stat-sub{font-size:.72rem;color:var(--muted);margin-top:4px}\n.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}\n.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}\n.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}\n.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}\n.info-row{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid rgba(245,200,66,.06);flex-wrap:wrap;font-size:.9rem}\n.info-label{color:var(--gold2);font-weight:600}\n.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}\n.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}\n.back-link:hover{color:var(--gold)}\n.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px;border:1px solid rgba(245,200,66,.05)}\n.breadcrumb a{color:var(--gold2);text-decoration:none}\n.current-dir{color:var(--gold);font-weight:600}\n.folder-link{color:var(--gold);text-decoration:none;font-weight:600}\n.file-name{color:#8fc0ff}\n.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}\n.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}\n.flex-grow{flex:1;min-width:150px}\n.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}\n.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}\n@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}\n@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important}}\n\n.logout-btn{position:fixed;top:20px;right:20px;z-index:999}\n.cover-section{position:relative;border-radius:22px;overflow:hidden;margin-bottom:24px;border:1px solid rgba(245,200,66,.15);box-shadow:0 15px 40px rgba(0,0,0,.5)}\n.cover-section img.cover-image{width:100%;height:260px;object-fit:cover;display:block}\n.cover-overlay{position:absolute;inset:0;background:linear-gradient(100deg,rgba(7,7,15,.92) 20%,rgba(7,7,15,.5) 60%,rgba(7,7,15,.25));display:flex;flex-direction:column;justify-content:center;padding:32px 40px}\n.logo-row{display:flex;align-items:center;gap:18px}\n.logo-row img{height:72px;width:72px;border-radius:16px;object-fit:cover;border:1px solid rgba(245,200,66,.25)}\n.cover-title{font-size:2.2rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1.1}\n.cover-sub{color:rgba(233,233,248,.65);font-size:.85rem;letter-spacing:1.5px;margin-top:4px}\n.cover-badge{position:absolute;top:18px;right:20px;background:rgba(7,7,15,.7);border:1px solid rgba(245,200,66,.25);padding:6px 16px;border-radius:999px;font-size:.66rem;font-weight:700;color:var(--gold);letter-spacing:2px;text-transform:uppercase}\n@media(max-width:768px){.cover-section img.cover-image{height:190px}.cover-overlay{padding:18px}.cover-title{font-size:1.4rem}.logo-row img{height:48px;width:48px}}\n.download-card{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}\n.dc-left{display:flex;align-items:center;gap:16px}\n.dc-icon{font-size:2rem;color:var(--gold);background:rgba(245,200,66,.07);width:60px;height:60px;border-radius:16px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(245,200,66,.12)}\n.dc-title{font-size:1.05rem;font-weight:700}\n.dc-desc{color:var(--muted);font-size:.8rem;margin:2px 0 6px}\n.version-tag{display:inline-block;background:rgba(245,200,66,.08);color:var(--gold);padding:2px 10px;border-radius:999px;font-size:.62rem;font-weight:700;margin-right:6px;border:1px solid rgba(245,200,66,.12)}\n.tab-container{display:flex;gap:8px;margin-bottom:14px;border-bottom:1px solid rgba(245,200,66,.08);padding-bottom:10px;flex-wrap:wrap}\n.tab-btn{background:transparent;border:1px solid transparent;padding:8px 18px;border-radius:10px;color:var(--muted);cursor:pointer;font-weight:600;font-size:.82rem;font-family:inherit;transition:.2s}\n.tab-btn:hover{color:var(--gold2)}\n.tab-btn.active{background:rgba(245,200,66,.08);color:var(--gold);border-color:rgba(245,200,66,.25)}\n.tab-content{display:none}\n.tab-content.active{display:block}\n.log-box{background:#05050c;border:1px solid rgba(245,200,66,.08);border-radius:14px;padding:14px;height:400px;overflow-y:auto;font-family:var(--mono);font-size:.78rem}\n.log-box::-webkit-scrollbar{width:6px}\n.log-box::-webkit-scrollbar-thumb{background:rgba(245,200,66,.25);border-radius:99px}\n.log-line{padding:4px 8px;border-left:3px solid var(--gold);margin-bottom:2px;color:#c5c5e5;word-wrap:break-word;white-space:pre-wrap}\n.error-line{border-left-color:var(--red);color:#fca5a5;background:rgba(212,42,58,.05)}\n.message-card{background:rgba(245,200,66,.03);border:1px solid rgba(245,200,66,.08);border-radius:12px;padding:12px 14px;margin-bottom:10px}\n.message-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid rgba(245,200,66,.06)}\n.message-sender{font-weight:800;color:var(--gold2)}\n.message-time{font-size:.65rem;color:var(--muted)}\n.message-meta{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:.8rem}\n.message-label{color:var(--gold2);font-weight:600}\n.message-value{color:#c5c5e5;word-break:break-all}\n.control-bar{display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap}\n.pause-btn{background:rgba(255,255,255,.06);border:1px solid rgba(245,200,66,.15);padding:7px 14px;border-radius:10px;color:var(--text);cursor:pointer;font-size:.78rem;font-family:inherit}\n.pause-btn.paused{border-color:var(--red);color:var(--red2)}\n.button-group{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}\n.button-group .btn{flex:1;min-width:110px}\n.chart-container{position:relative;height:250px}\n.config-form{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px}\n.config-form label{display:block;color:var(--gold2);font-weight:600;margin-bottom:6px;font-size:.85rem}\n.config-form input{width:100%}\n.config-status{padding:13px 16px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.12);border-left:4px solid var(--gold);border-radius:10px;color:var(--gold2);font-size:.85rem;margin-bottom:18px}\n.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10000;justify-content:center;align-items:center;padding:16px}\n.modal-overlay.active{display:flex}\n.modal-box{background:#101022;border:1px solid rgba(245,200,66,.14);border-radius:18px;padding:24px;max-width:700px;width:100%;max-height:88vh;overflow-y:auto;position:relative}\n.modal-close{position:absolute;top:12px;right:16px;font-size:1.7rem;color:var(--gold2);cursor:pointer;background:none;border:none}\n.modal-title{font-size:1.3rem;font-weight:800;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}\n.modal-section{background:rgba(0,0,0,.3);border:1px solid rgba(245,200,66,.07);border-radius:14px;padding:16px;margin-bottom:14px}\n.modal-section h3{color:var(--gold);font-size:.95rem;margin-bottom:12px;display:flex;align-items:center;gap:8px}\n.modal-input-group{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}\n.modal-input-group label{min-width:90px;color:var(--gold2);font-weight:600;font-size:.82rem}\n.modal-input-group input{flex:1;min-width:160px}\n.modal-btn{display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border:none;border-radius:10px;font-weight:700;font-size:.78rem;cursor:pointer;font-family:inherit}\n.modal-btn-save{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}\n.modal-btn-cancel{background:rgba(255,255,255,.08);color:var(--text)}\n.modal-btn-action{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n.modal-btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.modal-btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.modal-result-box{background:rgba(0,0,0,.45);border:1px solid rgba(245,200,66,.08);border-radius:10px;padding:12px;margin-top:10px;max-height:160px;overflow-y:auto;font-size:.78rem;color:#c5c5e5;white-space:pre-wrap;word-break:break-word}\n.notification{position:fixed;top:20px;right:20px;padding:12px 18px;border-radius:12px;z-index:99999;font-weight:600;font-size:.85rem;box-shadow:0 10px 30px rgba(0,0,0,.5)}\n.notification-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}\n.notification-error{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}\n.notification-info{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}\n@media(max-width:768px){.download-card{flex-direction:column;align-items:stretch;text-align:center}.dc-left{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}.modal-input-group{flex-direction:column;align-items:stretch}.modal-input-group label{min-width:auto}}\n</style></head><body>\n<div class="container">\n  <button class="logout-btn btn btn-danger btn-sm" onclick="window.location.href=\'/logout\'"><i class="fas fa-sign-out-alt"></i> Logout</button>\n  <div class="cover-section">\n    <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover"/>\n    <div class="cover-overlay">\n      <div class="logo-row">\n        <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/>\n        <div><div class="cover-title">MAHIR PREMIUM</div><div class="cover-sub">ELITE BOT CONTROLLER</div></div>\n      </div>\n      <div class="cover-badge"><i class="fas fa-crown"></i> {{ \'PREMIUM\' if config_done else \'SETUP\' }}</div>\n    </div>\n  </div>\n\n  {% if not config_done %}\n  <div class="card">\n    <div class="card-title"><i class="fas fa-cog"></i> Bot Configuration</div>\n    \n{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == \'error\' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}\n\n    <div class="config-status"><i class="fas fa-info-circle"></i> Enter your Free Fire bot credentials to deploy.</div>\n    <form method="POST" action="{{ url_for(\'configure_bot\') }}" class="config-form" id="configForm">\n      <div><label><i class="fas fa-user-shield"></i> Admin UID</label><input type="text" name="admin_uid" placeholder="e.g., 1120167200" required/></div>\n      <div><label><i class="fas fa-robot"></i> Bot UID</label><input type="text" name="bot_uid" placeholder="Enter bot UID" required/></div>\n      <div><label><i class="fas fa-key"></i> Bot Password</label><input type="text" name="bot_pw" placeholder="Enter bot password hash" required/></div>\n      <button type="submit" class="btn btn-gold btn-block" id="deployBtn"><i class="fas fa-play"></i> Deploy Bot</button>\n    </form>\n    <div style="margin-top:14px;font-size:.8rem;color:var(--gold2);"><i class="fas fa-shield-alt"></i> Master Admin UID (1120167200) will be auto-added.</div>\n  </div>\n  {% else %}\n\n  <div class="card download-card">\n    <div class="dc-left">\n      <div class="dc-icon"><i class="fab fa-android"></i></div>\n      <div>\n        <div class="dc-title"><i class="fas fa-mobile-alt" style="color:var(--gold);margin-right:6px;"></i> MAHIR TCP Bot</div>\n        <div class="dc-desc">Download the official Android app to control your bot on the go</div>\n        <span class="version-tag"><i class="fas fa-tag"></i> v2.0.1</span>\n        <span class="version-tag" style="background:rgba(59,140,255,.08);color:#6db2ff;"><i class="fas fa-check-circle"></i> Latest</span>\n      </div>\n    </div>\n    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="btn btn-gold" id="downloadApkBtn"><i class="fas fa-download"></i> Download APK <span style="font-size:.65rem;opacity:.75;">18.4 MB</span></a>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-robot"></i> Bot Identity &amp; Status</div>\n    <div class="stats-grid">\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-id-card"></i> UID</div><div class="stat-value" id="botUid">---</div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-user-astronaut"></i> Name</div><div class="stat-value" id="botName">---</div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-globe-asia"></i> Region</div><div class="stat-value" id="botRegion">---</div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-heartbeat"></i> Status</div><div class="stat-value" id="botStatus">---</div></div>\n    </div>\n    <div style="margin-top:16px;padding-top:14px;border-top:1px solid rgba(245,200,66,.06);">\n      <div style="font-size:.88rem;font-weight:700;color:var(--gold2);margin-bottom:10px;"><i class="fas fa-comment-dots"></i> Last Message Activity</div>\n      <div class="stats-grid">\n        <div class="stat-card"><div class="stat-label"><i class="fas fa-user"></i> Sender UID</div><div class="stat-value" id="lastSenderUid" style="font-size:.9rem;">---</div></div>\n        <div class="stat-card"><div class="stat-label"><i class="fas fa-users"></i> Guild</div><div class="stat-value" id="lastGuildName" style="font-size:.9rem;">---</div></div>\n        <div class="stat-card"><div class="stat-label"><i class="fas fa-comment"></i> Message</div><div class="stat-value" id="lastMessage" style="font-size:.8rem;">---</div></div>\n      </div>\n    </div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-chart-line"></i> System Performance</div>\n    <div class="stats-grid">\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> Process</div><div class="stat-value" id="processStatus">---</div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-clock"></i> Uptime</div><div class="stat-value" id="uptime">00:00:00</div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-sync-alt"></i> Restarts</div><div class="stat-value" id="restartCount">0</div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-exclamation-triangle"></i> Errors</div><div class="stat-value" id="errorCount" style="color:var(--red2);">0</div></div>\n    </div>\n    <div class="system-stats">\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-tachometer-alt"></i> CPU</div><div class="stat-value" id="cpuValue">0%</div><div class="progress-bar"><div class="progress-fill" id="cpuBar"></div></div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-memory"></i> RAM</div><div class="stat-value" id="ramValue">0%</div><div class="progress-bar"><div class="progress-fill" id="ramBar"></div></div></div>\n      <div class="stat-card"><div class="stat-label"><i class="fas fa-hdd"></i> Disk</div><div class="stat-value" id="diskValue">0%</div><div class="progress-bar"><div class="progress-fill" id="diskBar"></div></div></div>\n    </div>\n    <div class="info-row"><span class="info-label"><i class="fas fa-hourglass-half"></i> Script Expiry:</span><span class="info-value" id="expiryInfo">No Limit</span></div>\n    <div class="info-row"><span class="info-label"><i class="fas fa-redo-alt"></i> Auto-Restart:</span><span class="info-value" id="autoRestartInfo">Disabled</span></div>\n  </div>\n\n  <div class="card">\n    <div class="card-title"><i class="fas fa-chart-area"></i> Performance Monitor</div>\n    <div class="chart-container"><canvas id="performanceChart"></canvas></div>\n  </div>\n\n  <div class="card">\n    <div class="tab-container">\n      <button class="tab-btn active" onclick="switchTab(\'logs\')"><i class="fas fa-terminal"></i> Console</button>\n      <button class="tab-btn" onclick="switchTab(\'messages\')"><i class="fas fa-envelope"></i> Messages</button>\n      <button class="tab-btn" onclick="switchTab(\'errors\')"><i class="fas fa-exclamation-triangle"></i> Errors</button>\n    </div>\n    <div id="logsTab" class="tab-content active">\n      <div class="control-bar">\n        <button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button>\n        <button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button>\n        <span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span>\n      </div>\n      <div id="logBox" class="log-box"><div class="log-line"><i class="fas fa-info-circle"></i> Waiting for logs...</div></div>\n    </div>\n    <div id="messagesTab" class="tab-content">\n      <div class="control-bar">\n        <button onclick="clearMessages()" class="btn btn-clear btn-sm"><i class="fas fa-trash-alt"></i> Clear</button>\n        <button onclick="exportMessages()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button>\n      </div>\n      <div id="messageHistory" class="log-box" style="height:380px;"><div class="log-line"><i class="fas fa-info-circle"></i> No messages received...</div></div>\n    </div>\n    <div id="errorsTab" class="tab-content">\n      <div class="control-bar">\n        <button onclick="clearErrors()" class="btn btn-clear btn-sm"><i class="fas fa-trash-alt"></i> Clear</button>\n        <button onclick="exportErrors()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button>\n      </div>\n      <div id="errorBox" class="log-box"><div class="log-line"><i class="fas fa-check-circle"></i> No errors detected</div></div>\n    </div>\n    <div class="button-group">\n      <button onclick="sendAction(\'start\')" id="btnStart" class="btn btn-start"><i class="fas fa-play"></i> Start</button>\n      <button onclick="sendAction(\'stop\')" id="btnStop" class="btn btn-stop"><i class="fas fa-stop"></i> Stop</button>\n      <button onclick="sendAction(\'reset\')" id="btnReset" class="btn btn-reset"><i class="fas fa-sync-alt"></i> Reset</button>\n      <button onclick="openAdminPanel()" id="btnAdmin" class="btn btn-admin"><i class="fas fa-cog"></i> Admin</button>\n    </div>\n  </div>\n  {% endif %}\n</div>\n\n<div id="adminModal" class="modal-overlay">\n  <div class="modal-box">\n    <button class="modal-close" onclick="closeAdminPanel()">&times;</button>\n    <div class="modal-title"><i class="fas fa-crown"></i> Admin Control Panel</div>\n    <div class="modal-section">\n      <h3><i class="fas fa-user-shield"></i> Admin UIDs</h3>\n      <div class="modal-input-group">\n        <label>UIDs (comma separated):</label>\n        <input type="text" id="adminUidsInput" placeholder="e.g. 1120167200, 3020431227"/>\n      </div>\n      <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save &amp; Restart</button>\n    </div>\n    <div class="modal-section">\n      <h3><i class="fas fa-key"></i> Bot Credentials</h3>\n      <div class="modal-input-group"><label>Bot UID:</label><input type="text" id="botUidInput" placeholder="Enter new UID"/></div>\n      <div class="modal-input-group"><label>Password:</label><input type="text" id="botPwInput" placeholder="Enter new password hash"/></div>\n      <button onclick="updateBotCreds()" id="botCredsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save &amp; Restart</button>\n    </div>\n    <div class="modal-section">\n      <h3><i class="fas fa-user-friends"></i> Friend Management</h3>\n      <div class="modal-input-group" style="margin-bottom:0;">\n        <input type="text" id="friendUidInput" placeholder="Enter UID" style="flex:1;min-width:150px;"/>\n        <button onclick="friendAction(\'add\')" id="friendAddBtn" class="modal-btn modal-btn-action"><i class="fas fa-user-plus"></i> Add</button>\n        <button onclick="friendAction(\'remove\')" id="friendRemoveBtn" class="modal-btn modal-btn-danger"><i class="fas fa-user-minus"></i> Remove</button>\n        <button onclick="friendAction(\'list\')" id="friendListBtn" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List</button>\n      </div>\n      <div id="friendResult" class="modal-result-box">Result will appear here...</div>\n    </div>\n    <div style="text-align:right;"><button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close</button></div>\n  </div>\n</div>\n\n<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>\n<script>\nfunction getBtn(id){return document.getElementById(id);}\nfunction setLoading(btn,loading){if(!btn)return;if(loading){btn._origHtml=btn.innerHTML;btn.disabled=true;btn.innerHTML=\'<span class="spinner"></span> Loading...\';}else{btn.disabled=false;btn.innerHTML=btn._origHtml||btn.innerHTML;}}\nfunction showNotification(message,type){var el=document.createElement(\'div\');el.className=\'notification notification-\'+type;var icon=type===\'success\'?\'check-circle\':(type===\'error\'?\'exclamation-circle\':\'info-circle\');el.innerHTML=\'<i class="fas fa-\'+icon+\'"></i> \'+message;document.body.appendChild(el);setTimeout(function(){el.remove();},3000);}\nfunction escapeHtml(text){if(!text)return \'\';var d=document.createElement(\'div\');d.textContent=text;return d.innerHTML;}\nvar performanceChart=null;\nfunction initChart(){var ctx=document.getElementById(\'performanceChart\').getContext(\'2d\');performanceChart=new Chart(ctx,{type:\'line\',data:{labels:Array(20).fill(\'\'),datasets:[{label:\'CPU %\',data:Array(20).fill(0),borderColor:\'#F5C842\',backgroundColor:\'rgba(245,200,66,.05)\',tension:.4,fill:true,borderWidth:2,pointRadius:0},{label:\'RAM %\',data:Array(20).fill(0),borderColor:\'#8540F5\',backgroundColor:\'rgba(133,64,245,.04)\',tension:.4,fill:true,borderWidth:2,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:\'#c5c5e5\',font:{size:11}}}},scales:{y:{beginAtZero:true,max:100,grid:{color:\'rgba(245,200,66,.05)\'},ticks:{color:\'#a78bfa\'}},x:{grid:{color:\'rgba(245,200,66,.05)\'},ticks:{color:\'#a78bfa\'}}}}});}\nif(typeof Chart!==\'undefined\'){initChart();}\nvar currentTab=\'logs\';\nfunction switchTab(tab){currentTab=tab;var btns=document.querySelectorAll(\'.tab-btn\');btns.forEach(function(b){b.classList.remove(\'active\');});document.querySelectorAll(\'.tab-content\').forEach(function(c){c.classList.remove(\'active\');});if(tab===\'logs\'){btns[0].classList.add(\'active\');document.getElementById(\'logsTab\').classList.add(\'active\');}else if(tab===\'messages\'){btns[1].classList.add(\'active\');document.getElementById(\'messagesTab\').classList.add(\'active\');}else{btns[2].classList.add(\'active\');document.getElementById(\'errorsTab\').classList.add(\'active\');}}\nvar autoScroll=true;\nfunction togglePause(){autoScroll=!autoScroll;var btn=document.getElementById(\'pauseBtn\');var status=document.getElementById(\'logStatus\');if(autoScroll){btn.innerHTML=\'<i class="fas fa-pause"></i> Pause\';btn.classList.remove(\'paused\');status.innerHTML=\'Auto-scroll: ON\';var box=document.getElementById(\'logBox\');if(box)box.scrollTop=box.scrollHeight;}else{btn.innerHTML=\'<i class="fas fa-play"></i> Resume\';btn.classList.add(\'paused\');status.innerHTML=\'Auto-scroll: OFF\';}}\nfunction clearErrors(){fetch(\'/api/clear_errors\',{method:\'POST\'}).then(function(){updateUI();showNotification(\'Error logs cleared!\',\'success\');}).catch(function(){showNotification(\'Failed to clear errors\',\'error\');});}\nfunction clearMessages(){fetch(\'/api/clear_messages\',{method:\'POST\'}).then(function(){updateUI();showNotification(\'Messages cleared!\',\'success\');}).catch(function(){showNotification(\'Failed to clear messages\',\'error\');});}\nfunction downloadText(text,filename){var blob=new Blob([text],{type:\'text/plain\'});var url=URL.createObjectURL(blob);var a=document.createElement(\'a\');a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);}\nfunction exportLogs(){fetch(\'/api/export_logs\').then(function(r){return r.json();}).then(function(d){if(d.logs&&d.logs.length){downloadText(d.logs.join(\'\\n\'),\'console_logs.txt\');showNotification(\'Logs exported!\',\'success\');}else showNotification(\'No logs to export\',\'info\');}).catch(function(){showNotification(\'Failed to export logs\',\'error\');});}\nfunction exportErrors(){fetch(\'/api/export_errors\').then(function(r){return r.json();}).then(function(d){if(d.errors&&d.errors.length){downloadText(d.errors.join(\'\\n\'),\'error_logs.txt\');showNotification(\'Error logs exported!\',\'success\');}else showNotification(\'No errors to export\',\'info\');}).catch(function(){showNotification(\'Failed to export errors\',\'error\');});}\nfunction exportMessages(){fetch(\'/api/export_messages\').then(function(r){return r.json();}).then(function(d){if(d.messages&&d.messages.length){var text=\'\';d.messages.forEach(function(msg){text+=\'[\'+msg.timestamp+\'] MESSAGE INFO\\nSender UID: \'+msg.data.sender_uid+\'\\nNickname: \'+msg.data.nickname+\'\\nMessage: \'+msg.data.message+\'\\nGuild Name: \'+msg.data.guild_name+\'\\nPFP URL: \'+msg.data.pfp_url+\'\\n\'+\'-\'.repeat(50)+\'\\n\';});downloadText(text,\'message_logs.txt\');showNotification(\'Messages exported!\',\'success\');}else showNotification(\'No messages to export\',\'info\');}).catch(function(){showNotification(\'Failed to export messages\',\'error\');});}\nfunction sendAction(action){var btnMap={start:\'btnStart\',stop:\'btnStop\',reset:\'btnReset\'};var btn=getBtn(btnMap[action]);setLoading(btn,true);showNotification(\'Executing: \'+action.toUpperCase()+\'...\',\'info\');fetch(\'/api/control\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({action:action})}).then(function(){setTimeout(updateUI,500);showNotification(action.toUpperCase()+\' completed!\',\'success\');setLoading(btn,false);}).catch(function(){showNotification(action.toUpperCase()+\' failed!\',\'error\');setLoading(btn,false);});}\nfunction openAdminPanel(){document.getElementById(\'adminModal\').classList.add(\'active\');fetch(\'/api/admin_uids\').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById(\'adminUidsInput\').value=d.uids.join(\', \');}).catch(function(){showNotification(\'Failed to load admin UIDs\',\'error\');});fetch(\'/api/bot_creds\').then(function(r){return r.json();}).then(function(d){document.getElementById(\'botUidInput\').value=d.uid||\'\';document.getElementById(\'botPwInput\').value=d.pw||\'\';}).catch(function(){showNotification(\'Failed to load bot credentials\',\'error\');});document.getElementById(\'friendResult\').innerHTML=\'Result will appear here...\';}\nfunction closeAdminPanel(){document.getElementById(\'adminModal\').classList.remove(\'active\');}\ndocument.getElementById(\'adminModal\').addEventListener(\'click\',function(e){if(e.target===this)closeAdminPanel();});\nfunction updateAdminUIDs(){var input=document.getElementById(\'adminUidsInput\').value;var uids=input.split(\',\').map(function(s){return s.trim();}).filter(function(s){return s;});if(!uids.length){showNotification(\'Please enter at least one UID\',\'error\');return;}if(uids.indexOf(\'1120167200\')===-1)uids.push(\'1120167200\');var btn=document.getElementById(\'adminUidsBtn\');setLoading(btn,true);showNotification(\'Updating Admin UIDs and restarting bot...\',\'info\');fetch(\'/api/admin_uids\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({uids:uids})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status===\'success\'){showNotification(\'Admin UIDs updated! Bot is restarting...\',\'success\');setTimeout(updateUI,3000);}else showNotification(\'Failed: \'+(data.message||\'\'),\'error\');}).catch(function(){setLoading(btn,false);showNotification(\'Error updating admin UIDs\',\'error\');});}\nfunction updateBotCreds(){var uid=document.getElementById(\'botUidInput\').value.trim();var pw=document.getElementById(\'botPwInput\').value.trim();if(!uid||!pw){showNotification(\'Please fill both UID and Password\',\'error\');return;}var btn=document.getElementById(\'botCredsBtn\');setLoading(btn,true);showNotification(\'Updating bot credentials and restarting...\',\'info\');fetch(\'/api/bot_creds\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({uid:uid,pw:pw})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status===\'success\'){showNotification(\'Bot credentials updated! Bot is restarting...\',\'success\');setTimeout(updateUI,3000);}else showNotification(\'Failed: \'+(data.message||\'\'),\'error\');}).catch(function(){setLoading(btn,false);showNotification(\'Error updating credentials\',\'error\');});}\nfunction friendAction(action){var uid=document.getElementById(\'friendUidInput\').value.trim();if(action!==\'list\'&&!uid){showNotification(\'Please enter a target UID\',\'error\');return;}var btnMap={add:\'friendAddBtn\',remove:\'friendRemoveBtn\',list:\'friendListBtn\'};var btn=document.getElementById(btnMap[action]);setLoading(btn,true);var payload={action:action};if(uid)payload.uid=uid;document.getElementById(\'friendResult\').innerHTML=\'<i class="fas fa-spinner fa-spin"></i> Processing...\';fetch(\'/api/friend\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);var resultText=\'\';if(action===\'list\'){if(data.status===\'success\'&&data.friends){resultText=\'Friend List:\\n\'+(data.friends.length?data.friends.map(function(f,i){return (i+1)+\'. \'+f.name+\' (\'+f.uid+\')\';}).join(\'\\n\'):\'No friends found.\');}else{resultText=\'Error: \'+(data.message||\'Unknown error\');}}else{resultText=JSON.stringify(data,null,2);}document.getElementById(\'friendResult\').innerHTML=escapeHtml(resultText).replace(/\\n/g,\'<br>\');if(data.status===\'success\')showNotification(action+\' friend action successful\',\'success\');else showNotification(\'Friend action failed\',\'error\');}).catch(function(){setLoading(btn,false);document.getElementById(\'friendResult\').innerHTML=\'Error communicating with server.\';showNotification(\'Error communicating with server\',\'error\');});}\nvar cfgForm=document.getElementById(\'configForm\');\nif(cfgForm){cfgForm.addEventListener(\'submit\',function(){var b=document.getElementById(\'deployBtn\');b.disabled=true;b.innerHTML=\'<span class="spinner"></span> Deploying...\';});}\ndocument.addEventListener(\'keydown\',function(e){if(e.key===\'Escape\')closeAdminPanel();});\nfunction updateUI(){fetch(\'/api/status\').then(function(r){return r.json();}).then(function(data){if(data.error)return;document.getElementById(\'botUid\').innerHTML=escapeHtml(data.bot_uid)||\'---\';document.getElementById(\'botName\').innerHTML=escapeHtml(data.bot_name)||\'---\';document.getElementById(\'botRegion\').innerHTML=escapeHtml(data.bot_region)||\'---\';document.getElementById(\'botStatus\').innerHTML=data.bot_status||\'Offline\';document.getElementById(\'lastSenderUid\').innerHTML=escapeHtml(data.last_sender_uid)||\'---\';document.getElementById(\'lastGuildName\').innerHTML=escapeHtml(data.last_guild_name)||\'---\';document.getElementById(\'lastMessage\').innerHTML=escapeHtml(data.last_message)||\'---\';document.getElementById(\'processStatus\').innerHTML=data.is_running?\'<span class="badge badge-active"><i class="fas fa-circle"></i> RUNNING</span>\':\'<span class="badge badge-offline"><i class="fas fa-circle"></i> STOPPED</span>\';document.getElementById(\'uptime\').innerHTML=data.uptime||\'00:00:00\';document.getElementById(\'restartCount\').innerHTML=data.restart_count||0;document.getElementById(\'errorCount\').innerHTML=(data.error_logs||[]).length;var cpu=Math.min(100,Math.max(0,parseFloat(data.cpu)||0));var ram=Math.min(100,Math.max(0,parseFloat(data.ram)||0));var disk=Math.min(100,Math.max(0,parseFloat(data.disk)||0));document.getElementById(\'cpuValue\').innerHTML=Math.floor(cpu)+\'%\';document.getElementById(\'ramValue\').innerHTML=Math.floor(ram)+\'%\';document.getElementById(\'diskValue\').innerHTML=Math.floor(disk)+\'%\';document.getElementById(\'cpuBar\').style.width=cpu+\'%\';document.getElementById(\'ramBar\').style.width=ram+\'%\';document.getElementById(\'diskBar\').style.width=disk+\'%\';document.getElementById(\'expiryInfo\').innerHTML=data.script_remaining||\'No Limit\';document.getElementById(\'autoRestartInfo\').innerHTML=data.auto_restart_minutes>0?(\'Every \'+data.auto_restart_minutes+\' minutes\'):\'Disabled\';\nif(data.logs&&data.logs.length){var html=data.logs.slice(-200).map(function(line){return \'<div class="log-line"><i class="fas fa-chevron-right" style="font-size:9px;margin-right:8px;color:var(--gold);"></i>\'+escapeHtml(line)+\'</div>\';}).join(\'\');var box=document.getElementById(\'logBox\');if(box){box.innerHTML=html;if(autoScroll&&currentTab===\'logs\')box.scrollTop=box.scrollHeight;}}\nif(data.error_logs&&data.error_logs.length){var ehtml=data.error_logs.slice(-100).map(function(line){return \'<div class="log-line error-line"><i class="fas fa-exclamation-circle" style="margin-right:8px;color:var(--red);"></i>\'+escapeHtml(line)+\'</div>\';}).join(\'\');document.getElementById(\'errorBox\').innerHTML=ehtml;}\nif(data.message_history&&data.message_history.length){var mhtml=data.message_history.slice().reverse().map(function(msg){var pfp=(msg.data.pfp_url&&msg.data.pfp_url!==\'N/A\')?\'<span class="message-label"><i class="fas fa-image"></i> PFP:</span><span class="message-value"><a href="\'+escapeHtml(msg.data.pfp_url)+\'" target="_blank" style="color:#6db2ff;">View</a></span>\':\'\';return \'<div class="message-card"><div class="message-header"><i class="fas fa-user-circle" style="font-size:1.2rem;color:var(--gold);"></i><span class="message-sender"><strong>\'+escapeHtml(msg.data.nickname)+\'</strong> (UID: \'+escapeHtml(msg.data.sender_uid)+\')</span><span class="message-time"><i class="far fa-clock"></i> \'+escapeHtml(msg.timestamp)+\'</span></div><div class="message-meta"><span class="message-label"><i class="fas fa-comment"></i> Message:</span><span class="message-value">\'+escapeHtml(msg.data.message)+\'</span><span class="message-label"><i class="fas fa-users"></i> Guild:</span><span class="message-value">\'+escapeHtml(msg.data.guild_name)+\'</span>\'+pfp+\'</div></div>\';}).join(\'\');document.getElementById(\'messageHistory\').innerHTML=mhtml;}\nif(performanceChart&&data.cpu_history&&data.ram_history){performanceChart.data.datasets[0].data=data.cpu_history;performanceChart.data.datasets[1].data=data.ram_history;performanceChart.update(\'none\');}\n}).catch(function(err){console.error(\'Update error:\',err);});}\nsetInterval(updateUI,1500);\nupdateUI();\n</script>\n</body></html>'
+AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Agent Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-user-tie"></i> Agent Dashboard</h1>
+    <div class="flex">
+      <span class="welcome-text"><i class="fas fa-user-circle" style="color:var(--purple);"></i> Welcome, <strong>{{ session.username }}</strong></span>
+      <a href="{{ url_for('agent_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-database"></i> Database Management <span style="font-size:.72rem;font-weight:400;color:var(--muted);">(users.db)</span></div>
+    <div class="flex">
+      <a href="{{ url_for('agent_download_db') }}" class="btn btn-primary"><i class="fas fa-download"></i> Download users.db</a>
+      <form method="POST" action="{{ url_for('agent_upload_db') }}" enctype="multipart/form-data" class="upload-form" id="uploadDbForm">
+        <input type="file" name="db_file" accept=".db" required/>
+        <button type="submit" class="btn btn-warning" id="uploadDbBtn" onclick="return confirm('This will REPLACE the current database. Are you sure?');"><i class="fas fa-upload"></i> Upload &amp; Replace</button>
+      </form>
+    </div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-chart-simple"></i> Your Key Stats</div>
+    <p style="color:var(--muted);">Total Keys Created: <span class="stat-box">{{ keys|length }}</span></p>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key"></i> Generate Registration Key</div>
+    <form method="POST" action="{{ url_for('agent_create_key') }}" class="input-group" id="generateKeyForm">
+      <label><i class="far fa-calendar-alt"></i> Valid days (0 = Permanent):</label>
+      <input type="number" name="days_valid" value="30" min="0" max="365" style="width:110px;"/>
+      <button type="submit" class="btn btn-gold" id="generateKeyBtn"><i class="fas fa-plus-circle"></i> Generate Key</button>
+    </form>
+    {% if new_key %}
+    <div class="key-display">
+      <strong style="color:var(--muted);font-size:.85rem;"><i class="fas fa-key" style="color:var(--gold);"></i> New Key:</strong>
+      <code>{{ new_key }}</code>
+      {% if days == 0 %}<span class="badge badge-permanent"><i class="fas fa-infinity"></i> Permanent</span>
+      {% else %}<span style="color:var(--muted);font-size:.8rem;"><i class="far fa-clock"></i> valid {{ days }} days</span>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-list"></i> Your Keys</div>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>Key</th><th>Created</th><th>Used By</th><th>Status</th></tr></thead>
+        <tbody>
+          {% for key in keys %}
+          <tr>
+            <td><code>{{ key.key }}</code></td>
+            <td>{{ key.created_at[:10] }}</td>
+            <td>{{ key.used_by or '—' }}</td>
+            <td>{% if key.is_used %}<span class="badge badge-used"><i class="fas fa-check-circle"></i> Used</span>{% else %}<span class="badge badge-unused"><i class="fas fa-clock"></i> Available</span>{% endif %}</td>
+          </tr>
+          {% else %}
+          <tr class="empty-row"><td colspan="4">No keys created yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <a href="{{ url_for('login') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Main Site</a>
+</div>
+<script>
+document.getElementById('uploadDbForm').addEventListener('submit',function(){var b=document.getElementById('uploadDbBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Uploading...';});
+document.getElementById('generateKeyForm').addEventListener('submit',function(){var b=document.getElementById('generateKeyBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Generating...';});
+</script>
+</body></html>'''
 
+ADMIN_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Admin Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-shield-alt"></i> Admin Dashboard</h1>
+    <div class="flex">
+      <span class="welcome-text"><i class="fas fa-user-circle" style="color:var(--purple);"></i> Welcome, <strong>{{ session.username }}</strong></span>
+      <a href="{{ url_for('admin_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-server"></i> Server Resources</div>
+    <div class="system-stats">
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> CPU</div><div class="stat-value">{{ cpu }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ cpu }}%;"></div></div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-memory"></i> RAM</div><div class="stat-value">{{ ram_percent }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ ram_percent }}%;"></div></div><div class="stat-sub">{{ (ram_used / (1024**3))|round(1) }} GB / {{ (ram_total / (1024**3))|round(1) }} GB</div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-hdd"></i> Disk</div><div class="stat-value">{{ disk_percent }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ disk_percent }}%;"></div></div><div class="stat-sub">{{ (disk_used / (1024**3))|round(1) }} GB / {{ (disk_total / (1024**3))|round(1) }} GB</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-folder-open"></i> File Manager</div>
+    <a href="{{ url_for('admin_file_manager') }}" class="btn btn-gold"><i class="fas fa-folder"></i> Open File Manager</a>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-upload"></i> Upload New <code style="background:rgba(0,0,0,.4);padding:2px 10px;border-radius:8px;color:var(--gold);font-size:.85rem;">mahir.py</code></div>
+    <form method="POST" action="{{ url_for('admin_upload_mahir') }}" enctype="multipart/form-data" class="upload-form" id="uploadMahirForm">
+      <input type="file" name="mahir_file" accept=".py" required style="flex:1;min-width:200px;"/>
+      <button type="submit" class="btn btn-warning" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload &amp; Update All Bots</button>
+    </form>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-user-tie"></i> Agent Management</div>
+    <form method="POST" action="{{ url_for('admin_create_agent') }}" class="flex" id="createAgentForm">
+      <input type="text" name="username" placeholder="Username" required class="flex-grow"/>
+      <input type="email" name="email" placeholder="Email" required class="flex-grow"/>
+      <input type="password" name="password" placeholder="Password" required class="flex-grow"/>
+      <button type="submit" class="btn btn-success" id="createAgentBtn"><i class="fas fa-user-plus"></i> Create Agent</button>
+    </form>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Keys</th><th style="text-align:right;">Action</th></tr></thead>
+        <tbody>
+          {% for agent in agents %}
+          <tr>
+            <td>{{ agent.id }}</td>
+            <td><strong style="color:var(--gold2);">{{ agent.username }}</strong></td>
+            <td>{{ agent.email or '-' }}</td>
+            <td>{{ agent.created_at[:10] }}</td>
+            <td><span class="badge badge-admin">{{ agent.key_count }}</span></td>
+            <td><div class="td-actions"><form method="POST" action="{{ url_for('admin_delete_agent', agent_id=agent.id) }}" onsubmit="return confirm('Delete this agent and all their keys?');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form></div></td>
+          </tr>
+          {% else %}
+          <tr class="empty-row"><td colspan="6">No agents created yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key"></i> Generate Registration Key</div>
+    <form method="POST" action="{{ url_for('admin_create_key') }}" class="flex" id="generateKeyForm">
+      <div class="input-group">
+        <label><i class="far fa-calendar-alt"></i> Valid days (0 = Permanent):</label>
+        <input type="number" name="days_valid" value="30" min="0" max="365" style="width:110px;"/>
+      </div>
+      <button type="submit" class="btn btn-gold" id="generateKeyBtn"><i class="fas fa-plus-circle"></i> Generate Key</button>
+    </form>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-users"></i> Registered Users</div>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Created</th><th>Bot Status</th><th>Bot File</th><th>Role</th><th style="text-align:right;">Action</th></tr></thead>
+        <tbody>
+          {% for user in users %}
+          <tr>
+            <td>{{ user.id }}</td>
+            <td><strong style="color:var(--gold2);">{{ user.username }}</strong></td>
+            <td>{{ user.email or '-' }}</td>
+            <td>{{ user.created_at[:10] }}</td>
+            <td>{% if user.bot_status == 'running' %}<span class="badge badge-running"><i class="fas fa-circle"></i> Running</span>{% elif user.bot_status == 'stopped' %}<span class="badge badge-stopped"><i class="fas fa-circle"></i> Stopped</span>{% else %}<span class="badge badge-unused">{{ user.bot_status or 'Unknown' }}</span>{% endif %}</td>
+            <td><code style="font-size:.72rem;">{{ user.bot_file or '-' }}</code></td>
+            <td>{% if user.is_admin %}<span class="badge badge-admin"><i class="fas fa-crown"></i> Admin</span>{% elif user.is_agent %}<span class="badge badge-agent"><i class="fas fa-user-tie"></i> Agent</span>{% else %}<span class="badge badge-user">User</span>{% endif %}</td>
+            <td>{% if not user.is_admin and not user.is_agent %}<div class="td-actions"><form method="POST" action="{{ url_for('admin_delete_user', user_id=user.id) }}" onsubmit="return confirm('Delete this user?');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form></div>{% endif %}</td>
+          </tr>
+          {% else %}
+          <tr class="empty-row"><td colspan="8">No users registered yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key"></i> Recent Keys</div>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>Key</th><th>Created By</th><th>Created</th><th>Used By</th><th>Status</th><th style="text-align:right;">Action</th></tr></thead>
+        <tbody>
+          {% for key in keys %}
+          <tr>
+            <td><code>{{ key.key }}</code></td>
+            <td>{{ key.created_by or '—' }}</td>
+            <td>{{ key.created_at[:10] }}</td>
+            <td>{{ key.used_by or '—' }}</td>
+            <td>{% if key.is_used %}<span class="badge badge-used"><i class="fas fa-check-circle"></i> Used</span>{% elif key.expiry_date is none %}<span class="badge badge-permanent"><i class="fas fa-infinity"></i> Permanent</span>{% else %}<span class="badge badge-unused"><i class="fas fa-clock"></i> Available</span>{% endif %}</td>
+            <td><div class="td-actions"><form method="POST" action="{{ url_for('admin_delete_key', key_id=key.id) }}" onsubmit="return confirm('Delete this key and associated users?');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form></div></td>
+          </tr>
+          {% else %}
+          <tr class="empty-row"><td colspan="6">No keys generated yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <a href="{{ url_for('logout') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Main Site</a>
+</div>
+<script>
+document.getElementById('uploadMahirForm').addEventListener('submit',function(){var b=document.getElementById('uploadMahirBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Uploading...';});
+document.getElementById('createAgentForm').addEventListener('submit',function(){var b=document.getElementById('createAgentBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Creating...';});
+document.getElementById('generateKeyForm').addEventListener('submit',function(){var b=document.getElementById('generateKeyBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Generating...';});
+</script>
+</body></html>'''
+
+FILE_MANAGER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>File Manager - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10000;justify-content:center;align-items:center;padding:16px}
+.modal-overlay.active{display:flex}
+.modal-box{background:#101022;border:1px solid rgba(245,200,66,.14);border-radius:18px;padding:24px;width:100%;position:relative}
+.modal-close{position:absolute;top:12px;right:16px;font-size:1.7rem;color:var(--gold2);cursor:pointer;background:none;border:none}
+.modal-title{font-size:1.25rem;font-weight:800;color:var(--gold);margin-bottom:14px;display:flex;align-items:center;gap:10px}
+</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-folder-open"></i> File Manager</h1>
+    <div class="flex">
+      <a href="{{ url_for('admin_dashboard') }}" class="btn btn-primary btn-sm"><i class="fas fa-th-large"></i> Dashboard</a>
+      <a href="{{ url_for('admin_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-upload"></i> Upload Any File <span style="font-size:.72rem;font-weight:400;color:var(--muted);">(ZIP auto-extracted)</span></div>
+    <form method="POST" action="{{ url_for('admin_upload_file') }}" enctype="multipart/form-data" class="upload-form" id="uploadForm">
+      <input type="file" name="uploaded_file" required id="fileInput" style="flex:1;min-width:200px;"/>
+      <button type="submit" class="btn btn-gold" id="uploadBtn"><i class="fas fa-cloud-upload-alt"></i> Upload</button>
+    </form>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-folder"></i> Current Directory: <span class="current-dir">{{ current_path }}</span></div>
+    <div class="breadcrumb">
+      <i class="fas fa-home" style="margin-right:6px;"></i><a href="{{ url_for('admin_file_manager') }}">/</a>
+      {% for part in breadcrumb_parts %} / <a href="{{ url_for('admin_file_manager', path=part) }}">{{ part }}</a>{% endfor %}
+    </div>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th style="text-align:right;">Actions</th></tr></thead>
+        <tbody>
+          {% if parent_dir is not none %}
+          <tr><td><a href="{{ url_for('admin_file_manager', path=parent_dir) }}" class="folder-link"><i class="fas fa-arrow-up" style="font-size:.75rem;"></i> ..</a></td><td>—</td><td>—</td><td>—</td></tr>
+          {% endif %}
+          {% for item in files %}
+          <tr>
+            <td>{% if item.is_dir %}<a href="{{ url_for('admin_file_manager', path=item.path) }}" class="folder-link"><i class="fas fa-folder"></i> {{ item.name }}</a>{% else %}<span class="file-name"><i class="fas fa-file"></i> {{ item.name }}</span>{% endif %}</td>
+            <td>{{ item.size if not item.is_dir else '—' }}</td>
+            <td>{{ item.modified }}</td>
+            <td><div class="td-actions">{% if not item.is_dir %}
+              <a href="{{ url_for('admin_download_file', path=item.path) }}" class="btn btn-info btn-sm"><i class="fas fa-download"></i></a>
+              <button onclick="editFile('{{ item.path }}')" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></button>
+              <button onclick="deleteFile('{{ item.path }}', this)" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
+            {% endif %}</div></td>
+          </tr>
+          {% else %}
+          <tr class="empty-row"><td colspan="4">This directory is empty</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <a href="{{ url_for('admin_dashboard') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+</div>
+<div id="editModal" class="modal-overlay">
+  <div class="modal-box" style="max-width:820px;">
+    <button class="modal-close" onclick="closeEditModal()">&times;</button>
+    <div class="modal-title"><i class="fas fa-pen-fancy"></i> Edit File: <span id="editFileName" style="color:var(--gold2);font-size:1rem;"></span></div>
+    <textarea id="editContent" spellcheck="false" style="width:100%;height:380px;background:#05050c;color:var(--text);border:1px solid rgba(245,200,66,.12);border-radius:12px;padding:14px;font-family:var(--mono);font-size:.85rem;resize:vertical;"></textarea>
+    <div class="flex" style="justify-content:flex-end;margin-top:14px;">
+      <button onclick="saveEdit()" class="btn btn-success btn-sm"><i class="fas fa-save"></i> Save</button>
+      <button onclick="closeEditModal()" class="btn btn-clear btn-sm"><i class="fas fa-times"></i> Cancel</button>
+    </div>
+    <div id="editStatus" style="margin-top:10px;text-align:center;font-size:.85rem;color:var(--gold2);"></div>
+  </div>
+</div>
+<script>
+document.getElementById('uploadForm').addEventListener('submit',function(){var b=document.getElementById('uploadBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Uploading...';});
+var currentEditPath='';
+function editFile(path){currentEditPath=path;document.getElementById('editFileName').textContent=path;document.getElementById('editContent').value='Loading...';document.getElementById('editStatus').textContent='';document.getElementById('editModal').classList.add('active');fetch('/admin/edit_file/'+encodeURIComponent(path)).then(function(r){return r.json();}).then(function(data){document.getElementById('editContent').value=data.error?('Error: '+data.error):data.content;}).catch(function(err){document.getElementById('editContent').value='Error loading file: '+err;});}
+function closeEditModal(){document.getElementById('editModal').classList.remove('active');}
+function saveEdit(){var content=document.getElementById('editContent').value;var status=document.getElementById('editStatus');status.textContent='Saving...';fetch('/admin/edit_file/'+encodeURIComponent(currentEditPath),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:content})}).then(function(r){return r.json();}).then(function(data){if(data.success){status.textContent='Saved successfully!';status.style.color='#4ade80';setTimeout(function(){location.reload();},800);}else{status.textContent='Error: '+(data.error||'');status.style.color='var(--red2)';}}).catch(function(err){status.textContent='Error: '+err;status.style.color='var(--red2)';});}
+function deleteFile(path,btn){if(!confirm('Are you sure you want to delete "'+path+'"?'))return;if(btn){btn.disabled=true;}fetch('/admin/delete_file/'+encodeURIComponent(path),{method:'POST'}).then(function(r){return r.json();}).then(function(data){if(data.success){location.reload();}else{alert('Error: '+(data.error||''));if(btn){btn.disabled=false;}}}).catch(function(err){alert('Error: '+err);if(btn){btn.disabled=false;}});}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeEditModal();});
+document.getElementById('editModal').addEventListener('click',function(e){if(e.target===this)closeEditModal();});
+</script>
+</body></html>'''
+
+USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>MAHIR PREMIUM | Bot Controller</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
+.logout-btn{position:fixed;top:20px;right:20px;z-index:999}
+.cover-section{position:relative;border-radius:22px;overflow:hidden;margin-bottom:24px;border:1px solid rgba(245,200,66,.15);box-shadow:0 15px 40px rgba(0,0,0,.5)}
+.cover-section img.cover-image{width:100%;height:260px;object-fit:cover;display:block}
+.cover-overlay{position:absolute;inset:0;background:linear-gradient(100deg,rgba(7,7,15,.92) 20%,rgba(7,7,15,.5) 60%,rgba(7,7,15,.25));display:flex;flex-direction:column;justify-content:center;padding:32px 40px}
+.logo-row{display:flex;align-items:center;gap:18px}
+.logo-row img{height:72px;width:72px;border-radius:16px;object-fit:cover;border:1px solid rgba(245,200,66,.25)}
+.cover-title{font-size:2.2rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1.1}
+.cover-sub{color:rgba(233,233,248,.65);font-size:.85rem;letter-spacing:1.5px;margin-top:4px}
+.cover-badge{position:absolute;top:18px;right:20px;background:rgba(7,7,15,.7);border:1px solid rgba(245,200,66,.25);padding:6px 16px;border-radius:999px;font-size:.66rem;font-weight:700;color:var(--gold);letter-spacing:2px;text-transform:uppercase}
+@media(max-width:768px){.cover-section img.cover-image{height:190px}.cover-overlay{padding:18px}.cover-title{font-size:1.4rem}.logo-row img{height:48px;width:48px}}
+.download-card{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.dc-left{display:flex;align-items:center;gap:16px}
+.dc-icon{font-size:2rem;color:var(--gold);background:rgba(245,200,66,.07);width:60px;height:60px;border-radius:16px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(245,200,66,.12)}
+.dc-title{font-size:1.05rem;font-weight:700}
+.dc-desc{color:var(--muted);font-size:.8rem;margin:2px 0 6px}
+.version-tag{display:inline-block;background:rgba(245,200,66,.08);color:var(--gold);padding:2px 10px;border-radius:999px;font-size:.62rem;font-weight:700;margin-right:6px;border:1px solid rgba(245,200,66,.12)}
+.tab-container{display:flex;gap:8px;margin-bottom:14px;border-bottom:1px solid rgba(245,200,66,.08);padding-bottom:10px;flex-wrap:wrap}
+.tab-btn{background:transparent;border:1px solid transparent;padding:8px 18px;border-radius:10px;color:var(--muted);cursor:pointer;font-weight:600;font-size:.82rem;font-family:inherit;transition:.2s}
+.tab-btn:hover{color:var(--gold2)}
+.tab-btn.active{background:rgba(245,200,66,.08);color:var(--gold);border-color:rgba(245,200,66,.25)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+.log-box{background:#05050c;border:1px solid rgba(245,200,66,.08);border-radius:14px;padding:14px;height:400px;overflow-y:auto;font-family:var(--mono);font-size:.78rem}
+.log-box::-webkit-scrollbar{width:6px}
+.log-box::-webkit-scrollbar-thumb{background:rgba(245,200,66,.25);border-radius:99px}
+.log-line{padding:4px 8px;border-left:3px solid var(--gold);margin-bottom:2px;color:#c5c5e5;word-wrap:break-word;white-space:pre-wrap}
+.error-line{border-left-color:var(--red);color:#fca5a5;background:rgba(212,42,58,.05)}
+.message-card{background:rgba(245,200,66,.03);border:1px solid rgba(245,200,66,.08);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.message-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid rgba(245,200,66,.06)}
+.message-sender{font-weight:800;color:var(--gold2)}
+.message-time{font-size:.65rem;color:var(--muted)}
+.message-meta{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:.8rem}
+.message-label{color:var(--gold2);font-weight:600}
+.message-value{color:#c5c5e5;word-break:break-all}
+.control-bar{display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap}
+.pause-btn{background:rgba(255,255,255,.06);border:1px solid rgba(245,200,66,.15);padding:7px 14px;border-radius:10px;color:var(--text);cursor:pointer;font-size:.78rem;font-family:inherit}
+.pause-btn.paused{border-color:var(--red);color:var(--red2)}
+.button-group{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
+.button-group .btn{flex:1;min-width:110px}
+.chart-container{position:relative;height:250px}
+.config-form{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.config-form label{display:block;color:var(--gold2);font-weight:600;margin-bottom:6px;font-size:.85rem}
+.config-form input{width:100%}
+.config-status{padding:13px 16px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.12);border-left:4px solid var(--gold);border-radius:10px;color:var(--gold2);font-size:.85rem;margin-bottom:18px}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:10000;justify-content:center;align-items:center;padding:16px}
+.modal-overlay.active{display:flex}
+.modal-box{background:#101022;border:1px solid rgba(245,200,66,.14);border-radius:18px;padding:24px;max-width:700px;width:100%;max-height:88vh;overflow-y:auto;position:relative}
+.modal-close{position:absolute;top:12px;right:16px;font-size:1.7rem;color:var(--gold2);cursor:pointer;background:none;border:none}
+.modal-title{font-size:1.3rem;font-weight:800;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.modal-section{background:rgba(0,0,0,.3);border:1px solid rgba(245,200,66,.07);border-radius:14px;padding:16px;margin-bottom:14px}
+.modal-section h3{color:var(--gold);font-size:.95rem;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.modal-input-group{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.modal-input-group label{min-width:90px;color:var(--gold2);font-weight:600;font-size:.82rem}
+.modal-input-group input{flex:1;min-width:160px}
+.modal-btn{display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border:none;border-radius:10px;font-weight:700;font-size:.78rem;cursor:pointer;font-family:inherit}
+.modal-btn-save{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}
+.modal-btn-cancel{background:rgba(255,255,255,.08);color:var(--text)}
+.modal-btn-action{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+.modal-btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.modal-btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.modal-result-box{background:rgba(0,0,0,.45);border:1px solid rgba(245,200,66,.08);border-radius:10px;padding:12px;margin-top:10px;max-height:160px;overflow-y:auto;font-size:.78rem;color:#c5c5e5;white-space:pre-wrap;word-break:break-word}
+.notification{position:fixed;top:20px;right:20px;padding:12px 18px;border-radius:12px;z-index:99999;font-weight:600;font-size:.85rem;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.notification-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.notification-error{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.notification-info{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+@media(max-width:768px){.download-card{flex-direction:column;align-items:stretch;text-align:center}.dc-left{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}.modal-input-group{flex-direction:column;align-items:stretch}.modal-input-group label{min-width:auto}}
+</style></head><body>
+<div class="container">
+  <button class="logout-btn btn btn-danger btn-sm" onclick="window.location.href='/logout'"><i class="fas fa-sign-out-alt"></i> Logout</button>
+  <div class="cover-section">
+    <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover"/>
+    <div class="cover-overlay">
+      <div class="logo-row">
+        <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/>
+        <div><div class="cover-title">MAHIR PREMIUM</div><div class="cover-sub">ELITE BOT CONTROLLER</div></div>
+      </div>
+      <div class="cover-badge"><i class="fas fa-crown"></i> {{ 'PREMIUM' if config_done else 'SETUP' }}</div>
+    </div>
+  </div>
+  {% if not config_done %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-cog"></i> Bot Configuration</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+    <div class="config-status"><i class="fas fa-info-circle"></i> Enter your Free Fire bot credentials to deploy.</div>
+    <form method="POST" action="{{ url_for('configure_bot') }}" class="config-form" id="configForm">
+      <div><label><i class="fas fa-user-shield"></i> Admin UID</label><input type="text" name="admin_uid" placeholder="e.g., 1120167200" required/></div>
+      <div><label><i class="fas fa-robot"></i> Bot UID</label><input type="text" name="bot_uid" placeholder="Enter bot UID" required/></div>
+      <div><label><i class="fas fa-key"></i> Bot Password</label><input type="text" name="bot_pw" placeholder="Enter bot password hash" required/></div>
+      <button type="submit" class="btn btn-gold btn-block" id="deployBtn"><i class="fas fa-play"></i> Deploy Bot</button>
+    </form>
+    <div style="margin-top:14px;font-size:.8rem;color:var(--gold2);"><i class="fas fa-shield-alt"></i> Master Admin UID (1120167200) will be auto-added.</div>
+  </div>
+  {% else %}
+  <div class="card download-card">
+    <div class="dc-left">
+      <div class="dc-icon"><i class="fab fa-android"></i></div>
+      <div>
+        <div class="dc-title"><i class="fas fa-mobile-alt" style="color:var(--gold);margin-right:6px;"></i> MAHIR TCP Bot</div>
+        <div class="dc-desc">Download the official Android app to control your bot on the go</div>
+        <span class="version-tag"><i class="fas fa-tag"></i> v2.0.1</span>
+        <span class="version-tag" style="background:rgba(59,140,255,.08);color:#6db2ff;"><i class="fas fa-check-circle"></i> Latest</span>
+      </div>
+    </div>
+    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="btn btn-gold" id="downloadApkBtn"><i class="fas fa-download"></i> Download APK <span style="font-size:.65rem;opacity:.75;">18.4 MB</span></a>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-robot"></i> Bot Identity &amp; Status</div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-id-card"></i> UID</div><div class="stat-value" id="botUid">---</div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-user-astronaut"></i> Name</div><div class="stat-value" id="botName">---</div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-globe-asia"></i> Region</div><div class="stat-value" id="botRegion">---</div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-heartbeat"></i> Status</div><div class="stat-value" id="botStatus">---</div></div>
+    </div>
+    <div style="margin-top:16px;padding-top:14px;border-top:1px solid rgba(245,200,66,.06);">
+      <div style="font-size:.88rem;font-weight:700;color:var(--gold2);margin-bottom:10px;"><i class="fas fa-comment-dots"></i> Last Message Activity</div>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-label"><i class="fas fa-user"></i> Sender UID</div><div class="stat-value" id="lastSenderUid" style="font-size:.9rem;">---</div></div>
+        <div class="stat-card"><div class="stat-label"><i class="fas fa-users"></i> Guild</div><div class="stat-value" id="lastGuildName" style="font-size:.9rem;">---</div></div>
+        <div class="stat-card"><div class="stat-label"><i class="fas fa-comment"></i> Message</div><div class="stat-value" id="lastMessage" style="font-size:.8rem;">---</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-chart-line"></i> System Performance</div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-microchip"></i> Process</div><div class="stat-value" id="processStatus">---</div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-clock"></i> Uptime</div><div class="stat-value" id="uptime">00:00:00</div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-sync-alt"></i> Restarts</div><div class="stat-value" id="restartCount">0</div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-exclamation-triangle"></i> Errors</div><div class="stat-value" id="errorCount" style="color:var(--red2);">0</div></div>
+    </div>
+    <div class="system-stats">
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-tachometer-alt"></i> CPU</div><div class="stat-value" id="cpuValue">0%</div><div class="progress-bar"><div class="progress-fill" id="cpuBar"></div></div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-memory"></i> RAM</div><div class="stat-value" id="ramValue">0%</div><div class="progress-bar"><div class="progress-fill" id="ramBar"></div></div></div>
+      <div class="stat-card"><div class="stat-label"><i class="fas fa-hdd"></i> Disk</div><div class="stat-value" id="diskValue">0%</div><div class="progress-bar"><div class="progress-fill" id="diskBar"></div></div></div>
+    </div>
+    <div class="info-row"><span class="info-label"><i class="fas fa-hourglass-half"></i> Script Expiry:</span><span class="info-value" id="expiryInfo">No Limit</span></div>
+    <div class="info-row"><span class="info-label"><i class="fas fa-redo-alt"></i> Auto-Restart:</span><span class="info-value" id="autoRestartInfo">Disabled</span></div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-chart-area"></i> Performance Monitor</div>
+    <div class="chart-container"><canvas id="performanceChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="tab-container">
+      <button class="tab-btn active" onclick="switchTab('logs')"><i class="fas fa-terminal"></i> Console</button>
+      <button class="tab-btn" onclick="switchTab('messages')"><i class="fas fa-envelope"></i> Messages</button>
+      <button class="tab-btn" onclick="switchTab('errors')"><i class="fas fa-exclamation-triangle"></i> Errors</button>
+    </div>
+    <div id="logsTab" class="tab-content active">
+      <div class="control-bar">
+        <button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button>
+        <button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button>
+        <span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span>
+      </div>
+      <div id="logBox" class="log-box"><div class="log-line"><i class="fas fa-info-circle"></i> Waiting for logs...</div></div>
+    </div>
+    <div id="messagesTab" class="tab-content">
+      <div class="control-bar">
+        <button onclick="clearMessages()" class="btn btn-clear btn-sm"><i class="fas fa-trash-alt"></i> Clear</button>
+        <button onclick="exportMessages()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button>
+      </div>
+      <div id="messageHistory" class="log-box" style="height:380px;"><div class="log-line"><i class="fas fa-info-circle"></i> No messages received...</div></div>
+    </div>
+    <div id="errorsTab" class="tab-content">
+      <div class="control-bar">
+        <button onclick="clearErrors()" class="btn btn-clear btn-sm"><i class="fas fa-trash-alt"></i> Clear</button>
+        <button onclick="exportErrors()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button>
+      </div>
+      <div id="errorBox" class="log-box"><div class="log-line"><i class="fas fa-check-circle"></i> No errors detected</div></div>
+    </div>
+    <div class="button-group">
+      <button onclick="sendAction('start')" id="btnStart" class="btn btn-start"><i class="fas fa-play"></i> Start</button>
+      <button onclick="sendAction('stop')" id="btnStop" class="btn btn-stop"><i class="fas fa-stop"></i> Stop</button>
+      <button onclick="sendAction('reset')" id="btnReset" class="btn btn-reset"><i class="fas fa-sync-alt"></i> Reset</button>
+      <button onclick="openAdminPanel()" id="btnAdmin" class="btn btn-admin"><i class="fas fa-cog"></i> Admin</button>
+    </div>
+  </div>
+  {% endif %}
+</div>
+<div id="adminModal" class="modal-overlay">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
+    <div class="modal-title"><i class="fas fa-crown"></i> Admin Control Panel</div>
+    <div class="modal-section">
+      <h3><i class="fas fa-user-shield"></i> Admin UIDs</h3>
+      <div class="modal-input-group">
+        <label>UIDs (comma separated):</label>
+        <input type="text" id="adminUidsInput" placeholder="e.g. 1120167200, 3020431227"/>
+      </div>
+      <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save &amp; Restart</button>
+    </div>
+    <div class="modal-section">
+      <h3><i class="fas fa-key"></i> Bot Credentials</h3>
+      <div class="modal-input-group"><label>Bot UID:</label><input type="text" id="botUidInput" placeholder="Enter new UID"/></div>
+      <div class="modal-input-group"><label>Password:</label><input type="text" id="botPwInput" placeholder="Enter new password hash"/></div>
+      <button onclick="updateBotCreds()" id="botCredsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save &amp; Restart</button>
+    </div>
+    <div class="modal-section">
+      <h3><i class="fas fa-user-friends"></i> Friend Management</h3>
+      <div class="modal-input-group" style="margin-bottom:0;">
+        <input type="text" id="friendUidInput" placeholder="Enter UID" style="flex:1;min-width:150px;"/>
+        <button onclick="friendAction('add')" id="friendAddBtn" class="modal-btn modal-btn-action"><i class="fas fa-user-plus"></i> Add</button>
+        <button onclick="friendAction('remove')" id="friendRemoveBtn" class="modal-btn modal-btn-danger"><i class="fas fa-user-minus"></i> Remove</button>
+        <button onclick="friendAction('list')" id="friendListBtn" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List</button>
+      </div>
+      <div id="friendResult" class="modal-result-box">Result will appear here...</div>
+    </div>
+    <div style="text-align:right;"><button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close</button></div>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+function getBtn(id){return document.getElementById(id);}
+function setLoading(btn,loading){if(!btn)return;if(loading){btn._origHtml=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Loading...';}else{btn.disabled=false;btn.innerHTML=btn._origHtml||btn.innerHTML;}}
+function showNotification(message,type){var el=document.createElement('div');el.className='notification notification-'+type;var icon=type==='success'?'check-circle':(type==='error'?'exclamation-circle':'info-circle');el.innerHTML='<i class="fas fa-'+icon+'"></i> '+message;document.body.appendChild(el);setTimeout(function(){el.remove();},3000);}
+function escapeHtml(text){if(!text)return '';var d=document.createElement('div');d.textContent=text;return d.innerHTML;}
+var performanceChart=null;
+function initChart(){var ctx=document.getElementById('performanceChart').getContext('2d');performanceChart=new Chart(ctx,{type:'line',data:{labels:Array(20).fill(''),datasets:[{label:'CPU %',data:Array(20).fill(0),borderColor:'#F5C842',backgroundColor:'rgba(245,200,66,.05)',tension:.4,fill:true,borderWidth:2,pointRadius:0},{label:'RAM %',data:Array(20).fill(0),borderColor:'#8540F5',backgroundColor:'rgba(133,64,245,.04)',tension:.4,fill:true,borderWidth:2,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:'#c5c5e5',font:{size:11}}}},scales:{y:{beginAtZero:true,max:100,grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}},x:{grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}}}}});}
+if(typeof Chart!=='undefined'&&document.getElementById('performanceChart')){initChart();}
+var currentTab='logs';
+function switchTab(tab){currentTab=tab;var btns=document.querySelectorAll('.tab-btn');btns.forEach(function(b){b.classList.remove('active');});document.querySelectorAll('.tab-content').forEach(function(c){c.classList.remove('active');});if(tab==='logs'){btns[0].classList.add('active');document.getElementById('logsTab').classList.add('active');}else if(tab==='messages'){btns[1].classList.add('active');document.getElementById('messagesTab').classList.add('active');}else{btns[2].classList.add('active');document.getElementById('errorsTab').classList.add('active');}}
+var autoScroll=true;
+function togglePause(){autoScroll=!autoScroll;var btn=document.getElementById('pauseBtn');var status=document.getElementById('logStatus');if(autoScroll){btn.innerHTML='<i class="fas fa-pause"></i> Pause';btn.classList.remove('paused');status.innerHTML='Auto-scroll: ON';var box=document.getElementById('logBox');if(box)box.scrollTop=box.scrollHeight;}else{btn.innerHTML='<i class="fas fa-play"></i> Resume';btn.classList.add('paused');status.innerHTML='Auto-scroll: OFF';}}
+function clearErrors(){fetch('/api/clear_errors',{method:'POST'}).then(function(){updateUI();showNotification('Error logs cleared!','success');}).catch(function(){showNotification('Failed to clear errors','error');});}
+function clearMessages(){fetch('/api/clear_messages',{method:'POST'}).then(function(){updateUI();showNotification('Messages cleared!','success');}).catch(function(){showNotification('Failed to clear messages','error');});}
+function downloadText(text,filename){var blob=new Blob([text],{type:'text/plain'});var url=URL.createObjectURL(blob);var a=document.createElement('a');a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);}
+function exportLogs(){fetch('/api/export_logs').then(function(r){return r.json();}).then(function(d){if(d.logs&&d.logs.length){downloadText(d.logs.join('\\n'),'console_logs.txt');showNotification('Logs exported!','success');}else showNotification('No logs to export','info');}).catch(function(){showNotification('Failed to export logs','error');});}
+function exportErrors(){fetch('/api/export_errors').then(function(r){return r.json();}).then(function(d){if(d.errors&&d.errors.length){downloadText(d.errors.join('\\n'),'error_logs.txt');showNotification('Error logs exported!','success');}else showNotification('No errors to export','info');}).catch(function(){showNotification('Failed to export errors','error');});}
+function exportMessages(){fetch('/api/export_messages').then(function(r){return r.json();}).then(function(d){if(d.messages&&d.messages.length){var text='';d.messages.forEach(function(msg){text+='['+msg.timestamp+'] MESSAGE INFO\\nSender UID: '+msg.data.sender_uid+'\\nNickname: '+msg.data.nickname+'\\nMessage: '+msg.data.message+'\\nGuild Name: '+msg.data.guild_name+'\\nPFP URL: '+msg.data.pfp_url+'\\n'+'-'.repeat(50)+'\\n';});downloadText(text,'message_logs.txt');showNotification('Messages exported!','success');}else showNotification('No messages to export','info');}).catch(function(){showNotification('Failed to export messages','error');});}
+function sendAction(action){var btnMap={start:'btnStart',stop:'btnStop',reset:'btnReset'};var btn=getBtn(btnMap[action]);setLoading(btn,true);showNotification('Executing: '+action.toUpperCase()+'...','info');fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})}).then(function(){setTimeout(updateUI,500);showNotification(action.toUpperCase()+' completed!','success');setLoading(btn,false);}).catch(function(){showNotification(action.toUpperCase()+' failed!','error');setLoading(btn,false);});}
+function openAdminPanel(){document.getElementById('adminModal').classList.add('active');fetch('/api/admin_uids').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById('adminUidsInput').value=d.uids.join(', ');}).catch(function(){showNotification('Failed to load admin UIDs','error');});fetch('/api/bot_creds').then(function(r){return r.json();}).then(function(d){document.getElementById('botUidInput').value=d.uid||'';document.getElementById('botPwInput').value=d.pw||'';}).catch(function(){showNotification('Failed to load bot credentials','error');});document.getElementById('friendResult').innerHTML='Result will appear here...';}
+function closeAdminPanel(){document.getElementById('adminModal').classList.remove('active');}
+document.getElementById('adminModal').addEventListener('click',function(e){if(e.target===this)closeAdminPanel();});
+function updateAdminUIDs(){var input=document.getElementById('adminUidsInput').value;var uids=input.split(',').map(function(s){return s.trim();}).filter(function(s){return s;});if(!uids.length){showNotification('Please enter at least one UID','error');return;}if(uids.indexOf('1120167200')===-1)uids.push('1120167200');var btn=document.getElementById('adminUidsBtn');setLoading(btn,true);showNotification('Updating Admin UIDs and restarting bot...','info');fetch('/api/admin_uids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uids:uids})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Admin UIDs updated! Bot is restarting...','success');setTimeout(updateUI,3000);}else showNotification('Failed: '+(data.message||''),'error');}).catch(function(){setLoading(btn,false);showNotification('Error updating admin UIDs','error');});}
+function updateBotCreds(){var uid=document.getElementById('botUidInput').value.trim();var pw=document.getElementById('botPwInput').value.trim();if(!uid||!pw){showNotification('Please fill both UID and Password','error');return;}var btn=document.getElementById('botCredsBtn');setLoading(btn,true);showNotification('Updating bot credentials and restarting...','info');fetch('/api/bot_creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:uid,pw:pw})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Bot credentials updated! Bot is restarting...','success');setTimeout(updateUI,3000);}else showNotification('Failed: '+(data.message||''),'error');}).catch(function(){setLoading(btn,false);showNotification('Error updating credentials','error');});}
+function friendAction(action){var uid=document.getElementById('friendUidInput').value.trim();if(action!=='list'&&!uid){showNotification('Please enter a target UID','error');return;}var btnMap={add:'friendAddBtn',remove:'friendRemoveBtn',list:'friendListBtn'};var btn=document.getElementById(btnMap[action]);setLoading(btn,true);var payload={action:action};if(uid)payload.uid=uid;document.getElementById('friendResult').innerHTML='<i class="fas fa-spinner fa-spin"></i> Processing...';fetch('/api/friend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);var resultText='';if(action==='list'){if(data.status==='success'&&data.friends){resultText='Friend List:\\n'+(data.friends.length?data.friends.map(function(f,i){return (i+1)+'. '+f.name+' ('+f.uid+')';}).join('\\n'):'No friends found.');}else{resultText='Error: '+(data.message||'Unknown error');}}else{resultText=JSON.stringify(data,null,2);}document.getElementById('friendResult').innerHTML=escapeHtml(resultText).replace(/\\n/g,'<br>');if(data.status==='success')showNotification(action+' friend action successful','success');else showNotification('Friend action failed','error');}).catch(function(){setLoading(btn,false);document.getElementById('friendResult').innerHTML='Error communicating with server.';showNotification('Error communicating with server','error');});}
+var cfgForm=document.getElementById('configForm');
+if(cfgForm){cfgForm.addEventListener('submit',function(){var b=document.getElementById('deployBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Deploying...';});}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeAdminPanel();});
+function updateUI(){fetch('/api/status').then(function(r){return r.json();}).then(function(data){if(data.error)return;
+var setEl=function(id,val){var el=document.getElementById(id);if(el)el.innerHTML=val;};
+setEl('botUid',escapeHtml(data.bot_uid)||'---');setEl('botName',escapeHtml(data.bot_name)||'---');setEl('botRegion',escapeHtml(data.bot_region)||'---');setEl('botStatus',data.bot_status||'Offline');
+setEl('lastSenderUid',escapeHtml(data.last_sender_uid)||'---');setEl('lastGuildName',escapeHtml(data.last_guild_name)||'---');setEl('lastMessage',escapeHtml(data.last_message)||'---');
+setEl('processStatus',data.is_running?'<span class="badge badge-active"><i class="fas fa-circle"></i> RUNNING</span>':'<span class="badge badge-offline"><i class="fas fa-circle"></i> STOPPED</span>');
+setEl('uptime',data.uptime||'00:00:00');setEl('restartCount',data.restart_count||0);setEl('errorCount',(data.error_logs||[]).length);
+var cpu=Math.min(100,Math.max(0,parseFloat(data.cpu)||0));var ram=Math.min(100,Math.max(0,parseFloat(data.ram)||0));var disk=Math.min(100,Math.max(0,parseFloat(data.disk)||0));
+setEl('cpuValue',Math.floor(cpu)+'%');setEl('ramValue',Math.floor(ram)+'%');setEl('diskValue',Math.floor(disk)+'%');
+var cpuBar=document.getElementById('cpuBar');if(cpuBar)cpuBar.style.width=cpu+'%';
+var ramBar=document.getElementById('ramBar');if(ramBar)ramBar.style.width=ram+'%';
+var diskBar=document.getElementById('diskBar');if(diskBar)diskBar.style.width=disk+'%';
+setEl('expiryInfo',data.script_remaining||'No Limit');
+setEl('autoRestartInfo',data.auto_restart_minutes>0?('Every '+data.auto_restart_minutes+' minutes'):'Disabled');
+if(data.logs&&data.logs.length){var html=data.logs.slice(-200).map(function(line){return '<div class="log-line"><i class="fas fa-chevron-right" style="font-size:9px;margin-right:8px;color:var(--gold);"></i>'+escapeHtml(line)+'</div>';}).join('');var box=document.getElementById('logBox');if(box){box.innerHTML=html;if(autoScroll&&currentTab==='logs')box.scrollTop=box.scrollHeight;}}
+if(data.error_logs&&data.error_logs.length){var ehtml=data.error_logs.slice(-100).map(function(line){return '<div class="log-line error-line"><i class="fas fa-exclamation-circle" style="margin-right:8px;color:var(--red);"></i>'+escapeHtml(line)+'</div>';}).join('');var ebox=document.getElementById('errorBox');if(ebox)ebox.innerHTML=ehtml;}
+if(data.message_history&&data.message_history.length){var mhtml=data.message_history.slice().reverse().map(function(msg){var pfp=(msg.data.pfp_url&&msg.data.pfp_url!=='N/A')?'<span class="message-label"><i class="fas fa-image"></i> PFP:</span><span class="message-value"><a href="'+escapeHtml(msg.data.pfp_url)+'" target="_blank" style="color:#6db2ff;">View</a></span>':'';return '<div class="message-card"><div class="message-header"><i class="fas fa-user-circle" style="font-size:1.2rem;color:var(--gold);"></i><span class="message-sender"><strong>'+escapeHtml(msg.data.nickname)+'</strong> (UID: '+escapeHtml(msg.data.sender_uid)+')</span><span class="message-time"><i class="far fa-clock"></i> '+escapeHtml(msg.timestamp)+'</span></div><div class="message-meta"><span class="message-label"><i class="fas fa-comment"></i> Message:</span><span class="message-value">'+escapeHtml(msg.data.message)+'</span><span class="message-label"><i class="fas fa-users"></i> Guild:</span><span class="message-value">'+escapeHtml(msg.data.guild_name)+'</span>'+pfp+'</div></div>';}).join('');var mbox=document.getElementById('messageHistory');if(mbox)mbox.innerHTML=mhtml;}
+if(performanceChart&&data.cpu_history&&data.ram_history){performanceChart.data.datasets[0].data=data.cpu_history;performanceChart.data.datasets[1].data=data.ram_history;performanceChart.update('none');}
+}).catch(function(err){console.error('Update error:',err);});}
+setInterval(updateUI,1500);
+updateUI();
+</script>
+</body></html>'''
 
 # =============================================================================
 # Flask Routes
@@ -785,13 +1592,12 @@ USER_PANEL_HTML = '<!DOCTYPE html><html lang=\'en\'><head><meta charset=\'UTF-8\
 
 @app.route('/')
 def index():
-    if session.get('user_id'):
-        if session.get('is_admin'):
-            return redirect(url_for('admin_dashboard'))
-        elif session.get('is_agent'):
-            return redirect(url_for('agent_dashboard'))
-        else:
-            return redirect(url_for('user_dashboard'))
+    if session.get('is_admin'):
+        return redirect(url_for('admin_dashboard'))
+    elif session.get('is_agent'):
+        return redirect(url_for('agent_dashboard'))
+    elif session.get('user_id'):
+        return redirect(url_for('user_dashboard'))
     return redirect(url_for('login'))
 
 @app.errorhandler(500)
@@ -804,7 +1610,6 @@ def handle_db_error(e):
         pass
     return redirect(url_for('login'))
 
-# ------ User Authentication ------
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -845,10 +1650,15 @@ def register():
             flash('Invalid or already used registration key', 'error')
             return render_template_string(REGISTER_HTML)
         if key_row[1]:
-            expiry = datetime.fromisoformat(key_row[1])
-            if expiry < datetime.now():
+            try:
+                expiry = datetime.fromisoformat(key_row[1])
+                if expiry < datetime.now():
+                    conn.close()
+                    flash('Registration key has expired', 'error')
+                    return render_template_string(REGISTER_HTML)
+            except:
                 conn.close()
-                flash('Registration key has expired', 'error')
+                flash('Invalid key expiry format', 'error')
                 return render_template_string(REGISTER_HTML)
         c.execute('SELECT id FROM users WHERE username=?', (username,))
         if c.fetchone():
@@ -930,7 +1740,7 @@ def agent_create_key():
     days = int(request.form.get('days_valid', 30))
     key = secrets.token_hex(16).upper()
     if days == 0:
-        expiry = None  # Permanent key
+        expiry = None
     else:
         expiry = datetime.now() + timedelta(days=days)
     conn = sqlite3.connect(DB_FILE)
@@ -966,10 +1776,8 @@ def agent_delete_self():
     c.execute('DELETE FROM keys WHERE created_by=?', (session['username'],))
     bot_file = user[2]
     if bot_file and os.path.exists(bot_file):
-        try:
-            os.remove(bot_file)
-        except:
-            pass
+        try: os.remove(bot_file)
+        except: pass
     c.execute('DELETE FROM users WHERE id=?', (session['user_id'],))
     conn.commit()
     conn.close()
@@ -980,8 +1788,6 @@ def agent_delete_self():
 def agent_logout():
     session.clear()
     return redirect(url_for('agent_login'))
-
-# ------ Agent Database Routes ------
 
 @app.route('/agent/download_db')
 @agent_required
@@ -997,80 +1803,60 @@ def agent_upload_db():
     if 'db_file' not in request.files:
         flash('No file selected', 'error')
         return redirect(url_for('agent_dashboard'))
-
     file = request.files['db_file']
-
     if file.filename == '':
         flash('No file selected', 'error')
         return redirect(url_for('agent_dashboard'))
-
     if not file.filename.lower().endswith('.db'):
         flash('Error: Only .db files are allowed!', 'error')
         return redirect(url_for('agent_dashboard'))
-
-    tmp_path = DB_FILE + '.upload_tmp'
+    temp_path = DB_FILE + ".uploading"
     try:
-        file.save(tmp_path)
-
-        # ১. আপলোড করা ফাইল valid sqlite + users টেবিল আছে কিনা যাচাই
-        if not validate_db_file(tmp_path):
-            try: os.remove(tmp_path)
-            except: pass
-            raise ValueError('Invalid or corrupted database file')
-
-        # ২. বর্তমান db ব্যাকআপ
-        if os.path.exists(DB_FILE):
-            shutil.copy2(DB_FILE, DB_FILE + '.bak')
-
-        shutil.move(tmp_path, DB_FILE)
-
-        # ৩. schema + admin user নিশ্চিত করা (missing থাকলে auto-fix)
-        init_db()
-
-        flash('Database uploaded and verified successfully!', 'success')
+        file.save(temp_path)
     except Exception as e:
-        try:
-            if os.path.exists(tmp_path): os.remove(tmp_path)
+        flash(f'Error saving upload: {e}', 'error')
+        return redirect(url_for('agent_dashboard'))
+    is_valid, error_msg = validate_db_file(temp_path)
+    if not is_valid:
+        try: os.remove(temp_path)
         except: pass
-
-        # ৪. Recovery: backup থেকে restore, না পারলে fresh db তৈরি
-        restored = False
-        if os.path.exists(DB_FILE + '.bak'):
-            try:
-                shutil.copy2(DB_FILE + '.bak', DB_FILE)
-                restored = True
-            except: pass
-
-        if not restored and not validate_db_file(DB_FILE):
-            try:
-                if os.path.exists(DB_FILE): os.remove(DB_FILE)
-            except: pass
-            init_db()
-            flash(f'Upload failed ({e}). A fresh database has been created.', 'error')
-        else:
-            flash(f'Upload failed ({e}). Previous database restored.', 'error')
-
-    return redirect(url_for('agent_dashboard'))
-    
-    file = request.files['db_file']
-    
-    if file.filename == '':
-        flash('No file selected', 'error')
+        flash(f'❌ Invalid database file: {error_msg}. Your original database is safe.', 'error')
         return redirect(url_for('agent_dashboard'))
-
-    if file.filename != 'users.db':
-        flash('Error: Only "users.db" file is allowed!', 'error')
-        return redirect(url_for('agent_dashboard'))
-
+    # Stop all running monitors
+    try:
+        with monitors_lock:
+            for uid, monitor in list(monitors.items()):
+                try: monitor.stop_process()
+                except: pass
+            monitors.clear()
+    except Exception as e:
+        print(f"Warning: Error stopping monitors: {e}")
+    # Backup
     try:
         if os.path.exists(DB_FILE):
-            shutil.copy2(DB_FILE, DB_FILE + ".bak")
-        
-        file.save(DB_FILE)
-        flash('Database (users.db) uploaded and updated successfully!', 'success')
+            backup_path = DB_FILE + f".bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            shutil.copy2(DB_FILE, backup_path)
+            backups = sorted([f for f in os.listdir('.') if f.startswith(DB_FILE + '.bak_')])
+            while len(backups) > 5:
+                try: os.remove(backups.pop(0))
+                except: pass
     except Exception as e:
-        flash(f'Error uploading database: {e}', 'error')
-        
+        print(f"Backup warning: {e}")
+    # Replace
+    try:
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
+        shutil.move(temp_path, DB_FILE)
+        init_db()
+        flash('✅ Database uploaded and validated successfully! All bots stopped for safety.', 'success')
+    except Exception as e:
+        flash(f'❌ Error replacing database: {e}', 'error')
+        try:
+            backups = sorted([f for f in os.listdir('.') if f.startswith(DB_FILE + '.bak_')])
+            if backups:
+                shutil.copy2(backups[-1], DB_FILE)
+                flash('Previous database restored from backup.', 'info')
+        except: pass
     return redirect(url_for('agent_dashboard'))
 
 # ------ Admin Routes ------
@@ -1112,14 +1898,9 @@ def admin_dashboard():
             agent = user_dict.copy()
             agent['key_count'] = key_count
             agents.append(agent)
-
-    c.execute('SELECT id, username, created_at, status FROM agent_requests ORDER BY id DESC LIMIT 20')
-    agent_requests = [{'id': row[0], 'username': row[1], 'created_at': row[2], 'status': row[3]} for row in c.fetchall()]
-
     c.execute('SELECT id, key, created_by, created_at, used_by, is_used, expiry_date FROM keys ORDER BY id DESC LIMIT 30')
     keys = [{'id': r[0], 'key': r[1], 'created_by': r[2], 'created_at': r[3], 'used_by': r[4], 'is_used': r[5], 'expiry_date': r[6]} for r in c.fetchall()]
     conn.close()
-
     stats = {'cpu': 0, 'ram_percent': 0, 'ram_used': 0, 'ram_total': 0, 'disk_percent': 0, 'disk_used': 0, 'disk_total': 0}
     try:
         stats['cpu'] = psutil.cpu_percent(interval=0.1)
@@ -1131,10 +1912,8 @@ def admin_dashboard():
         stats['disk_percent'] = disk.percent
         stats['disk_used'] = disk.used
         stats['disk_total'] = disk.total
-    except:
-        pass
-
-    return render_template_string(ADMIN_DASHBOARD_HTML, users=users, agents=agents, keys=keys, agent_requests=agent_requests, new_key=None, **stats)
+    except: pass
+    return render_template_string(ADMIN_DASHBOARD_HTML, users=users, agents=agents, keys=keys, new_key=None, **stats)
 
 @app.route('/admin/create_agent', methods=['POST'])
 @admin_required
@@ -1180,57 +1959,49 @@ def admin_delete_agent(agent_id):
 def admin_delete_key(key_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
-    # ১. কি-এর টেক্সট সংগ্রহ করা
     c.execute('SELECT key FROM keys WHERE id=?', (key_id,))
     key_row = c.fetchone()
-    
     if key_row:
         reg_key = key_row[0]
-        
-        # ২. এই কি ব্যবহারকারী ইউজারদের তথ্য নেওয়া
         c.execute('SELECT id, bot_file FROM users WHERE registration_key = ?', (reg_key,))
         associated_users = c.fetchall()
-        
+        user_ids_to_remove = []
         for user_id, bot_file in associated_users:
-            # ৩. রানিং বট বন্ধ করা
-            if user_id in monitors:
-                try:
-                    monitors[user_id].stop_process()
+            user_ids_to_remove.append((user_id, bot_file))
+        conn.commit()
+        conn.close()
+        # Stop monitors
+        for user_id, bot_file in user_ids_to_remove:
+            with monitors_lock:
+                if user_id in monitors:
+                    try: monitors[user_id].stop_process()
+                    except: pass
                     del monitors[user_id]
-                except:
-                    pass
-            
             if bot_file:
-                # ৪. মেইন বট ফাইল ডিলিট করা (যেমন: username_mahir.py)
                 bot_path = os.path.join(USER_BOTS_DIR, bot_file)
                 if os.path.exists(bot_path):
-                    try:
-                        os.remove(bot_path)
-                    except:
-                        pass
-                
+                    try: os.remove(bot_path)
+                    except: pass
                 login_filename = bot_file.replace(".py", "_login.py")
                 login_path = os.path.join(USER_BOTS_DIR, login_filename)
-                
                 if os.path.exists(login_path):
                     try:
                         os.remove(login_path)
                         print(f"✅ Deleted login file: {login_filename}")
                     except Exception as e:
                         print(f"❌ Error deleting login file: {e}")
-            
-            # ৬. ডাটাবেস থেকে ইউজার ডিলিট
+        # DB cleanup
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        for user_id, _ in user_ids_to_remove:
             c.execute('DELETE FROM users WHERE id = ?', (user_id,))
-        
-        # ৭. কি (Key) ডিলিট করা
         c.execute('DELETE FROM keys WHERE id = ?', (key_id,))
         conn.commit()
-        flash('কি, সংশ্লিষ্ট ইউজার এবং তাদের সকল ফাইল (Bot + Login) ডিলিট করা হয়েছে।', 'success')
+        conn.close()
+        flash('কি, সংশ্লিষ্ট ইউজার এবং তাদের সকল ফাইল (Bot + Login) ডিলিট করা হয়েছে।', 'success')
     else:
-        flash('কি খুঁজে পাওয়া যায়নি!', 'error')
-        
-    conn.close()
+        conn.close()
+        flash('কি খুঁজে পাওয়া যায়নি!', 'error')
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/create_key', methods=['POST'])
@@ -1239,7 +2010,7 @@ def admin_create_key():
     days = int(request.form.get('days_valid', 30))
     key = secrets.token_hex(16).upper()
     if days == 0:
-        expiry = None  # Permanent key
+        expiry = None
         flash(f'🔑 Permanent key generated: {key}', 'success')
     else:
         expiry = datetime.now() + timedelta(days=days)
@@ -1262,10 +2033,16 @@ def admin_delete_user(user_id):
     if row and row[0]:
         bot_file = row[0]
         if os.path.exists(bot_file):
-            os.remove(bot_file)
+            try: os.remove(bot_file)
+            except: pass
     c.execute('DELETE FROM users WHERE id=? AND is_admin=0 AND is_agent=0', (user_id,))
     conn.commit()
     conn.close()
+    with monitors_lock:
+        if user_id in monitors:
+            try: monitors[user_id].stop_process()
+            except: pass
+            del monitors[user_id]
     flash('User deleted', 'success')
     return redirect(url_for('admin_dashboard'))
 
@@ -1290,7 +2067,6 @@ def user_dashboard():
     config_done = row and row[3] != 'not_configured'
     return render_template_string(USER_PANEL_HTML, config_done=config_done)
 
-# ------ Configure Bot (Manual Credentials + Auto Bio) ------
 @app.route('/configure', methods=['POST'])
 @login_required
 def configure_bot():
@@ -1299,16 +2075,12 @@ def configure_bot():
     bot_pw = request.form['bot_pw']
     username = session['username']
     user_id = session['user_id']
-    
     if not admin_uid or not bot_uid or not bot_pw:
         flash('All fields are required', 'error')
         return redirect(url_for('user_dashboard'))
-    
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
-    
-    # Create default mahir.py if not exists
     if not os.path.exists(MAHIR_SOURCE):
         with open(MAHIR_SOURCE, 'w') as f:
             f.write('''# Mahir Bot - Configuration
@@ -1316,51 +2088,37 @@ Uid, Pw = 'default', 'default'
 ADMIN_UIDS = []
 # Your bot logic here
 ''')
-    
-    # Copy source and inject credentials
     shutil.copy2(MAHIR_SOURCE, bot_file_path)
-    
-    with open(bot_file_path, 'r') as f:
-        content = f.read()
-    
-    # Inject UID and Password
-    content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
-    
-    # Inject Admin UIDs (add master admin 1120167200)
-    admin_uids = normalize_admin_uids(admin_uid)
-    list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids) + ']'
-    content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
-    
-    with open(bot_file_path, 'w') as f:
-        f.write(content)
-    
-    # Update database
+    admin_uids_list = parse_admin_uids(admin_uid)
+    success, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, admin_uids_list)
+    if not success:
+        flash(f'Error injecting credentials: {msg}', 'error')
+        return redirect(url_for('user_dashboard'))
+    admin_uid_db_string = ', '.join(admin_uids_list)
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status='configured' 
-                 WHERE id=?''', (admin_uid, bot_uid, bot_pw, bot_filename, user_id))
+                 WHERE id=?''', (admin_uid_db_string, bot_uid, bot_pw, bot_filename, user_id))
     conn.commit()
     conn.close()
-    
-    # Start the bot
+    with monitors_lock:
+        if user_id in monitors:
+            try: monitors[user_id].stop_process()
+            except: pass
+            del monitors[user_id]
     monitor = ProcessMonitor(user_id, bot_file_path)
-    monitors[user_id] = monitor
+    with monitors_lock:
+        monitors[user_id] = monitor
     monitor.start_process()
-    
-    # Update Bio in background
     def update_bio_background():
         time.sleep(3)
         try:
             result = update_bot_bio(bot_uid, bot_pw, username)
-            if result:
-                print(f"✅ Bio updated successfully for {username}")
-            else:
-                print(f"❌ Bio update failed for {username}")
+            if result: print(f"✅ Bio updated successfully for {username}")
+            else: print(f"❌ Bio update failed for {username}")
         except Exception as e:
             print(f"❌ Bio update error: {e}")
-    
     threading.Thread(target=update_bio_background, daemon=True).start()
-    
     flash(f'✅ Bot deployed successfully! Bio will be updated automatically.', 'success')
     return redirect(url_for('user_dashboard'))
 
@@ -1390,31 +2148,17 @@ def admin_file_manager(path):
             if not is_dir:
                 try:
                     size_bytes = os.path.getsize(full_path)
-                    if size_bytes < 1024:
-                        size = f"{size_bytes} B"
-                    elif size_bytes < 1024*1024:
-                        size = f"{size_bytes/1024:.1f} KB"
-                    else:
-                        size = f"{size_bytes/(1024*1024):.1f} MB"
-                except:
-                    size = '?'
+                    if size_bytes < 1024: size = f"{size_bytes} B"
+                    elif size_bytes < 1024*1024: size = f"{size_bytes/1024:.1f} KB"
+                    else: size = f"{size_bytes/(1024*1024):.1f} MB"
+                except: size = '?'
             modified = datetime.fromtimestamp(os.path.getmtime(full_path)).strftime('%Y-%m-%d %H:%M')
-            items.append({
-                'name': item,
-                'path': item_path,
-                'is_dir': is_dir,
-                'size': size,
-                'modified': modified
-            })
+            items.append({'name': item, 'path': item_path, 'is_dir': is_dir, 'size': size, 'modified': modified})
         items.sort(key=lambda x: (not x['is_dir'], x['name'].lower()))
     except Exception as e:
         flash(f'Error reading directory: {e}', 'error')
     breadcrumb_parts = path.split('/') if path else []
-    return render_template_string(FILE_MANAGER_HTML,
-                                   current_path=path or '/',
-                                   breadcrumb_parts=breadcrumb_parts,
-                                   parent_dir=parent_dir,
-                                   files=items)
+    return render_template_string(FILE_MANAGER_HTML, current_path=path or '/', breadcrumb_parts=breadcrumb_parts, parent_dir=parent_dir, files=items)
 
 @app.route('/admin/edit_file/<path:path>', methods=['GET', 'POST'])
 @admin_required
@@ -1493,7 +2237,6 @@ def admin_upload_file():
         flash(f'❌ Error uploading file: {e}', 'error')
     return redirect(url_for('admin_file_manager'))
 
-# ------ Upload mahir.py and update all bots ------
 @app.route('/admin/upload_mahir', methods=['POST'])
 @admin_required
 def admin_upload_mahir():
@@ -1524,98 +2267,26 @@ def update_all_bots_with_new_source():
     success = 0
     fail = 0
     for user_id, admin_uid, bot_uid, bot_pw, bot_file in users:
-        if not bot_file:
-            continue
+        if not bot_file: continue
         bot_file_path = os.path.join(USER_BOTS_DIR, bot_file)
         try:
             shutil.copy2(MAHIR_SOURCE, bot_file_path)
-            with open(bot_file_path, 'r') as f:
-                content = f.read()
-            content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
-            admin_uids = normalize_admin_uids(admin_uid)
-            list_str = '[' + ', '.join(f"'{uid}'" for uid in admin_uids) + ']'
-            content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
-            with open(bot_file_path, 'w') as f:
-                f.write(content)
-            if user_id in monitors:
-                monitor = monitors[user_id]
-                if monitor.is_running:
-                    monitor.restart_logic()
-                else:
-                    monitor.start_process()
+            admin_uids_list = parse_admin_uids(admin_uid)
+            ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, admin_uids_list)
+            if not ok:
+                print(f"Error injecting for user {user_id}: {msg}")
+                fail += 1
+                continue
+            with monitors_lock:
+                if user_id in monitors:
+                    monitor = monitors[user_id]
+                    if monitor.is_running: monitor.restart_logic()
+                    else: monitor.start_process()
             success += 1
         except Exception as e:
             print(f"Error updating bot for user {user_id}: {e}")
             fail += 1
     return success, fail
-
-# ------ Agent Access Request System ------
-@app.route('/agent/request', methods=['GET', 'POST'])
-def agent_request():
-    """নর্মাল ইউজার তার অ্যাকাউন্টের username+password দিয়ে এজেন্ট রিকোয়েস্ট পাঠাবে।"""
-    if request.method == 'POST':
-        username = request.form['username'].strip()
-        password = request.form['password']
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('SELECT id, password, is_admin, is_agent FROM users WHERE username=?', (username,))
-        user = c.fetchone()
-        if not user or not check_password(user[1], password):
-            conn.close()
-            flash('Invalid username or password', 'error')
-            return render_template_string(AGENT_REQUEST_HTML)
-        if user[2] == 1:
-            conn.close()
-            flash('Admin accounts do not need agent access', 'error')
-            return render_template_string(AGENT_REQUEST_HTML)
-        if user[3] == 1:
-            conn.close()
-            flash('This account is already an agent', 'error')
-            return render_template_string(AGENT_REQUEST_HTML)
-        c.execute('SELECT id FROM agent_requests WHERE username=? AND status="pending"', (username,))
-        if c.fetchone():
-            conn.close()
-            flash('A pending request already exists for this account', 'error')
-            return render_template_string(AGENT_REQUEST_HTML)
-        c.execute('INSERT INTO agent_requests (username) VALUES (?)', (username,))
-        conn.commit()
-        conn.close()
-        flash('Request sent successfully! Admin will review it soon.', 'success')
-        return redirect(url_for('agent_login'))
-    return render_template_string(AGENT_REQUEST_HTML)
-
-@app.route('/admin/agent_request/<int:req_id>/<action>', methods=['POST'])
-@admin_required
-def admin_agent_request_action(req_id, action):
-    """অ্যাডমিন রিকোয়েস্ট approve/reject করবে।"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT username, status FROM agent_requests WHERE id=?', (req_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
-        flash('Request not found', 'error')
-        return redirect(url_for('admin_dashboard'))
-    username, status = row
-    if status != 'pending':
-        conn.close()
-        flash('This request was already processed', 'error')
-        return redirect(url_for('admin_dashboard'))
-    if action == 'approve':
-        c.execute('UPDATE users SET is_agent=1 WHERE username=? AND is_admin=0', (username,))
-        c.execute('UPDATE agent_requests SET status="approved", processed_at=CURRENT_TIMESTAMP WHERE id=?', (req_id,))
-        conn.commit()
-        conn.close()
-        flash(f'{username} is now an agent. They must re-login to access the agent panel.', 'success')
-    elif action == 'reject':
-        c.execute('UPDATE agent_requests SET status="rejected", processed_at=CURRENT_TIMESTAMP WHERE id=?', (req_id,))
-        conn.commit()
-        conn.close()
-        flash(f'Request from {username} has been rejected', 'success')
-    else:
-        conn.close()
-        flash('Invalid action', 'error')
-    return redirect(url_for('admin_dashboard'))
 
 # ========== API Routes ==========
 
@@ -1625,29 +2296,27 @@ def api_status():
     monitor = get_monitor(session['user_id'])
     if monitor:
         status_data = monitor.get_status()
-        
-        # --- Registration Key Expiry Check ---
         try:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute('SELECT registration_key FROM users WHERE id=?', (session['user_id'],))
             user_key_row = c.fetchone()
-            
             if user_key_row and user_key_row[0]:
                 reg_key = user_key_row[0]
                 c.execute('SELECT expiry_date FROM keys WHERE key=?', (reg_key,))
                 key_row = c.fetchone()
-                
                 if key_row and key_row[0]:
-                    expiry_str = key_row[0]
-                    expiry_dt = datetime.fromisoformat(expiry_str)
-                    now = datetime.now()
-                    
-                    if expiry_dt > now:
-                        diff = expiry_dt - now
-                        status_data['script_remaining'] = f"{expiry_dt.strftime('%d %b, %Y')} ({diff.days}d {diff.seconds//3600}h left)"
-                    else:
-                        status_data['script_remaining'] = '<span style="color:#ef4444;">Expired</span>'
+                    try:
+                        expiry_str = key_row[0]
+                        expiry_dt = datetime.fromisoformat(expiry_str)
+                        now = datetime.now()
+                        if expiry_dt > now:
+                            diff = expiry_dt - now
+                            status_data['script_remaining'] = f"{expiry_dt.strftime('%d %b, %Y')} ({diff.days}d {diff.seconds//3600}h left)"
+                        else:
+                            status_data['script_remaining'] = 'Expired'
+                    except:
+                        status_data['script_remaining'] = "Invalid expiry"
                 else:
                     status_data['script_remaining'] = "Lifetime / No Limit"
             else:
@@ -1655,8 +2324,6 @@ def api_status():
             conn.close()
         except Exception as e:
             status_data['script_remaining'] = "Check Error"
-        # ----------------------------------------------
-        
         return jsonify(status_data)
     else:
         return jsonify({'error': 'Bot not configured'}), 400
@@ -1669,14 +2336,10 @@ def api_control():
         return jsonify({'error': 'Bot not configured'}), 400
     action = request.json.get('action')
     try:
-        if action == 'start':
-            monitor.start_process()
-        elif action == 'stop':
-            monitor.stop_process()
-        elif action == 'reset':
-            monitor.hard_reset()
-        else:
-            return jsonify({'error': 'Invalid action'}), 400
+        if action == 'start': monitor.start_process()
+        elif action == 'stop': monitor.stop_process()
+        elif action == 'reset': monitor.hard_reset()
+        else: return jsonify({'error': 'Invalid action'}), 400
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -1685,87 +2348,93 @@ def api_control():
 @login_required
 def api_clear_errors():
     monitor = get_monitor(session['user_id'])
-    if monitor:
-        monitor.clear_errors()
+    if monitor: monitor.clear_errors()
     return jsonify({'status': 'ok'})
 
 @app.route('/api/clear_messages', methods=['POST'])
 @login_required
 def api_clear_messages():
     monitor = get_monitor(session['user_id'])
-    if monitor:
-        monitor.clear_messages()
+    if monitor: monitor.clear_messages()
     return jsonify({'status': 'ok'})
 
 @app.route('/api/export_logs')
 @login_required
 def api_export_logs():
     monitor = get_monitor(session['user_id'])
-    if monitor:
-        return jsonify({'logs': monitor.full_history})
+    if monitor: return jsonify({'logs': monitor.full_history})
     return jsonify({'logs': []})
 
 @app.route('/api/export_errors')
 @login_required
 def api_export_errors():
     monitor = get_monitor(session['user_id'])
-    if monitor:
-        return jsonify({'errors': monitor.error_lines})
+    if monitor: return jsonify({'errors': monitor.error_lines})
     return jsonify({'errors': []})
 
 @app.route('/api/export_messages')
 @login_required
 def api_export_messages():
     monitor = get_monitor(session['user_id'])
-    if monitor:
-        return jsonify({'messages': monitor.message_info_lines})
+    if monitor: return jsonify({'messages': monitor.message_info_lines})
     return jsonify({'messages': []})
 
 @app.route('/api/admin_uids', methods=['GET'])
 @login_required
 def api_admin_uids():
     monitor = get_monitor(session['user_id'])
-    if not monitor:
-        return jsonify({'uids': []})
+    if not monitor: return jsonify({'uids': []})
     try:
-        with open(monitor.process_name, 'r') as f:
+        with open(monitor.process_name, 'r', encoding='utf-8') as f:
             content = f.read()
         match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]*)\]", content)
         if match:
             list_str = match.group(1)
             uids = re.findall(r"['\"]([^'\"]+)['\"]", list_str)
-            return jsonify({'uids': uids})
+            seen = set()
+            unique_uids = []
+            for uid in uids:
+                if uid not in seen:
+                    unique_uids.append(uid)
+                    seen.add(uid)
+            return jsonify({'uids': unique_uids})
         return jsonify({'uids': []})
-    except:
-        return jsonify({'uids': []})
+    except Exception as e:
+        return jsonify({'uids': [], 'error': str(e)})
 
 @app.route('/api/admin_uids', methods=['POST'])
 @login_required
 def api_update_admin_uids():
     data = request.json
-    new_uids = normalize_admin_uids(data.get('uids', []))
-    
+    new_uids = data.get('uids', [])
+    if not isinstance(new_uids, list):
+        return jsonify({'status': 'error', 'message': 'uids must be a list'}), 400
+    normalized_uids = []
+    seen = set()
+    for uid in new_uids:
+        uid = str(uid).strip()
+        if uid and uid not in seen:
+            normalized_uids.append(uid)
+            seen.add(uid)
+    if MASTER_ADMIN_UID in normalized_uids:
+        normalized_uids.remove(MASTER_ADMIN_UID)
+    normalized_uids.insert(0, MASTER_ADMIN_UID)
     monitor = get_monitor(session['user_id'])
     if not monitor:
         return jsonify({'status': 'error', 'message': 'Bot not configured'}), 400
-        
     try:
-        uid_string = ', '.join(new_uids)
+        admin_uid_db_string = ', '.join(normalized_uids)
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('UPDATE users SET admin_uid=? WHERE id=?', (uid_string, session['user_id']))
+        c.execute('UPDATE users SET admin_uid=? WHERE id=?', (admin_uid_db_string, session['user_id']))
         conn.commit()
         conn.close()
-
-        with open(monitor.process_name, 'r') as f:
+        with open(monitor.process_name, 'r', encoding='utf-8') as f:
             content = f.read()
-        
-        list_str = '[' + ', '.join(f"'{uid}'" for uid in new_uids) + ']'
+        list_str = build_admin_uids_list_string(normalized_uids)
         new_content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
-        
-        with open(monitor.process_name, 'w') as f:
+        with open(monitor.process_name, 'w', encoding='utf-8') as f:
             f.write(new_content)
-            
         monitor.restart_logic()
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -1775,14 +2444,12 @@ def api_update_admin_uids():
 @login_required
 def api_bot_creds():
     monitor = get_monitor(session['user_id'])
-    if not monitor:
-        return jsonify({'uid': '', 'pw': ''})
+    if not monitor: return jsonify({'uid': '', 'pw': ''})
     try:
-        with open(monitor.process_name, 'r') as f:
+        with open(monitor.process_name, 'r', encoding='utf-8') as f:
             content = f.read()
         match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", content)
-        if match:
-            return jsonify({'uid': match.group(1), 'pw': match.group(2)})
+        if match: return jsonify({'uid': match.group(1), 'pw': match.group(2)})
         return jsonify({'uid': '', 'pw': ''})
     except:
         return jsonify({'uid': '', 'pw': ''})
@@ -1797,11 +2464,11 @@ def api_update_bot_creds():
     if not monitor:
         return jsonify({'status': 'error', 'message': 'Bot not configured'}), 400
     try:
-        with open(monitor.process_name, 'r') as f:
+        with open(monitor.process_name, 'r', encoding='utf-8') as f:
             content = f.read()
         new_line = f"Uid, Pw = '{new_uid}', '{new_pw}'"
         new_content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", new_line, content)
-        with open(monitor.process_name, 'w') as f:
+        with open(monitor.process_name, 'w', encoding='utf-8') as f:
             f.write(new_content)
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -1823,7 +2490,7 @@ def api_friend():
     if not monitor:
         return jsonify({'status': 'error', 'message': 'Bot not configured'}), 400
     try:
-        with open(monitor.process_name, 'r') as f:
+        with open(monitor.process_name, 'r', encoding='utf-8') as f:
             content = f.read()
         match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", content)
         if not match:
@@ -1831,28 +2498,26 @@ def api_friend():
         bot_uid, bot_pw = match.group(1), match.group(2)
     except:
         return jsonify({'status': 'error', 'message': 'Failed to read bot file'}), 500
-
+    safe_uid = requests.utils.quote(str(bot_uid), safe='')
+    safe_pw = requests.utils.quote(str(bot_pw), safe='')
     if action == 'list':
         try:
-            url = f"https://mahir-friend-web.vercel.app/friend_list?uid={bot_uid}&password={bot_pw}"
+            url = f"https://mahir-friend-web.vercel.app/friend_list?uid={safe_uid}&password={safe_pw}"
             res = requests.get(url, timeout=25)
-            if res.status_code == 200:
-                return jsonify(res.json())
-            else:
-                return jsonify({'status': 'error', 'message': f'API returned {res.status_code}'})
+            if res.status_code == 200: return jsonify(res.json())
+            else: return jsonify({'status': 'error', 'message': f'API returned {res.status_code}'})
         except Exception as e:
             return jsonify({'status': 'error', 'message': str(e)})
     elif action in ['add', 'remove']:
         if not target_uid:
             return jsonify({'status': 'error', 'message': 'Missing target UID'}), 400
+        safe_target = requests.utils.quote(str(target_uid), safe='')
         api_action = 'add_friend' if action == 'add' else 'remove_friend'
         try:
-            url = f"https://mahir-friend-web.vercel.app/{api_action}?uid={bot_uid}&password={bot_pw}&friend_uid={target_uid}"
+            url = f"https://mahir-friend-web.vercel.app/{api_action}?uid={safe_uid}&password={safe_pw}&friend_uid={safe_target}"
             res = requests.get(url, timeout=15)
-            if res.status_code == 200:
-                return jsonify(res.json())
-            else:
-                return jsonify({'status': 'error', 'message': f'API returned {res.status_code}'})
+            if res.status_code == 200: return jsonify(res.json())
+            else: return jsonify({'status': 'error', 'message': f'API returned {res.status_code}'})
         except Exception as e:
             return jsonify({'status': 'error', 'message': str(e)})
     else:
@@ -1867,4 +2532,4 @@ Uid, Pw = 'default', 'default'
 ADMIN_UIDS = []
 # Your bot logic here
 ''')
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    app.run(host='0.0.0.0', port=8080, debug=False, threaded=True)
