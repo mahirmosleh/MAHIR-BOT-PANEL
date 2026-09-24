@@ -247,7 +247,6 @@ def inject_credentials_into_bot_file(filepath, bot_uid, bot_pw, admin_uids_list)
 
 
 def check_subscription_status(user_id):
-    """Check subscription: admin/agent = unlimited, else check expiry"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT subscription_expiry, registration_key, is_admin, is_agent FROM users WHERE id=?', (user_id,))
@@ -255,22 +254,17 @@ def check_subscription_status(user_id):
     if not row:
         conn.close()
         return {'status': 'unknown', 'days_left': 0, 'expiry': None}
-    
-    # Admin/Agent = unlimited
     if row[2] == 1 or row[3] == 1:
         conn.close()
         return {'status': 'unlimited', 'days_left': 999999, 'expiry': None}
-    
     sub_expiry = row[0]
     if not sub_expiry and row[1]:
         c.execute('SELECT expiry_date FROM keys WHERE key=?', (row[1],))
         kr = c.fetchone()
         if kr: sub_expiry = kr[0]
     conn.close()
-    
     if not sub_expiry:
         return {'status': 'unlimited', 'days_left': 999999, 'expiry': None}
-    
     try:
         expiry_dt = datetime.fromisoformat(sub_expiry)
         diff = expiry_dt - datetime.now()
@@ -284,15 +278,12 @@ def check_subscription_status(user_id):
 
 
 def expire_user_bot(user_id):
-    """মেয়াদ শেষ হলে সাথে সাথে বট বন্ধ + ফাইল ডিলিট"""
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
         row = c.fetchone()
         conn.close()
-        
-        # ⚡ STEP 1: IMMEDIATE STOP
         with monitors_lock:
             if user_id in monitors:
                 try:
@@ -304,8 +295,6 @@ def expire_user_bot(user_id):
                 try:
                     del monitors[user_id]
                 except: pass
-        
-        # ⚡ STEP 2: DELETE FILES
         if row and row[0]:
             bot_file = row[0]
             path = os.path.join(USER_BOTS_DIR, bot_file)
@@ -320,7 +309,6 @@ def expire_user_bot(user_id):
             if os.path.exists(login_path):
                 try: os.remove(login_path)
                 except: pass
-            # Clean related files
             base_name = bot_file.replace('.py', '')
             try:
                 for f in os.listdir(USER_BOTS_DIR):
@@ -328,8 +316,6 @@ def expire_user_bot(user_id):
                         try: os.remove(os.path.join(USER_BOTS_DIR, f))
                         except: pass
             except: pass
-        
-        # ⚡ STEP 3: DB UPDATE
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('UPDATE users SET bot_file=NULL, bot_status="expired", bot_pid=NULL WHERE id=?', (user_id,))
@@ -341,7 +327,6 @@ def expire_user_bot(user_id):
 
 
 def check_all_expired_bots():
-    """Background: প্রতি ১৫ সেকেন্ডে চেক করবে"""
     while True:
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -441,13 +426,11 @@ class ProcessMonitor:
         self.temp_guild_name = "N/A"
         self.temp_pfp_url = "N/A"
         
-        # ⚡ EXPIRY WATCHDOG
         self.watchdog_running = True
         self.watchdog_thread = threading.Thread(target=self._expiry_watchdog, daemon=True)
         self.watchdog_thread.start()
 
     def _expiry_watchdog(self):
-        """প্রতি ১০ সেকেন্ডে নিজের সাবস্ক্রিপশন চেক - শেষ হলে সাথে সাথে মরে যাবে"""
         while self.watchdog_running:
             try:
                 time.sleep(10)
@@ -675,17 +658,31 @@ class ProcessMonitor:
         return False
 
     def start_process(self):
-        """Directly start without DB check"""
+        """Start bot in DETACHED mode — survives parent exit"""
         with self.lock:
             if self.process and self.process.poll() is None: return True
             if self.process: self._stop_process_internal()
             if not os.path.exists(self.process_name):
                 print(f"Error: {self.process_name} not found"); return False
             try:
+                popen_kwargs = {
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.STDOUT,
+                    "text": True,
+                    "bufsize": 1,
+                    "universal_newlines": True,
+                    "errors": 'replace',
+                    "stdin": subprocess.DEVNULL,
+                }
+                if os.name == 'posix':
+                    popen_kwargs["start_new_session"] = True
+                elif os.name == 'nt':
+                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008
+
                 self.process = subprocess.Popen(
                     [sys.executable, "-u", self.process_name],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, universal_newlines=True, errors='replace')
+                    **popen_kwargs
+                )
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
@@ -836,6 +833,66 @@ def get_monitor(user_id):
         monitors[user_id] = monitor
     monitor.start_process()
     return monitor
+
+
+def reattach_running_bots():
+    """Flask start-এ already-running bot process গুলো re-attach করবে"""
+    time.sleep(3)
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''SELECT id, bot_file, bot_pid FROM users 
+                     WHERE bot_file IS NOT NULL AND bot_pid IS NOT NULL 
+                     AND is_admin=0 AND is_agent=0''')
+        rows = c.fetchall()
+        conn.close()
+        
+        for user_id, bot_file, bot_pid in rows:
+            try:
+                alive = False
+                if bot_pid:
+                    try:
+                        p = psutil.Process(bot_pid)
+                        if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                            alive = True
+                    except psutil.NoSuchProcess:
+                        alive = False
+                    except:
+                        alive = False
+                
+                bot_path = os.path.join(USER_BOTS_DIR, bot_file)
+                if not os.path.exists(bot_path):
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute('UPDATE users SET bot_pid=NULL, bot_status="stopped" WHERE id=?', (user_id,))
+                    conn.commit(); conn.close()
+                    continue
+                
+                if alive:
+                    print(f"🔗 Re-attached to running bot for user {user_id} (PID: {bot_pid})")
+                    monitor = ProcessMonitor(user_id, bot_path)
+                    monitor.process = psutil.Process(bot_pid)
+                    monitor.is_running = True
+                    monitor.start_time = datetime.now()
+                    monitor.bot_status = "🟢 ACTIVE & ONLINE"
+                    with monitors_lock:
+                        monitors[user_id] = monitor
+                else:
+                    sub = check_subscription_status(user_id)
+                    if sub['status'] == 'expired':
+                        expire_user_bot(user_id)
+                        continue
+                    print(f"🔄 Starting fresh bot for user {user_id}")
+                    monitor = ProcessMonitor(user_id, bot_path)
+                    with monitors_lock:
+                        monitors[user_id] = monitor
+                    monitor.start_process()
+            except Exception as e:
+                print(f"Re-attach error for user {user_id}: {e}")
+    except Exception as e:
+        print(f"reattach_running_bots error: {e}")
+
+threading.Thread(target=reattach_running_bots, daemon=True).start()
 
 # ========== Decorators ==========
 def admin_required(f):
@@ -1304,6 +1361,7 @@ ADMIN_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             <td>
               <div class="td-actions">
                 <a href="{{ url_for('admin_user_details', user_id=agent.id) }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i></a>
+                <a href="{{ url_for('admin_login_as', user_id=agent.id) }}" class="btn btn-gold btn-sm" onclick="return confirm('Login as {{ agent.username }}?');"><i class="fas fa-sign-in-alt"></i></a>
                 <form method="POST" action="{{ url_for('admin_delete_agent', agent_id=agent.id) }}" onsubmit="return confirm('Delete?');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form>
               </div>
             </td>
@@ -1336,7 +1394,10 @@ ADMIN_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             <td>{% if user.is_admin %}<span class="badge badge-admin">Admin</span>{% elif user.is_agent %}<span class="badge badge-agent">Agent</span>{% else %}<span class="badge badge-user">User</span>{% endif %}</td>
             <td>
               <div class="td-actions">
-                <a href="{{ url_for('admin_user_details', user_id=user.id) }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i></a>
+                <a href="{{ url_for('admin_user_details', user_id=user.id) }}" class="btn btn-info btn-sm" title="Details"><i class="fas fa-eye"></i></a>
+                {% if not user.is_admin %}
+                <a href="{{ url_for('admin_login_as', user_id=user.id) }}" class="btn btn-gold btn-sm" title="Login as {{ user.username }}" onclick="return confirm('Login as {{ user.username }}?');"><i class="fas fa-sign-in-alt"></i></a>
+                {% endif %}
                 {% if not user.is_admin and not user.is_agent %}
                   {% if user.bot_disabled_by_admin %}
                   <form method="POST" action="{{ url_for('admin_toggle_user_bot', user_id=user.id) }}" style="display:inline;"><button type="submit" class="btn btn-success btn-sm"><i class="fas fa-play"></i></button></form>
@@ -1404,6 +1465,9 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   <div class="card header">
     <h1><i class="fas fa-user-circle"></i> {{ user.username }}</h1>
     <div class="flex">
+      {% if not user.is_admin %}
+      <a href="{{ url_for('admin_login_as', user_id=user.id) }}" class="btn btn-gold btn-sm" onclick="return confirm('Login as {{ user.username }}?');"><i class="fas fa-sign-in-alt"></i> Login As</a>
+      {% endif %}
       <a href="{{ url_for('admin_dashboard') }}" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
       <a href="{{ url_for('admin_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
     </div>
@@ -1525,6 +1589,73 @@ function copyT(t){navigator.clipboard.writeText(t).then(function(){alert('Copied
 </script>
 </body></html>'''
 
+# ==================== ALL KEYS LOG ====================
+ALL_KEYS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>All Keys - MAHIR ADMIN</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-key"></i> All Keys Log</h1>
+    <div class="flex">
+      <a href="{{ url_for('admin_dashboard') }}" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
+      <a href="{{ url_for('admin_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Total Keys</div><div class="stat-value">{{ total }}</div></div>
+      <div class="stat-card"><div class="stat-label">Used</div><div class="stat-value" style="color:#4ade80;">{{ used }}</div></div>
+      <div class="stat-card"><div class="stat-label">Available</div><div class="stat-value" style="color:#F5C842;">{{ available }}</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-list"></i> All Keys</div>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Key</th>
+            <th>Created By</th>
+            <th>Role</th>
+            <th>Created At</th>
+            <th>Duration</th>
+            <th>Used By</th>
+            <th>Used At</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for k in all_keys %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td><code style="font-size:.72rem;">{{ k.key }}</code></td>
+            <td><strong style="color:var(--gold2);">{{ k.created_by }}</strong></td>
+            <td>
+              {% if k.is_admin %}<span class="badge badge-admin">ADMIN</span>
+              {% elif k.is_agent %}<span class="badge badge-agent">AGENT</span>
+              {% else %}<span class="badge badge-user">UNKNOWN</span>{% endif %}
+            </td>
+            <td><small>{{ k.created_at[:16] if k.created_at else '—' }}</small></td>
+            <td><span class="badge badge-unused">{{ k.duration }}</span></td>
+            <td>{{ k.used_by or '—' }}</td>
+            <td><small>{{ k.used_at[:16] if k.used_at else '—' }}</small></td>
+            <td>
+              {% if k.status == 'Used' %}<span class="badge badge-used">Used</span>
+              {% elif k.status == 'Expired' %}<span class="badge badge-expired">Expired</span>
+              {% else %}<span class="badge badge-unused">Available</span>{% endif %}
+            </td>
+          </tr>
+          {% else %}
+          <tr class="empty-row"><td colspan="9">No keys created yet</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <a href="{{ url_for('admin_dashboard') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
+</div></body></html>'''
+
 # ==================== FILE MANAGER ====================
 FILE_MANAGER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>File Manager - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .modal-box.fullscreen{max-width:96vw !important;width:96vw;height:94vh;max-height:94vh}
@@ -1595,6 +1726,7 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'){var box=doc
 # ==================== USER PANEL ====================
 USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>MAHIR PREMIUM | Bot Controller</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .logout-btn{position:fixed;top:20px;right:20px;z-index:999}
+.return-admin-btn{position:fixed;top:20px;right:130px;z-index:999}
 .cover-section{position:relative;border-radius:22px;overflow:hidden;margin-bottom:24px;border:1px solid rgba(245,200,66,.15)}
 .cover-section img.cover-image{width:100%;height:260px;object-fit:cover;display:block}
 .cover-overlay{position:absolute;inset:0;background:linear-gradient(100deg,rgba(7,7,15,.92) 20%,rgba(7,7,15,.5) 60%,rgba(7,7,15,.25));display:flex;flex-direction:column;justify-content:center;padding:32px 40px}
@@ -1630,7 +1762,7 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 .chart-container{position:relative;height:250px}
 .config-form{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
 .config-status{padding:13px 16px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.12);border-left:4px solid var(--gold);border-radius:10px;color:var(--gold2);font-size:.85rem;margin-bottom:18px}
-@media(max-width:768px){.download-card{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}}
+@media(max-width:768px){.download-card{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}.return-admin-btn{top:70px;right:20px}}
 </style></head><body>
 
 <div class="notice-indicator" id="noticeBtn" onclick="showNotice()" style="display:none;"><i class="fas fa-bullhorn"></i> Admin Notice</div>
@@ -1654,6 +1786,9 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 
 <div class="container">
   <button class="logout-btn btn btn-danger btn-sm" onclick="window.location.href='/logout'"><i class="fas fa-sign-out-alt"></i> Logout</button>
+  {% if session.get('impersonating') %}
+  <button class="return-admin-btn btn btn-gold btn-sm" onclick="window.location.href='/admin/return_to_admin'"><i class="fas fa-arrow-left"></i> Back to Admin</button>
+  {% endif %}
   <div class="cover-section">
     <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover"/>
     <div class="cover-overlay">
@@ -2137,6 +2272,97 @@ def admin_dashboard():
     return render_template_string(ADMIN_DASHBOARD_HTML, users=users, agents=agents, keys=keys,
                                   new_key=None, global_stop=get_global_stop(),
                                   global_notice=get_global_notice(), **stats)
+
+
+@app.route('/admin/login_as/<int:user_id>')
+@admin_required
+def admin_login_as(user_id):
+    """Admin সরাসরি যেকোনো user-এর panel-এ login করতে পারবে"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, username, is_admin, is_agent FROM users WHERE id=?', (user_id,))
+    user = c.fetchone()
+    conn.close()
+    if not user:
+        flash('❌ User not found', 'error')
+        return redirect(url_for('admin_dashboard'))
+    session['admin_backup'] = {
+        'user_id': session.get('user_id'),
+        'username': session.get('username'),
+        'is_admin': session.get('is_admin'),
+        'is_agent': session.get('is_agent'),
+    }
+    session['user_id'] = user[0]
+    session['username'] = user[1]
+    session['is_admin'] = False
+    session['is_agent'] = False
+    session['impersonating'] = True
+    flash(f'✅ Logged in as {user[1]} (impersonating)', 'success')
+    return redirect(url_for('user_dashboard'))
+
+
+@app.route('/admin/return_to_admin')
+def admin_return_to_admin():
+    backup = session.pop('admin_backup', None)
+    if backup:
+        session['user_id'] = backup['user_id']
+        session['username'] = backup['username']
+        session['is_admin'] = backup['is_admin']
+        session['is_agent'] = backup['is_agent']
+        session.pop('impersonating', None)
+        flash('✅ Returned to Admin', 'success')
+        return redirect(url_for('admin_dashboard'))
+    return redirect(url_for('login'))
+
+
+@app.route('/admin/all_keys')
+@admin_required
+def admin_all_keys():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT k.id, k.key, k.created_by, k.created_at, k.used_by, k.used_at, 
+                 k.is_used, k.expiry_date,
+                 u.is_admin, u.is_agent
+                 FROM keys k 
+                 LEFT JOIN users u ON u.username = k.created_by
+                 ORDER BY k.id DESC''')
+    rows = c.fetchall()
+    conn.close()
+    all_keys = []
+    for r in rows:
+        created_by = r[2] or '—'
+        is_admin_created = bool(r[8])
+        is_agent_created = bool(r[9])
+        duration_text = "Permanent"
+        if r[7]:
+            try:
+                expiry_dt = datetime.fromisoformat(r[7])
+                if r[3]:
+                    created_dt = datetime.fromisoformat(r[3])
+                    days = (expiry_dt - created_dt).days
+                    duration_text = f"{days} days"
+                else:
+                    duration_text = expiry_dt.strftime('%Y-%m-%d')
+            except: pass
+        status = "Available"
+        if r[6]:
+            status = "Used"
+        else:
+            if r[7]:
+                try:
+                    if datetime.fromisoformat(r[7]) < datetime.now():
+                        status = "Expired"
+                except: pass
+        all_keys.append({
+            'id': r[0], 'key': r[1], 'created_by': created_by,
+            'created_at': r[3], 'used_by': r[4], 'used_at': r[5],
+            'duration': duration_text, 'status': status,
+            'is_admin': is_admin_created, 'is_agent': is_agent_created,
+        })
+    return render_template_string(ALL_KEYS_HTML, all_keys=all_keys,
+                                  total=len(all_keys),
+                                  used=sum(1 for k in all_keys if k['status'] == 'Used'),
+                                  available=sum(1 for k in all_keys if k['status'] == 'Available'))
 
 
 @app.route('/admin/preview_global_notice')
@@ -2645,7 +2871,6 @@ def admin_upload_mahir():
 
 
 def _handle_db_upload(redirect_endpoint):
-    """DB upload - creates bots from DB info, skips expired"""
     if 'db_file' not in request.files:
         flash('No file', 'error')
         return redirect(url_for(redirect_endpoint))
@@ -2683,7 +2908,6 @@ def _handle_db_upload(redirect_endpoint):
     except Exception as e:
         flash(f'❌ Replace error: {e}', 'error')
         return redirect(url_for(redirect_endpoint))
-    # Auto-create bots from DB, skipping expired
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT id, username, admin_uid, bot_uid, bot_pw 
@@ -2694,7 +2918,6 @@ def _handle_db_upload(redirect_endpoint):
     created = 0; failed = 0; skipped = 0
     for user_id, username, admin_uid, bot_uid, bot_pw in users:
         try:
-            # ⚡ Skip expired
             sub = check_subscription_status(user_id)
             if sub['status'] == 'expired':
                 conn = sqlite3.connect(DB_FILE)
@@ -2703,7 +2926,6 @@ def _handle_db_upload(redirect_endpoint):
                 conn.commit(); conn.close()
                 skipped += 1
                 continue
-            
             safe_name = sanitize_filename(username)
             bot_filename = f"{safe_name}_mahir.py"
             bot_path = os.path.join(USER_BOTS_DIR, bot_filename)
@@ -2841,7 +3063,6 @@ def _renew_subscription(user_id, redirect_endpoint):
 
 
 def reset_all_bots():
-    """Reset all bots - skip expired"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT id, admin_uid, bot_uid, bot_pw, bot_file 
@@ -2858,8 +3079,6 @@ def reset_all_bots():
     success = 0; fail = 0; skipped = 0
     for user_id, admin_uid, bot_uid, bot_pw, bot_file in users:
         if not bot_file: continue
-        
-        # ⚡ Skip expired
         sub = check_subscription_status(user_id)
         if sub['status'] == 'expired':
             path = os.path.join(USER_BOTS_DIR, bot_file)
@@ -2872,7 +3091,6 @@ def reset_all_bots():
             conn.commit(); conn.close()
             skipped += 1
             continue
-        
         path = os.path.join(USER_BOTS_DIR, bot_file)
         try:
             if os.path.exists(MAHIR_SOURCE):
