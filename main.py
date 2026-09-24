@@ -1,4 +1,4 @@
-##!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os
@@ -21,6 +21,7 @@ from functools import wraps
 import psutil
 import requests
 
+
 def install_dependencies():
     required_pkgs = ["colorama", "psutil", "flask", "requests"]
     for pkg in required_pkgs:
@@ -36,11 +37,8 @@ init(autoreset=True)
 
 app = Flask(__name__)
 
-_env_secret = os.environ.get('PANEL_SECRET_KEY')
 SECRET_KEY_FILE = ".secret_key"
-if _env_secret:
-    app.secret_key = _env_secret
-elif os.path.exists(SECRET_KEY_FILE):
+if os.path.exists(SECRET_KEY_FILE):
     try:
         with open(SECRET_KEY_FILE, 'r') as f:
             app.secret_key = f.read().strip()
@@ -57,33 +55,23 @@ else:
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
 DB_FILE = "users.db"
 MAHIR_SOURCE = "mahir.py"
 USER_BOTS_DIR = "."
-MASTER_OWNER_UID = "1120167200"
-# Bot file expects ADMIN_UIDS - keep for injection
-BOT_ADMIN_UIDS_VAR = "ADMIN_UIDS"
+MASTER_ADMIN_UID = "1120167200"
+
+OWNER_USERNAME = "MAHIR TCP"
+OWNER_PASSWORD = "MAHIR0208@"
 
 monitors_lock = threading.Lock()
 
-# ========== Database ==========
-def get_db():
-    """Thread-safe SQLite connection with busy timeout + WAL.
-    Fixes 'database is locked' errors that caused random logouts."""
-    conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA busy_timeout=30000")
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except Exception:
-        pass
-    return conn
 
+# ============================================================
+#  DATABASE
+# ============================================================
 def init_db():
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,9 +80,9 @@ def init_db():
         email TEXT,
         registration_key TEXT NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        is_owner INTEGER DEFAULT 0,
+        is_admin INTEGER DEFAULT 0,
         is_agent INTEGER DEFAULT 0,
-        owner_uid TEXT,
+        admin_uid TEXT,
         bot_uid TEXT,
         bot_pw TEXT,
         bot_file TEXT,
@@ -102,10 +90,11 @@ def init_db():
         bot_status TEXT DEFAULT 'not_configured',
         key_limit INTEGER DEFAULT -1,
         can_manage_db INTEGER DEFAULT 0,
-        bot_disabled_by_owner INTEGER DEFAULT 0,
+        bot_disabled_by_admin INTEGER DEFAULT 0,
         disable_reason TEXT,
         subscription_expiry TIMESTAMP NULL,
-        created_by_agent TEXT
+        created_by_agent TEXT,
+        bot_force_active INTEGER DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,7 +104,8 @@ def init_db():
         used_by TEXT,
         used_at TIMESTAMP,
         is_used INTEGER DEFAULT 0,
-        expiry_date TIMESTAMP NULL
+        expiry_date TIMESTAMP NULL,
+        duration_days INTEGER DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
@@ -127,48 +117,30 @@ def init_db():
 
 def migrate_db():
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute("PRAGMA table_info(users)")
-        cols = {row[1] for row in c.fetchall()}
-        # Rename admin columns to owner if old exists
-        if 'is_admin' in cols and 'is_owner' not in cols:
-            try:
-                c.execute('ALTER TABLE users RENAME COLUMN is_admin TO is_owner')
-                print("✅ Migrated is_admin → is_owner")
-            except:
-                c.execute('ALTER TABLE users ADD COLUMN is_owner INTEGER DEFAULT 0')
-        if 'admin_uid' in cols and 'owner_uid' not in cols:
-            try:
-                c.execute('ALTER TABLE users RENAME COLUMN admin_uid TO owner_uid')
-                print("✅ Migrated admin_uid → owner_uid")
-            except:
-                c.execute('ALTER TABLE users ADD COLUMN owner_uid TEXT')
-        if 'bot_disabled_by_admin' in cols and 'bot_disabled_by_owner' not in cols:
-            try:
-                c.execute('ALTER TABLE users RENAME COLUMN bot_disabled_by_admin TO bot_disabled_by_owner')
-                print("✅ Migrated bot_disabled_by_admin → bot_disabled_by_owner")
-            except:
-                c.execute('ALTER TABLE users ADD COLUMN bot_disabled_by_owner INTEGER DEFAULT 0')
-        # Ensure new columns exist
         c.execute("PRAGMA table_info(users)")
         cols = {row[1] for row in c.fetchall()}
         if 'key_limit' not in cols:
             c.execute('ALTER TABLE users ADD COLUMN key_limit INTEGER DEFAULT -1')
         if 'can_manage_db' not in cols:
             c.execute('ALTER TABLE users ADD COLUMN can_manage_db INTEGER DEFAULT 0')
+        if 'bot_disabled_by_admin' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN bot_disabled_by_admin INTEGER DEFAULT 0')
         if 'disable_reason' not in cols:
             c.execute('ALTER TABLE users ADD COLUMN disable_reason TEXT')
         if 'subscription_expiry' not in cols:
             c.execute('ALTER TABLE users ADD COLUMN subscription_expiry TIMESTAMP NULL')
         if 'created_by_agent' not in cols:
             c.execute('ALTER TABLE users ADD COLUMN created_by_agent TEXT')
-        if 'is_owner' not in cols:
-            c.execute('ALTER TABLE users ADD COLUMN is_owner INTEGER DEFAULT 0')
-        if 'owner_uid' not in cols:
-            c.execute('ALTER TABLE users ADD COLUMN owner_uid TEXT')
-        if 'bot_disabled_by_owner' not in cols:
-            c.execute('ALTER TABLE users ADD COLUMN bot_disabled_by_owner INTEGER DEFAULT 0')
+        if 'bot_force_active' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN bot_force_active INTEGER DEFAULT 0')
+
+        c.execute("PRAGMA table_info(keys)")
+        kcols = {row[1] for row in c.fetchall()}
+        if 'duration_days' not in kcols:
+            c.execute('ALTER TABLE keys ADD COLUMN duration_days INTEGER DEFAULT 0')
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -177,7 +149,7 @@ def migrate_db():
 
 def get_setting(key, default=None):
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('SELECT value FROM settings WHERE key=?', (key,))
         row = c.fetchone()
@@ -188,15 +160,13 @@ def get_setting(key, default=None):
 
 def set_setting(key, value):
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, str(value)))
         conn.commit()
         conn.close()
         return True
-    except Exception as e:
-        print(f"Setting save error: {e}")
-        return False
+    except: return False
 
 
 def get_global_stop():
@@ -204,7 +174,36 @@ def get_global_stop():
 
 
 def get_global_notice():
-    return get_setting('global_notice_text', 'Owner এইমাত্র সিস্টেম আপডেট করছে। কিছুক্ষণ পর আবার চেষ্টা করুন।')
+    return get_setting(
+        'global_notice_text',
+        '╔══════════════════════════════╗\n'
+        '🌸 **আসসালামু আলাইকুম** 🌸\n'
+        '╚══════════════════════════════╝\n\n'
+        '💙 **প্রিয় TCP Bot User সবাইকে,**\n\n'
+        'আশা করি আল্লাহর রহমতে আপনারা সবাই ভালো আছেন এবং সুস্থ আছেন। 🤍\n\n'
+        '🔥 **MAHIR TCP BOT**-এর সাথে থাকার জন্য আপনাদের সবাইকে আন্তরিকভাবে ধন্যবাদ। 🫶\n\n'
+        '⚙️ Bot ব্যবহার করার সময় যদি কোনো **সমস্যা • Bug • Error • Update Issue** '
+        'অথবা অন্য কোনো সমস্যা দেখতে পান, তাহলে অবশ্যই আমাদের জানাবেন।\n\n'
+        '🛠️ আপনাদের দেওয়া রিপোর্ট অনুযায়ী সমস্যাগুলো ঠিক করার সর্বোচ্চ চেষ্টা করব, ইনশাআল্লাহ। ❤️\n\n'
+        '⏳ কাজের ব্যস্ততার কারণে কোনো Update বা Fix দিতে মাঝে মাঝে একটু সময় লাগতে পারে। '
+        'তবে চিন্তা করবেন না—সময় পেলেই সবকিছু ঠিক করার চেষ্টা করব। ⚡\n\n'
+        '━━━━━━━━━━━━━━━━━━━━━━\n\n'
+        '🌸 **সবাই ভালো থাকবেন**\n'
+        '🤍 **সুস্থ থাকবেন**\n'
+        '🤲 **নিজেদের খেয়াল রাখবেন**\n\n'
+        '🔥 **MAHIR TCP BOT** 🔥\n'
+        '💫 *Stay Connected • Stay Updated* 💫\n\n'
+        '╚══════════════════════════════╝'
+    )
+
+
+def get_user_login_notice():
+    """User panel-এ login করলে যে notice দেখাবে"""
+    return get_setting('user_login_notice_text', '')
+
+
+def is_user_login_notice_enabled():
+    return get_setting('user_login_notice_enabled', '0') == '1'
 
 
 def validate_db_file(filepath):
@@ -232,10 +231,14 @@ def validate_db_file(filepath):
     except Exception as e:
         return False, f"Error: {e}"
 
+
 init_db()
 migrate_db()
 
-# ========== Helpers ==========
+
+# ============================================================
+#  HELPERS
+# ============================================================
 def sanitize_filename(name):
     return re.sub(r'[^a-zA-Z0-9_]', '_', name)
 
@@ -250,42 +253,40 @@ def check_password(stored, provided):
     return stored == provided
 
 
-def parse_owner_uids(owner_uid_str):
-    uids = [MASTER_OWNER_UID]; seen = {MASTER_OWNER_UID}
-    if owner_uid_str:
-        for p in re.split(r'[,;\s]+', str(owner_uid_str)):
+def parse_admin_uids(admin_uid_str):
+    uids = [MASTER_ADMIN_UID]; seen = {MASTER_ADMIN_UID}
+    if admin_uid_str:
+        for p in re.split(r'[,;\s]+', str(admin_uid_str)):
             p = p.strip().strip("'\"")
             if p and p not in seen:
                 uids.append(p); seen.add(p)
     return uids
 
 
-def build_owner_uids_list_string(uids):
+def build_admin_uids_list_string(uids):
     unique = []; seen = set()
     for uid in uids:
         uid = str(uid).strip()
         if uid and uid not in seen:
             unique.append(uid); seen.add(uid)
-    if MASTER_OWNER_UID in unique:
-        unique.remove(MASTER_OWNER_UID)
-    unique.insert(0, MASTER_OWNER_UID)
+    if MASTER_ADMIN_UID in unique:
+        unique.remove(MASTER_ADMIN_UID)
+    unique.insert(0, MASTER_ADMIN_UID)
     return '[' + ', '.join(f"'{uid}'" for uid in unique) + ']'
 
 
-def inject_credentials_into_bot_file(filepath, bot_uid, bot_pw, owner_uids_list):
-    """Inject UID/PW + ADMIN_UIDS (bot file uses ADMIN_UIDS var name)"""
+def inject_credentials_into_bot_file(filepath, bot_uid, bot_pw, admin_uids_list):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
         content = re.sub(r"Uid\s*,\s*Pw\s*=\s*'[^']*'\s*,\s*'[^']*'",
                          f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
-        owner_uids_str = build_owner_uids_list_string(owner_uids_list)
-        # Bot file expects ADMIN_UIDS — keep that name
+        admin_uids_str = build_admin_uids_list_string(admin_uids_list)
         if re.search(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", content):
-            content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {owner_uids_str}", content)
+            content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {admin_uids_str}", content)
         else:
             content = re.sub(r"(Uid\s*,\s*Pw\s*=\s*'[^']*'\s*,\s*'[^']*')",
-                             f"\\1\nADMIN_UIDS = {owner_uids_str}", content)
+                             f"\\1\nADMIN_UIDS = {admin_uids_str}", content)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
         return True, "OK"
@@ -294,9 +295,9 @@ def inject_credentials_into_bot_file(filepath, bot_uid, bot_pw, owner_uids_list)
 
 
 def check_subscription_status(user_id):
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT subscription_expiry, registration_key, is_owner, is_agent FROM users WHERE id=?', (user_id,))
+    c.execute('SELECT subscription_expiry, registration_key, is_admin, is_agent FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
     if not row:
         conn.close()
@@ -326,11 +327,12 @@ def check_subscription_status(user_id):
 
 def expire_user_bot(user_id):
     try:
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
         row = c.fetchone()
         conn.close()
+
         with monitors_lock:
             if user_id in monitors:
                 try:
@@ -339,18 +341,15 @@ def expire_user_bot(user_id):
                     print(f"🛑 IMMEDIATE STOP: User {user_id} bot killed (expired)")
                 except Exception as e:
                     print(f"Stop error: {e}")
-                try:
-                    del monitors[user_id]
+                try: del monitors[user_id]
                 except: pass
+
         if row and row[0]:
             bot_file = row[0]
             path = os.path.join(USER_BOTS_DIR, bot_file)
             if os.path.exists(path):
-                try:
-                    os.remove(path)
-                    print(f"🗑️ Deleted: {bot_file}")
-                except Exception as e:
-                    print(f"Delete error: {e}")
+                try: os.remove(path)
+                except: pass
             login_file = bot_file.replace('.py', '_login.py')
             login_path = os.path.join(USER_BOTS_DIR, login_file)
             if os.path.exists(login_path):
@@ -363,11 +362,11 @@ def expire_user_bot(user_id):
                         try: os.remove(os.path.join(USER_BOTS_DIR, f))
                         except: pass
             except: pass
-        conn = get_db()
+
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('UPDATE users SET bot_file=NULL, bot_status="expired", bot_pid=NULL WHERE id=?', (user_id,))
-        conn.commit()
-        conn.close()
+        conn.commit(); conn.close()
         print(f"✅ User {user_id}: Expired → Stopped & Deleted")
     except Exception as e:
         print(f"expire_user_bot error: {e}")
@@ -376,16 +375,16 @@ def expire_user_bot(user_id):
 def check_all_expired_bots():
     while True:
         try:
-            conn = get_db()
+            conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute('''SELECT id, subscription_expiry, registration_key, bot_file, bot_status
-                         FROM users WHERE is_owner=0 AND is_agent=0''')
+                         FROM users WHERE is_admin=0 AND is_agent=0''')
             rows = c.fetchall()
             conn.close()
             for user_id, sub_expiry, reg_key, bot_file, bot_status in rows:
                 expiry_val = sub_expiry
                 if not expiry_val and reg_key:
-                    conn = get_db()
+                    conn = sqlite3.connect(DB_FILE)
                     cc = conn.cursor()
                     cc.execute('SELECT expiry_date FROM keys WHERE key=?', (reg_key,))
                     kr = cc.fetchone()
@@ -404,6 +403,7 @@ def check_all_expired_bots():
             print(f"BG check error: {e}")
         time.sleep(15)
 
+
 threading.Thread(target=check_all_expired_bots, daemon=True).start()
 
 
@@ -417,7 +417,10 @@ def update_bot_bio(uid, password, username):
         return resp.status_code == 200
     except: return False
 
-# ========== ProcessMonitor ==========
+
+# ============================================================
+#  PROCESS MONITOR
+# ============================================================
 class ProcessMonitor:
     def __init__(self, user_id, bot_file_path):
         self.user_id = user_id
@@ -473,10 +476,28 @@ class ProcessMonitor:
         self.temp_guild_name = "N/A"
         self.temp_pfp_url = "N/A"
 
-        self.force_start = False
+        # Auto-restart monitor
+        self.auto_restart_running = True
+        self.auto_restart_thread = threading.Thread(target=self._auto_restart_loop, daemon=True)
+        self.auto_restart_thread.start()
+
+        # Expiry watchdog
         self.watchdog_running = True
         self.watchdog_thread = threading.Thread(target=self._expiry_watchdog, daemon=True)
         self.watchdog_thread.start()
+
+    def _auto_restart_loop(self):
+        while self.auto_restart_running:
+            try:
+                time.sleep(8)
+                if not self.auto_restart_running:
+                    break
+                if self.is_running and self.process and self.process.poll() is not None:
+                    print(f"🔄 Auto-restart: user {self.user_id} bot died, restarting...")
+                    self.restart_count += 1
+                    self.start_process()
+            except Exception as e:
+                print(f"Auto-restart error: {e}")
 
     def _expiry_watchdog(self):
         while self.watchdog_running:
@@ -486,7 +507,7 @@ class ProcessMonitor:
                     break
                 if not self.is_running:
                     continue
-                conn = get_db()
+                conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
                 c.execute('SELECT subscription_expiry, registration_key FROM users WHERE id=?', (self.user_id,))
                 row = c.fetchone()
@@ -504,12 +525,32 @@ class ProcessMonitor:
                         if datetime.now() > expiry_dt:
                             print(f"\n⏰ WATCHDOG: User {self.user_id} EXPIRED → Killing bot NOW")
                             self.watchdog_running = False
+                            self.auto_restart_running = False
                             self.stop_process()
                             expire_user_bot(self.user_id)
                             break
                     except: pass
             except Exception as e:
                 print(f"Watchdog error: {e}")
+
+    def can_start(self):
+        sub = check_subscription_status(self.user_id)
+        if sub['status'] == 'expired':
+            return False, "expired"
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('SELECT bot_disabled_by_admin, bot_force_active FROM users WHERE id=?', (self.user_id,))
+            row = c.fetchone()
+            conn.close()
+            if row and row[0]:
+                return False, "admin_disabled"
+            if get_global_stop():
+                if row and row[1]:
+                    return True, "force_active"
+                return False, "global_stop"
+        except: pass
+        return True, "ok"
 
     def clean_ansi(self, text):
         if not text: return ""
@@ -705,35 +746,29 @@ class ProcessMonitor:
             if p in l: return True
         return False
 
-    def _spawn(self):
+    def start_process(self):
+        can, reason = self.can_start()
+        if not can:
+            with self.lock:
+                self.is_running = False
+                self.bot_status = "🔴 BLOCKED"
+            print(f"⛔ Cannot start user {self.user_id}: {reason}")
+            return False
         with self.lock:
             if self.process and self.process.poll() is None: return True
             if self.process: self._stop_process_internal()
             if not os.path.exists(self.process_name):
                 print(f"Error: {self.process_name} not found"); return False
             try:
-                popen_kwargs = {
-                    "stdout": subprocess.PIPE,
-                    "stderr": subprocess.STDOUT,
-                    "text": True,
-                    "bufsize": 1,
-                    "universal_newlines": True,
-                    "errors": 'replace',
-                    "stdin": subprocess.DEVNULL,
-                }
-                if os.name == 'posix':
-                    popen_kwargs["start_new_session"] = True
-                elif os.name == 'nt':
-                    popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008
                 self.process = subprocess.Popen(
                     [sys.executable, "-u", self.process_name],
-                    **popen_kwargs
-                )
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1, universal_newlines=True, errors='replace')
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
                 try:
-                    conn = get_db()
+                    conn = sqlite3.connect(DB_FILE)
                     c = conn.cursor()
                     c.execute('UPDATE users SET bot_status="running", bot_pid=? WHERE id=?',
                               (self.process.pid, self.user_id))
@@ -754,17 +789,6 @@ class ProcessMonitor:
                 self.output_lines.append(f"Error: {str(e)}")
                 return False
 
-    def start_process(self):
-        if get_global_stop() and not self.force_start:
-            with self.lock:
-                self.is_running = False
-                self.bot_status = "🔴 BLOCKED"
-            return False
-        return self._spawn()
-
-    def _force_spawn_process(self):
-        return self._spawn()
-
     def _stop_process_internal(self):
         if self.process:
             try:
@@ -780,7 +804,7 @@ class ProcessMonitor:
         self.is_running = False
         self.bot_status = "🔴 OFFLINE"
         try:
-            conn = get_db()
+            conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute('UPDATE users SET bot_pid=NULL, bot_status="stopped" WHERE id=?', (self.user_id,))
             conn.commit(); conn.close()
@@ -869,13 +893,17 @@ class ProcessMonitor:
             self.last_nickname = "N/A"; self.last_message = "N/A"; self.last_pfp_url = "N/A"
         return self.start_process()
 
-# ========== Monitors ==========
+
+# ============================================================
+#  MONITORS
+# ============================================================
 monitors = {}
+
 
 def get_monitor(user_id):
     with monitors_lock:
         if user_id in monitors: return monitors[user_id]
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
@@ -892,70 +920,47 @@ def get_monitor(user_id):
     return monitor
 
 
-def reattach_running_bots():
-    time.sleep(3)
+def startup_launch_all_bots():
     try:
-        conn = get_db()
+        print("\n🚀 Startup: Launching all valid bots...")
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('''SELECT id, bot_file, bot_pid FROM users 
-                     WHERE bot_file IS NOT NULL AND bot_pid IS NOT NULL 
-                     AND is_owner=0 AND is_agent=0''')
+        c.execute('''SELECT id, bot_file FROM users 
+                     WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
+                     AND is_admin=0 AND is_agent=0''')
         rows = c.fetchall()
         conn.close()
-        for user_id, bot_file, bot_pid in rows:
-            try:
-                alive = False
-                if bot_pid:
-                    try:
-                        p = psutil.Process(bot_pid)
-                        if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
-                            alive = True
-                    except psutil.NoSuchProcess:
-                        alive = False
-                    except:
-                        alive = False
-                bot_path = os.path.join(USER_BOTS_DIR, bot_file)
-                if not os.path.exists(bot_path):
-                    conn = get_db()
-                    c = conn.cursor()
-                    c.execute('UPDATE users SET bot_pid=NULL, bot_status="stopped" WHERE id=?', (user_id,))
-                    conn.commit(); conn.close()
-                    continue
-                if alive:
-                    print(f"🔗 Re-attached to running bot for user {user_id} (PID: {bot_pid})")
-                    monitor = ProcessMonitor(user_id, bot_path)
-                    monitor.process = psutil.Process(bot_pid)
-                    monitor.is_running = True
-                    monitor.start_time = datetime.now()
-                    monitor.bot_status = "🟢 ACTIVE & ONLINE"
-                    with monitors_lock:
-                        monitors[user_id] = monitor
-                else:
-                    sub = check_subscription_status(user_id)
-                    if sub['status'] == 'expired':
-                        expire_user_bot(user_id)
-                        continue
-                    print(f"🔄 Starting fresh bot for user {user_id}")
-                    monitor = ProcessMonitor(user_id, bot_path)
-                    with monitors_lock:
-                        monitors[user_id] = monitor
-                    monitor.start_process()
-            except Exception as e:
-                print(f"Re-attach error for user {user_id}: {e}")
+        count = 0
+        for user_id, bot_file in rows:
+            sub = check_subscription_status(user_id)
+            if sub['status'] == 'expired':
+                expire_user_bot(user_id)
+                continue
+            path = os.path.join(USER_BOTS_DIR, bot_file)
+            if os.path.exists(path):
+                m = ProcessMonitor(user_id, path)
+                with monitors_lock:
+                    monitors[user_id] = m
+                m.start_process()
+                count += 1
+                print(f"  ✅ Bot launched: user_id={user_id} ({bot_file})")
+        print(f"🚀 Startup complete: {count} bots launched\n")
     except Exception as e:
-        print(f"reattach_running_bots error: {e}")
+        print(f"Startup error: {e}")
 
-threading.Thread(target=reattach_running_bots, daemon=True).start()
 
-# ========== Decorators ==========
+# ============================================================
+#  DECORATORS
+# ============================================================
 def owner_required(f):
     @wraps(f)
     def d(*a, **k):
-        if not session.get('is_owner'):
+        if not session.get('is_admin'):
             flash('Owner access required', 'error')
             return redirect(url_for('owner_login'))
         return f(*a, **k)
     return d
+
 
 def agent_required(f):
     @wraps(f)
@@ -966,45 +971,20 @@ def agent_required(f):
         return f(*a, **k)
     return d
 
+
 def login_required(f):
-    """User-panel guard: only normal users. Agent/Owner are sent to their own dashboards."""
     @wraps(f)
     def d(*a, **k):
-        if session.get('is_owner'):
-            return redirect(url_for('owner_dashboard'))
-        if session.get('is_agent'):
-            return redirect(url_for('agent_dashboard'))
-        if not session.get('user_id'):
+        if not session.get('user_id') and not session.get('is_admin'):
             flash('Please login first', 'error')
             return redirect(url_for('login'))
         return f(*a, **k)
     return d
 
-# ========== Session validator (kills stale sessions → fixes random logout) ==========
-@app.before_request
-def validate_session_user():
-    if request.endpoint == 'static':
-        return
-    uid = session.get('user_id')
-    if uid is None:
-        return
-    if uid == 0:  # master owner session (no DB row)
-        session.permanent = True
-        return
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('SELECT id FROM users WHERE id=?', (uid,))
-        row = c.fetchone()
-        conn.close()
-        if not row:
-            session.clear()
-        else:
-            session.permanent = True
-    except Exception:
-        pass
 
-# ========== Shared CSS/Menu ==========
+# ============================================================
+#  COMMON CSS / SIDEBAR
+# ============================================================
 SIDEBAR_MENU = '''
 <div class="hamburger-menu">
   <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Menu"><i class="fas fa-bars"></i></button>
@@ -1013,13 +993,13 @@ SIDEBAR_MENU = '''
     <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download"><i class="fas fa-download"></i> DOWNLOAD APK</a>
     <div class="menu-divider"></div>
     <div class="menu-title">Authentication</div>
-    <a href="{{ url_for('login') }}" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
-    <a href="{{ url_for('register') }}" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
-    <a href="{{ url_for('recover') }}" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+    <a href="/login" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
+    <a href="/register" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
+    <a href="/recover" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
     <div class="menu-divider"></div>
     <div class="menu-title">Roles</div>
-    <a href="{{ url_for('owner_login') }}" class="menu-item"><i class="fas fa-shield-alt"></i> Owner Login</a>
-    <a href="{{ url_for('agent_login') }}" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+    <a href="/owner/login" class="menu-item"><i class="fas fa-crown"></i> Owner Login</a>
+    <a href="/agent/login" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
     <div class="menu-divider"></div>
     <div class="menu-title">Social</div>
     <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram</a>
@@ -1049,6 +1029,7 @@ a{color:var(--gold2)}
 .btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}
 .btn:disabled{opacity:.55;cursor:not-allowed}
 .btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}
+.btn-xs{padding:4px 9px;font-size:.68rem;border-radius:8px}
 .btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
 .btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
 .btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
@@ -1059,7 +1040,6 @@ a{color:var(--gold2)}
 .btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
 .btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
 .btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}
-.btn-owner{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
 .btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -1067,7 +1047,7 @@ a{color:var(--gold2)}
 .badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}
 .badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}
 .badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}
-.badge-owner{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}
+.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}
 .badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}
 .badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}
 .badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}
@@ -1075,6 +1055,7 @@ a{color:var(--gold2)}
 .badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}
 .badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}
 .badge-expired{background:rgba(212,42,58,.15);color:#ff5a76;border-color:rgba(212,42,58,.5)}
+.badge-owner{background:linear-gradient(135deg,rgba(245,200,66,.2),rgba(133,64,245,.2));color:#FFE28A;border-color:rgba(245,200,66,.5)}
 .input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 input[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem}
 input:focus{outline:none;border-color:var(--gold)}
@@ -1164,7 +1145,7 @@ td code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(-
 .notice-box{background:linear-gradient(135deg,#1a0a2e,#0a0a1a);border:2px solid rgba(245,200,66,.35);border-radius:22px;padding:32px 28px;max-width:480px;width:100%;text-align:center;box-shadow:0 0 60px rgba(245,200,66,.3);animation:slideUp .4s ease;position:relative}
 .notice-icon{font-size:3.5rem;margin-bottom:16px;display:block}
 .notice-title{font-size:1.4rem;font-weight:900;background:linear-gradient(120deg,#F5C842,#FF5A6A,#B388FF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:14px;letter-spacing:1px}
-.notice-msg{color:#c5c5e5;font-size:.95rem;line-height:1.7;margin-bottom:22px;padding:16px;background:rgba(0,0,0,.4);border-radius:14px;border:1px solid rgba(245,200,66,.1)}
+.notice-msg{color:#c5c5e5;font-size:.95rem;line-height:1.7;margin-bottom:22px;padding:16px;background:rgba(0,0,0,.4);border-radius:14px;border:1px solid rgba(245,200,66,.1);text-align:left}
 .notice-contact-title{font-size:.78rem;color:var(--gold2);text-transform:uppercase;letter-spacing:2px;margin-bottom:14px;font-weight:700}
 .notice-buttons{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
 .notice-btn{display:inline-flex;align-items:center;gap:8px;padding:12px 20px;border-radius:12px;text-decoration:none;font-weight:700;font-size:.85rem;color:#fff !important}
@@ -1174,49 +1155,28 @@ td code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(-
 .notice-btn-web{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400 !important}
 .notice-btn-wa-ch{background:linear-gradient(135deg,#25D366,#128C7E)}
 .notice-btn-wa-gp{background:linear-gradient(135deg,#075E54,#128C7E)}
-/* === Recent Keys Premium Style === */
-.recent-keys-wrap{background:linear-gradient(135deg,rgba(14,14,28,.95),rgba(20,15,40,.92));border:1px solid rgba(245,200,66,.18);border-radius:20px;padding:8px 4px}
-.recent-table{width:100%;border-collapse:separate;border-spacing:0 8px;font-size:.82rem}
-.recent-table thead th{background:transparent;color:#F5C842;font-size:.62rem;letter-spacing:2px;text-transform:uppercase;font-weight:800;padding:8px 14px;border:none;text-align:left}
-.recent-table tbody tr{background:rgba(0,0,0,.35);transition:all .25s ease;border-radius:14px}
-.recent-table tbody tr:hover{background:rgba(245,200,66,.06);transform:translateX(2px)}
-.recent-table tbody td{padding:14px;border:none;color:#e9e9f8;vertical-align:middle}
-.recent-table tbody tr td:first-child{border-top-left-radius:14px;border-bottom-left-radius:14px;border-left:3px solid transparent}
-.recent-table tbody tr:hover td:first-child{border-left-color:#F5C842}
-.recent-table tbody tr td:last-child{border-top-right-radius:14px;border-bottom-right-radius:14px}
-.key-pill{display:inline-block;background:rgba(0,0,0,.55);border:1px solid rgba(245,200,66,.22);color:#FFE28A;font-family:'JetBrains Mono',monospace;font-size:.72rem;font-weight:600;padding:6px 12px;border-radius:9px}
-.created-by-chip{display:inline-flex;align-items:center;gap:6px;background:rgba(59,140,255,.10);border:1px solid rgba(59,140,255,.28);color:#7ab5ff;font-size:.72rem;font-weight:700;padding:5px 11px;border-radius:20px}
-.created-by-chip.owner{background:rgba(133,64,245,.14);border-color:rgba(133,64,245,.38);color:#c9a7ff}
-.created-date{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:#94a3b8;white-space:nowrap}
-.used-by-name{font-weight:700;color:#e9e9f8;word-break:break-word;max-width:180px;display:inline-block;line-height:1.3}
-.used-by-none{color:#64748b;font-style:italic;font-size:.72rem}
-.status-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 13px;border-radius:20px;font-size:.68rem;font-weight:800;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap}
-.status-used{background:linear-gradient(135deg,rgba(59,140,255,.18),rgba(59,140,255,.08));color:#7ab5ff;border:1px solid rgba(59,140,255,.4)}
-.status-available{background:linear-gradient(135deg,rgba(245,200,66,.15),rgba(245,200,66,.05));color:#F5C842;border:1px solid rgba(245,200,66,.4)}
-.status-expired{background:linear-gradient(135deg,rgba(212,42,58,.18),rgba(212,42,58,.08));color:#ff5a76;border:1px solid rgba(212,42,58,.5)}
-.delete-key-btn{background:linear-gradient(135deg,#D42A3A,#8A1A28);border:none;color:#fff;width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:.85rem;display:inline-flex;align-items:center;justify-content:center;transition:all .25s;box-shadow:0 4px 12px rgba(212,42,58,.35)}
-.delete-key-btn:hover{transform:scale(1.1) rotate(-8deg);box-shadow:0 8px 20px rgba(212,42,58,.55);filter:brightness(1.15)}
-.recent-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid rgba(245,200,66,.1);margin-bottom:4px;flex-wrap:wrap}
-.recent-header-title{display:flex;align-items:center;gap:10px;font-size:1rem;font-weight:800;color:#F5C842;letter-spacing:.5px}
-.recent-header-title i{color:#b06ab3;font-size:1.05rem}
-.recent-actions{display:flex;gap:8px;flex-wrap:wrap}
-.recent-actions .btn{font-size:.72rem;padding:7px 14px}
-@media(max-width:768px){
-  .recent-table thead{display:none}
-  .recent-table tbody tr{display:block;padding:12px;margin-bottom:12px}
-  .recent-table tbody td{display:block;padding:6px 0;border:none}
-  .recent-table tbody td::before{content:attr(data-label);display:block;font-size:.62rem;color:#F5C842;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:4px;font-weight:700}
-  .used-by-name{max-width:100%}
-}
-.bot-ctrl-group{display:inline-flex;gap:4px}
-.bot-ctrl-btn{width:32px;height:32px;border-radius:8px;border:none;cursor:pointer;font-size:.78rem;display:inline-flex;align-items:center;justify-content:center;transition:all .2s}
-.bot-ctrl-start{background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.35)}
-.bot-ctrl-start:hover{background:#22c55e;color:#fff;transform:scale(1.1)}
-.bot-ctrl-stop{background:rgba(212,42,58,.12);color:#ff5a76;border:1px solid rgba(212,42,58,.35)}
-.bot-ctrl-stop:hover{background:#D42A3A;color:#fff;transform:scale(1.1)}
-.global-stop-banner{background:linear-gradient(135deg,rgba(212,42,58,.15),rgba(212,42,58,.05));border:1px solid rgba(212,42,58,.45);border-radius:16px;padding:16px 20px;margin-bottom:20px;display:flex;align-items:center;gap:14px;color:#ff5a76;font-weight:700;flex-wrap:wrap}
-.global-stop-banner i.pulse{font-size:1.6rem;animation:pulseIcon 1.5s infinite}
-@keyframes pulseIcon{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.15);opacity:.7}}
+
+/* Recent Keys special styling */
+.keys-table-wrap{background:linear-gradient(135deg,rgba(15,10,30,.95),rgba(10,5,20,.95));border:1px solid rgba(245,200,66,.15);border-radius:20px;padding:22px;box-shadow:0 15px 40px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.03)}
+.keys-table{width:100%;border-collapse:separate;border-spacing:0 8px}
+.keys-table thead th{color:#FFE28A;font-size:.7rem;text-transform:uppercase;letter-spacing:2px;background:transparent;padding:10px 14px;border:none;font-weight:800;text-align:left}
+.keys-table tbody tr{background:rgba(0,0,0,.35);transition:all .25s}
+.keys-table tbody tr:hover{background:rgba(245,200,66,.06);transform:translateY(-1px)}
+.keys-table tbody td{padding:14px;border:none;vertical-align:middle;color:#e9e9f8;font-size:.85rem}
+.keys-table tbody tr td:first-child{border-top-left-radius:12px;border-bottom-left-radius:12px}
+.keys-table tbody tr td:last-child{border-top-right-radius:12px;border-bottom-right-radius:12px}
+.key-code{background:linear-gradient(135deg,rgba(245,200,66,.08),rgba(133,64,245,.08));padding:6px 14px;border-radius:10px;color:#F5C842;font-family:'Courier New',monospace;font-size:.78rem;font-weight:600;letter-spacing:.5px;border:1px solid rgba(245,200,66,.2);display:inline-block;word-break:break-all;max-width:280px}
+.creator-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:8px;background:rgba(245,200,66,.08);color:#FFE28A;font-weight:700;font-size:.72rem;border:1px solid rgba(245,200,66,.2);letter-spacing:.5px;text-transform:uppercase}
+.creator-badge.agent{background:rgba(59,140,255,.08);color:#7ab5ff;border-color:rgba(59,140,255,.25)}
+.creator-badge.owner{background:linear-gradient(135deg,rgba(245,200,66,.2),rgba(133,64,245,.2));color:#FFE28A;border-color:rgba(245,200,66,.5)}
+.used-by{color:#c5c5e5;font-weight:500;font-style:italic}
+.used-by .user-icon{color:#7dd3fc;margin-right:4px}
+.duration-tag{display:inline-block;padding:3px 10px;border-radius:20px;background:rgba(74,222,128,.1);color:#4ade80;font-size:.68rem;font-weight:700;letter-spacing:.5px;border:1px solid rgba(74,222,128,.25)}
+.delete-key-btn{background:linear-gradient(135deg,#D42A3A,#8A1A28);border:none;color:#fff;width:34px;height:34px;border-radius:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .25s}
+.delete-key-btn:hover{transform:scale(1.1);box-shadow:0 6px 20px rgba(212,42,58,.5)}
+.status-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 14px;border-radius:20px;font-size:.68rem;font-weight:800;letter-spacing:.8px;text-transform:uppercase}
+.status-badge.used{background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(15,76,191,.15));color:#7ab5ff;border:1px solid rgba(59,140,255,.4)}
+.status-badge.available{background:linear-gradient(135deg,rgba(245,200,66,.15),rgba(201,154,26,.15));color:#FFE28A;border:1px solid rgba(245,200,66,.4)}
 '''
 
 SIDEBAR_JS = '''
@@ -1226,7 +1186,10 @@ document.addEventListener('click',function(e){var m=document.querySelector('.ham
 </script>
 '''
 
-# ==================== LOGIN PAGES ====================
+
+# ============================================================
+#  LOGIN PAGES
+# ============================================================
 LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Welcome Back - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 ''' + SIDEBAR_MENU + '''
 <div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Welcome Back</div><div class="auth-sub">Sign in to your account</div>
@@ -1237,7 +1200,7 @@ LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><met
   <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
 </form>
 <script>document.getElementById('loginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
-<div class="auth-links"><a href="{{ url_for('register') }}"><i class="fas fa-user-plus"></i> Don't have an account? Register</a><a href="{{ url_for('recover') }}"><i class="fas fa-key"></i> Forgot Password?</a></div></div></div>
+<div class="auth-links"><a href="/register"><i class="fas fa-user-plus"></i> Don't have an account? Register</a><a href="/recover"><i class="fas fa-key"></i> Forgot Password?</a></div></div></div>
 ''' + SIDEBAR_JS + '''</body></html>'''
 
 REGISTER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Create Account - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
@@ -1252,7 +1215,7 @@ REGISTER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><
   <button type="submit" class="btn btn-gold btn-block" id="registerBtn"><i class="fas fa-paper-plane"></i> Register</button>
 </form>
 <script>document.getElementById('registerForm').addEventListener('submit',function(){var b=document.getElementById('registerBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});</script>
-<div class="auth-links"><a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Already have an account? Login</a></div></div></div>
+<div class="auth-links"><a href="/login"><i class="fas fa-arrow-left"></i> Already have an account? Login</a></div></div></div>
 ''' + SIDEBAR_JS + '''</body></html>'''
 
 RECOVER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Recover Password - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
@@ -1265,12 +1228,12 @@ RECOVER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><m
   <button type="submit" class="btn btn-gold btn-block" id="recoverBtn"><i class="fas fa-paper-plane"></i> Recover</button>
 </form>
 <script>document.getElementById('recoverForm').addEventListener('submit',function(){var b=document.getElementById('recoverBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});</script>
-<div class="auth-links"><a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Back to Login</a></div></div></div>
+<div class="auth-links"><a href="/login"><i class="fas fa-arrow-left"></i> Back to Login</a></div></div></div>
 ''' + SIDEBAR_JS + '''</body></html>'''
 
 OWNER_LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Owner Access - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 ''' + SIDEBAR_MENU + '''
-<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Owner Access</div><div class="auth-sub">Secure owner login</div>
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">👑 Owner Access</div><div class="auth-sub">Master control panel</div>
 {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
 <form method="POST" id="ownerLoginForm">
   <div class="field"><i class="fas fa-crown"></i><input type="text" name="username" placeholder="Owner Username" required/></div>
@@ -1278,7 +1241,7 @@ OWNER_LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"
   <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
 </form>
 <script>document.getElementById('ownerLoginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
-<div class="auth-links"><a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Back to Main</a></div></div></div>
+<div class="auth-links"><a href="/login"><i class="fas fa-arrow-left"></i> Back to Main</a></div></div></div>
 ''' + SIDEBAR_JS + '''</body></html>'''
 
 AGENT_LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Agent Login - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
@@ -1291,50 +1254,38 @@ AGENT_LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"
   <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
 </form>
 <script>document.getElementById('agentLoginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
-<div class="auth-links"><a href="{{ url_for('login') }}"><i class="fas fa-arrow-left"></i> Back to Main</a></div></div></div>
+<div class="auth-links"><a href="/login"><i class="fas fa-arrow-left"></i> Back to Main</a></div></div></div>
 ''' + SIDEBAR_JS + '''</body></html>'''
 
-# ==================== AGENT DASHBOARD (own keys, no delete) ====================
+
+# ============================================================
+#  AGENT DASHBOARD
+# ============================================================
 AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Agent Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 <div class="container">
   <div class="card header">
     <h1><i class="fas fa-user-tie"></i> Agent Dashboard</h1>
     <div class="flex">
       <span class="welcome-text">Welcome, <strong>{{ session.username }}</strong></span>
-      <a href="{{ url_for('agent_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+      <a href="/agent/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
     </div>
   </div>
-
-  {% if can_manage_db %}
-  <div class="card">
-    <div class="card-title"><i class="fas fa-database"></i> Database Management <span style="color:var(--green);font-size:.72rem;margin-left:8px;">(✓ Approved)</span></div>
-    <div class="flex">
-      <a href="{{ url_for('agent_download_db') }}" class="btn btn-primary"><i class="fas fa-download"></i> Download DB</a>
-      <form method="POST" action="{{ url_for('agent_upload_db') }}" enctype="multipart/form-data" class="upload-form">
-        <input type="file" name="db_file" accept=".db" required/>
-        <button type="submit" class="btn btn-warning" onclick="return confirm('Replace DB?');"><i class="fas fa-upload"></i> Upload & Replace</button>
-      </form>
-    </div>
-  </div>
-  {% else %}
-  <div class="card" style="opacity:.55;">
-    <div class="card-title"><i class="fas fa-lock"></i> DB Management <span style="color:var(--red2);font-size:.72rem;margin-left:8px;">(🔒 Locked)</span></div>
-    <div style="padding:16px;background:rgba(212,42,58,.08);border-radius:12px;color:var(--red2);font-size:.85rem;"><i class="fas fa-info-circle"></i> Owner hasn't granted DB access.</div>
-  </div>
-  {% endif %}
 
   <div class="card">
     <div class="card-title"><i class="fas fa-chart-simple"></i> Stats</div>
-    <p>Keys Created: <span class="stat-box">{{ key_count }}</span>{% if key_limit >= 0 %} / <span class="stat-box" style="background:rgba(212,42,58,.1);color:#ff5a76;">{{ key_limit }}</span>{% else %} / <span class="stat-box" style="background:rgba(74,222,128,.1);color:#4ade80;">∞</span>{% endif %}</p>
-    <p style="margin-top:8px;">My Customers: <span class="stat-box" style="background:rgba(59,140,255,.1);color:#7ab5ff;">{{ my_users|length }}</span></p>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Keys Created</div><div class="stat-value">{{ key_count }}</div></div>
+      <div class="stat-card"><div class="stat-label">My Customers</div><div class="stat-value">{{ my_users|length }}</div></div>
+      <div class="stat-card"><div class="stat-label">Key Limit</div><div class="stat-value">{% if key_limit >= 0 %}{{ key_limit }}{% else %}∞{% endif %}</div></div>
+    </div>
   </div>
 
   <div class="card">
-    <div class="card-title"><i class="fas fa-key"></i> Generate Key</div>
+    <div class="card-title"><i class="fas fa-key"></i> Generate Registration Key</div>
     {% if key_limit >= 0 and key_count >= key_limit %}
     <div style="padding:14px;background:rgba(212,42,58,.1);border-radius:12px;color:var(--red2);"><i class="fas fa-exclamation-triangle"></i> Max {{ key_limit }} keys.</div>
     {% else %}
-    <form method="POST" action="{{ url_for('agent_create_key') }}" class="input-group">
+    <form method="POST" action="/agent/create_key" class="input-group">
       <label>Days (0=Permanent):</label>
       <input type="number" name="days_valid" value="30" min="0" style="width:110px;"/>
       <button type="submit" class="btn btn-gold"><i class="fas fa-plus-circle"></i> Generate</button>
@@ -1348,7 +1299,7 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
 
   <div class="card">
     <div class="card-title"><i class="fas fa-users"></i> My Customers ({{ my_users|length }})</div>
-    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> আপনার তৈরি key দিয়ে যারা register হয়েছে, শুধু তাদের দেখতে এবং মেয়াদ বাড়াতে পারবেন।</p>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> আপনার তৈরি key দিয়ে যারা register হয়েছে। Renew / Extend করতে পারবেন।</p>
     <div class="table-wrapper">
       <table>
         <thead><tr><th>ID</th><th>Username</th><th>Bot UID</th><th>Status</th><th>Subscription</th><th style="text-align:right;">Renew</th></tr></thead>
@@ -1361,7 +1312,7 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             <td>{% if u.sub_status == 'expired' %}<span class="badge badge-expired">Expired</span>{% elif u.sub_status == 'unlimited' %}<span class="badge badge-permanent">∞</span>{% else %}<span class="badge badge-active">{{ u.sub_days }}d</span>{% endif %}</td>
             <td>{% if u.sub_expiry %}<small>{{ u.sub_expiry }}</small>{% else %}—{% endif %}</td>
             <td>
-              <form method="POST" action="{{ url_for('agent_renew_subscription', user_id=u.id) }}" style="display:flex;gap:4px;justify-content:flex-end;">
+              <form method="POST" action="/agent/renew_subscription/{{ u.id }}" style="display:flex;gap:4px;justify-content:flex-end;">
                 <input type="number" name="days" value="30" min="1" style="width:70px;padding:4px;font-size:.72rem;"/>
                 <select name="mode" style="padding:4px;font-size:.72rem;border-radius:6px;background:#000;color:#fff;border:1px solid rgba(245,200,66,.2);">
                   <option value="extend">Extend</option>
@@ -1371,105 +1322,74 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
               </form>
             </td>
           </tr>
-          {% else %}<tr class="empty-row"><td colspan="6">আপনার কোনো কাস্টমার নেই।</td></tr>{% endfor %}
+          {% else %}<tr class="empty-row"><td colspan="6">No customers yet.</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>
   </div>
 
-  <!-- ============ RECENT KEYS — Agent view only (no delete) ============ -->
-  <div class="card" style="padding:0;overflow:hidden;">
-    <div class="recent-header">
-      <div class="recent-header-title">
-        <i class="fas fa-key"></i> My Recent Keys ({{ keys|length }})
-      </div>
-      <div class="recent-actions">
-        <span style="font-size:.7rem;color:var(--muted);letter-spacing:.5px;"><i class="fas fa-eye"></i> View Only</span>
-      </div>
-    </div>
-    <div class="recent-keys-wrap" style="margin:0;border:none;box-shadow:none;background:transparent;padding:8px 14px 16px;">
-      <div class="table-wrapper" style="margin:0;">
-        <table class="recent-table">
-          <thead>
-            <tr>
-              <th>Key</th>
-              <th>Created</th>
-              <th>Used By</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for key in keys %}
-            <tr>
-              <td data-label="Key"><span class="key-pill">{{ key.key }}</span></td>
-              <td data-label="Created"><span class="created-date">{{ key.created_at[:10] if key.created_at else '—' }}</span></td>
-              <td data-label="Used By">
-                {% if key.used_by %}
-                  <span class="used-by-name">{{ key.used_by }}</span>
-                {% else %}
-                  <span class="used-by-none">Not used yet</span>
-                {% endif %}
-              </td>
-              <td data-label="Status">
-                {% if key.is_used %}
-                  <span class="status-badge status-used"><i class="fas fa-check-circle"></i> Used</span>
-                {% elif key.expiry_date and key.expiry_date < now_iso %}
-                  <span class="status-badge status-expired"><i class="fas fa-times-circle"></i> Expired</span>
-                {% else %}
-                  <span class="status-badge status-available"><i class="fas fa-clock"></i> Available</span>
-                {% endif %}
-              </td>
-            </tr>
-            {% else %}
-            <tr><td colspan="4" style="text-align:center;padding:36px;color:var(--muted);font-style:italic;">আপনি এখনো কোনো key তৈরি করেননি</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key" style="color:var(--purple);"></i> Recent Keys (Mine)</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>KEY</th>
+            <th>CREATED</th>
+            <th>DURATION</th>
+            <th>USED BY</th>
+            <th>STATUS</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for key in keys %}
+          <tr>
+            <td><span class="key-code">{{ key.key }}</span></td>
+            <td style="color:var(--muted);font-size:.78rem;">{{ key.created_at[:16] if key.created_at else '—' }}</td>
+            <td>
+              {% if key.duration_days == 0 %}
+                <span class="duration-tag" style="background:rgba(74,222,128,.15);color:#4ade80;border-color:rgba(74,222,128,.4);">∞ Permanent</span>
+              {% else %}
+                <span class="duration-tag">{{ key.duration_days }}d</span>
+              {% endif %}
+            </td>
+            <td>{% if key.used_by %}<span class="used-by"><i class="fas fa-user user-icon"></i>{{ key.used_by }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}</td>
+            <td>{% if key.is_used %}<span class="status-badge used"><i class="fas fa-check-circle"></i> USED</span>{% else %}<span class="status-badge available"><i class="fas fa-clock"></i> AVAILABLE</span>{% endif %}</td>
+          </tr>
+          {% else %}<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:30px;">No keys yet. Generate one above.</td></tr>{% endfor %}
+        </tbody>
+      </table>
     </div>
   </div>
 
-  <a href="{{ url_for('login') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
+  <a href="/login" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
 </div></body></html>'''
 
-# ==================== OWNER DASHBOARD ====================
+
+# ============================================================
+#  OWNER DASHBOARD
+# ============================================================
 OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Owner Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 <div class="container">
   <div class="card header">
     <h1><i class="fas fa-crown"></i> Owner Dashboard</h1>
     <div class="flex">
-      <form method="POST" action="{{ url_for('owner_reset_all_bots') }}" onsubmit="return confirm('Reset all bots?');"><button type="submit" class="btn btn-reset btn-sm"><i class="fas fa-power-off"></i> Reset All</button></form>
+      <form method="POST" action="/owner/reset_all_bots" onsubmit="return confirm('Reset all bots?');" style="display:inline;"><button type="submit" class="btn btn-reset btn-sm"><i class="fas fa-power-off"></i> Reset All</button></form>
       {% if global_stop %}
-        <form method="POST" action="{{ url_for('owner_start_all_bots') }}"><button type="submit" class="btn btn-success btn-sm"><i class="fas fa-play"></i> Resume All</button></form>
+        <form method="POST" action="/owner/start_all_bots" style="display:inline;"><button type="submit" class="btn btn-success btn-sm"><i class="fas fa-play"></i> Resume All</button></form>
       {% else %}
-        <form method="POST" action="{{ url_for('owner_stop_all_bots') }}" onsubmit="return confirm('Stop all bots globally?');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-hand-paper"></i> Stop All (Lock)</button></form>
+        <form method="POST" action="/owner/stop_all_bots" onsubmit="return confirm('Stop all bots globally?');" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-hand-paper"></i> Stop All (Lock)</button></form>
       {% endif %}
       <span class="welcome-text">Welcome, <strong>{{ session.username }}</strong></span>
-      <a href="{{ url_for('owner_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
     </div>
   </div>
 
   {% if global_stop %}
-  <div class="global-stop-banner">
-    <i class="fas fa-exclamation-triangle pulse"></i>
-    <div style="flex:1;min-width:200px;">
-      <div style="font-size:1.05rem;color:#ff5a76;">🛑 GLOBAL BOT STOP চালু আছে!</div>
-      <div style="font-size:.78rem;color:var(--muted);font-weight:400;margin-top:4px;">সব user-এর bot বন্ধ। তবে নিচের table থেকে নির্দিষ্ট bot-এ ▶️ চাপলে চালু হবে।</div>
-    </div>
+  <div class="card" style="background:rgba(212,42,58,.1);border-color:rgba(212,42,58,.4);">
+    <div style="display:flex;align-items:center;gap:12px;color:var(--red2);font-weight:700;"><i class="fas fa-exclamation-triangle" style="font-size:1.5rem;"></i> <span>Global Bot Stop চালু! সব user bot বন্ধ (force-active বাদে)।</span></div>
   </div>
   {% endif %}
-
-  <div class="card">
-    <div class="card-title"><i class="fas fa-bullhorn"></i> Global Notice Settings</div>
-    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> User panel-এ button আকারে দেখানো হবে।</p>
-    <form method="POST" action="{{ url_for('owner_set_global_notice') }}">
-      <textarea name="notice_text" rows="3">{{ global_notice }}</textarea>
-      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
-        <button type="submit" class="btn btn-gold btn-sm"><i class="fas fa-save"></i> Save Notice</button>
-        <a href="{{ url_for('owner_preview_global_notice') }}" target="_blank" class="btn btn-info btn-sm"><i class="fas fa-eye"></i> Preview</a>
-      </div>
-    </form>
-  </div>
 
   <div class="card">
     <div class="card-title"><i class="fas fa-server"></i> Server Resources</div>
@@ -1481,35 +1401,72 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
   </div>
 
   <div class="card">
-    <div class="card-title"><i class="fas fa-folder-open"></i> File Manager</div>
-    <a href="{{ url_for('owner_file_manager') }}" class="btn btn-gold"><i class="fas fa-folder"></i> Open File Manager</a>
-  </div>
-
-  <div class="card">
-    <div class="card-title"><i class="fas fa-upload"></i> Upload mahir.py</div>
-    <form method="POST" action="{{ url_for('owner_upload_mahir') }}" enctype="multipart/form-data" class="upload-form" id="uploadMahirForm">
-      <input type="file" name="mahir_file" accept=".py" required style="flex:1;min-width:200px;" id="mahirFileInput"/>
-      <button type="submit" class="btn btn-warning" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload & Auto-Reset</button>
+    <div class="card-title"><i class="fas fa-bullhorn"></i> Global Notice Settings</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> User panel-এ button আকারে দেখানো হবে (system maintenance/blocked এর সময়)।</p>
+    <form method="POST" action="/owner/set_global_notice">
+      <textarea name="notice_text" rows="3">{{ global_notice }}</textarea>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="submit" class="btn btn-gold btn-sm"><i class="fas fa-save"></i> Save Notice</button>
+        <a href="/owner/preview_global_notice" target="_blank" class="btn btn-info btn-sm"><i class="fas fa-eye"></i> Preview</a>
+      </div>
     </form>
   </div>
 
   <div class="card">
-    <div class="card-title"><i class="fas fa-database"></i> Upload users.db (Auto-create all bots)</div>
-    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> DB upload → সব bot auto-create + DB থেকে subscription check হবে।</p>
-    <form method="POST" action="{{ url_for('owner_upload_users_db') }}" enctype="multipart/form-data" class="upload-form" id="uploadDbForm">
-      <input type="file" name="db_file" accept=".db" required style="flex:1;min-width:200px;"/>
-      <button type="submit" class="btn btn-warning" id="uploadDbBtn" onclick="return confirm('Replace DB and recreate all bots?');"><i class="fas fa-upload"></i> Upload & Create Bots</button>
+    <div class="card-title"><i class="fas fa-bell"></i> User Login Notice (Popup)</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;">
+      <i class="fas fa-info-circle"></i> এই notice enable করলে <b style="color:var(--gold2);">প্রত্যেক user</b> তার panel-এ login করলে এই popup দেখতে পাবে।
+    </p>
+    <form method="POST" action="/owner/set_user_login_notice">
+      <div class="flex" style="margin-bottom:12px;">
+        <label style="color:var(--gold2);font-weight:600;">Status:</label>
+        {% if login_notice_enabled %}
+          <span class="badge badge-running">🟢 ENABLED</span>
+        {% else %}
+          <span class="badge badge-stopped">🔴 DISABLED</span>
+        {% endif %}
+      </div>
+      <textarea name="notice_text" rows="4" placeholder="Type notice text here...">{{ login_notice_text }}</textarea>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="submit" name="action" value="save" class="btn btn-gold btn-sm"><i class="fas fa-save"></i> Save</button>
+        {% if login_notice_enabled %}
+          <button type="submit" name="action" value="disable" class="btn btn-danger btn-sm"><i class="fas fa-toggle-off"></i> Disable Notice</button>
+        {% else %}
+          <button type="submit" name="action" value="enable" class="btn btn-success btn-sm"><i class="fas fa-toggle-on"></i> Enable Notice</button>
+        {% endif %}
+      </div>
     </form>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-upload"></i> Owner Actions</div>
+    <div class="flex">
+      <a href="/owner/files" class="btn btn-gold"><i class="fas fa-folder"></i> File Manager</a>
+    </div>
+    <div style="margin-top:14px;">
+      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload mahir.py</div>
+      <form method="POST" action="/owner/upload_mahir" enctype="multipart/form-data" class="upload-form" id="uploadMahirForm">
+        <input type="file" name="mahir_file" accept=".py" required style="flex:1;min-width:200px;" id="mahirFileInput"/>
+        <button type="submit" class="btn btn-warning btn-sm" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload & Auto-Reset</button>
+      </form>
+    </div>
+    <div style="margin-top:14px;">
+      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload users.db (auto-create bots)</div>
+      <form method="POST" action="/owner/upload_users_db" enctype="multipart/form-data" class="upload-form" id="uploadDbForm">
+        <input type="file" name="db_file" accept=".db" required style="flex:1;min-width:200px;"/>
+        <button type="submit" class="btn btn-warning btn-sm" id="uploadDbBtn" onclick="return confirm('Replace DB and recreate all bots?');"><i class="fas fa-upload"></i> Upload DB</button>
+      </form>
+    </div>
     {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
   </div>
 
   <div class="card">
     <div class="card-title"><i class="fas fa-user-tie"></i> Agent Management</div>
-    <form method="POST" action="{{ url_for('owner_create_agent') }}" class="flex" id="createAgentForm">
+    <form method="POST" action="/owner/create_agent" class="flex" id="createAgentForm">
       <input type="text" name="username" placeholder="Username" required class="flex-grow"/>
       <input type="email" name="email" placeholder="Email" required class="flex-grow"/>
       <input type="password" name="password" placeholder="Password" required class="flex-grow"/>
-      <button type="submit" class="btn btn-success" id="createAgentBtn"><i class="fas fa-user-plus"></i> Create</button>
+      <button type="submit" class="btn btn-success btn-sm" id="createAgentBtn"><i class="fas fa-user-plus"></i> Create</button>
     </form>
     <div class="table-wrapper">
       <table>
@@ -1521,23 +1478,23 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             <td><strong>{{ agent.username }}</strong></td>
             <td>{{ agent.email or '-' }}</td>
             <td>
-              <span class="badge badge-owner">{{ agent.key_count }}{% if agent.key_limit >= 0 %} / {{ agent.key_limit }}{% else %} / ∞{% endif %}</span>
-              <form method="POST" action="{{ url_for('owner_set_key_limit', agent_id=agent.id) }}" style="margin-top:4px;display:flex;gap:4px;">
+              <span class="badge badge-admin">{{ agent.key_count }}{% if agent.key_limit >= 0 %} / {{ agent.key_limit }}{% else %} / ∞{% endif %}</span>
+              <form method="POST" action="/owner/set_key_limit/{{ agent.id }}" style="margin-top:4px;display:flex;gap:4px;">
                 <input type="number" name="key_limit" value="{{ agent.key_limit }}" min="-1" style="width:70px;padding:4px;font-size:.72rem;"/>
-                <button type="submit" class="btn btn-gold btn-sm" style="padding:4px 8px;font-size:.65rem;"><i class="fas fa-save"></i></button>
+                <button type="submit" class="btn btn-gold btn-xs"><i class="fas fa-save"></i></button>
               </form>
             </td>
             <td>
               {% if agent.can_manage_db %}<span class="badge badge-running">ON</span>{% else %}<span class="badge badge-stopped">OFF</span>{% endif %}
-              <form method="POST" action="{{ url_for('owner_toggle_db_access', agent_id=agent.id) }}" style="margin-top:4px;">
-                <button type="submit" class="btn btn-sm {% if agent.can_manage_db %}btn-danger{% else %}btn-success{% endif %}" style="padding:4px 8px;font-size:.65rem;"><i class="fas fa-toggle-{% if agent.can_manage_db %}on{% else %}off{% endif %}"></i></button>
+              <form method="POST" action="/owner/toggle_db_access/{{ agent.id }}" style="margin-top:4px;">
+                <button type="submit" class="btn btn-xs {% if agent.can_manage_db %}btn-danger{% else %}btn-success{% endif %}"><i class="fas fa-toggle-{% if agent.can_manage_db %}on{% else %}off{% endif %}"></i></button>
               </form>
             </td>
             <td>
               <div class="td-actions">
-                <a href="{{ url_for('owner_user_details', user_id=agent.id) }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i></a>
-                <a href="{{ url_for('owner_login_as', user_id=agent.id) }}" class="btn btn-gold btn-sm" onclick="return confirm('Login as {{ agent.username }}?');"><i class="fas fa-sign-in-alt"></i></a>
-                <form method="POST" action="{{ url_for('owner_delete_agent', agent_id=agent.id) }}" onsubmit="return confirm('Delete?');"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form>
+                <a href="/owner/login_as/{{ agent.id }}" class="btn btn-warning btn-sm" title="Login as this user"><i class="fas fa-sign-in-alt"></i></a>
+                <a href="/owner/user_details/{{ agent.id }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i></a>
+                <form method="POST" action="/owner/delete_agent/{{ agent.id }}" onsubmit="return confirm('Delete?');" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form>
               </div>
             </td>
           </tr>
@@ -1548,8 +1505,8 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
   </div>
 
   <div class="card">
-    <div class="card-title"><i class="fas fa-key"></i> Generate Key</div>
-    <form method="POST" action="{{ url_for('owner_create_key') }}" class="flex">
+    <div class="card-title"><i class="fas fa-key"></i> Generate Key (Owner)</div>
+    <form method="POST" action="/owner/create_key" class="flex">
       <div class="input-group"><label>Days (0=Permanent):</label><input type="number" name="days_valid" value="30" min="0" style="width:110px;"/></div>
       <button type="submit" class="btn btn-gold"><i class="fas fa-plus-circle"></i> Generate</button>
     </form>
@@ -1568,28 +1525,19 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             <td>{{ user.email or '-' }}</td>
             <td>{% if user.is_agent %}<span class="badge badge-agent">AGENT</span>{% elif user.bot_status == 'running' %}<span class="badge badge-running">Running</span>{% elif user.bot_status == 'expired' %}<span class="badge badge-expired">Expired</span>{% elif user.bot_status == 'stopped' %}<span class="badge badge-stopped">Stopped</span>{% else %}<span class="badge badge-unused">{{ user.bot_status or 'Not Configured' }}</span>{% endif %}</td>
             <td>{% if user.sub_status == 'unlimited' %}<span class="badge badge-permanent">∞</span>{% elif user.sub_status == 'expired' %}<span class="badge badge-expired">Expired</span>{% else %}<span style="color:var(--green);">{{ user.sub_days }}d</span>{% endif %}</td>
-            <td>{% if user.is_owner %}<span class="badge badge-owner">Owner</span>{% elif user.is_agent %}<span class="badge badge-agent">Agent</span>{% else %}<span class="badge badge-user">User</span>{% endif %}</td>
+            <td>{% if user.is_admin %}<span class="badge badge-owner">OWNER</span>{% elif user.is_agent %}<span class="badge badge-agent">Agent</span>{% else %}<span class="badge badge-user">User</span>{% endif %}</td>
             <td>
-              <div class="td-actions" style="align-items:center;flex-wrap:nowrap;gap:5px;">
-                <a href="{{ url_for('owner_user_details', user_id=user.id) }}" class="btn btn-info btn-sm" title="Details" style="width:32px;height:32px;padding:0;"><i class="fas fa-eye"></i></a>
-                {% if not user.is_owner %}
-                <a href="{{ url_for('owner_login_as', user_id=user.id) }}" class="btn btn-gold btn-sm" title="Login as user" onclick="return confirm('Login as {{ user.username }}?');" style="width:32px;height:32px;padding:0;"><i class="fas fa-sign-in-alt"></i></a>
-                {% endif %}
-                {% if not user.is_owner and not user.is_agent %}
-                  <div class="bot-ctrl-group">
-                    <form method="POST" action="{{ url_for('owner_start_single_bot', user_id=user.id) }}" style="display:inline;">
-                      <button type="submit" class="bot-ctrl-btn bot-ctrl-start" title="Start this bot (works even if global stop)"><i class="fas fa-play"></i></button>
-                    </form>
-                    <form method="POST" action="{{ url_for('owner_stop_single_bot', user_id=user.id) }}" style="display:inline;">
-                      <button type="submit" class="bot-ctrl-btn bot-ctrl-stop" title="Stop this bot"><i class="fas fa-stop"></i></button>
-                    </form>
-                  </div>
-                  {% if user.bot_disabled_by_owner %}
-                  <form method="POST" action="{{ url_for('owner_toggle_user_bot', user_id=user.id) }}" style="display:inline;"><button type="submit" class="btn btn-success btn-sm" title="Enable user bot" style="width:32px;height:32px;padding:0;"><i class="fas fa-check"></i></button></form>
+              <div class="td-actions">
+                <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm" title="Login as user"><i class="fas fa-sign-in-alt"></i></a>
+                <a href="/owner/user_details/{{ user.id }}" class="btn btn-info btn-sm" title="Details"><i class="fas fa-eye"></i></a>
+                {% if not user.is_admin and not user.is_agent %}
+                  {% if user.bot_disabled_by_admin %}
+                  <form method="POST" action="/owner/toggle_user_bot/{{ user.id }}" style="display:inline;"><button type="submit" class="btn btn-success btn-sm" title="Enable bot"><i class="fas fa-play"></i></button></form>
                   {% else %}
-                  <button type="button" class="btn btn-warning btn-sm" onclick="openDisableModal({{ user.id }}, '{{ user.username }}')" title="Disable with reason" style="width:32px;height:32px;padding:0;"><i class="fas fa-hand-paper"></i></button>
+                  <button type="button" class="btn btn-warning btn-sm" onclick="openDisableModal({{ user.id }}, '{{ user.username }}')" title="Disable bot"><i class="fas fa-hand-paper"></i></button>
                   {% endif %}
-                  <form method="POST" action="{{ url_for('owner_delete_user', user_id=user.id) }}" onsubmit="return confirm('Delete?');" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm" style="width:32px;height:32px;padding:0;"><i class="fas fa-trash"></i></button></form>
+                  <form method="POST" action="/owner/force_start_bot/{{ user.id }}" style="display:inline;"><button type="submit" class="btn btn-gold btn-sm" title="Force start (override global stop)"><i class="fas fa-bolt"></i></button></form>
+                  <form method="POST" action="/owner/delete_user/{{ user.id }}" onsubmit="return confirm('Delete?');" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm" title="Delete"><i class="fas fa-trash"></i></button></form>
                 {% endif %}
               </div>
             </td>
@@ -1600,49 +1548,55 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     </div>
   </div>
 
-  <div class="card" style="padding:0;overflow:hidden;">
-    <div class="recent-header">
-      <div class="recent-header-title"><i class="fas fa-key"></i> Recent Keys (All Users)</div>
-      <div class="recent-actions"><a href="{{ url_for('owner_all_keys') }}" class="btn btn-gold btn-sm"><i class="fas fa-list"></i> View All</a></div>
-    </div>
-    <div class="recent-keys-wrap" style="margin:0;border:none;box-shadow:none;background:transparent;padding:8px 14px 16px;">
-      <div class="table-wrapper" style="margin:0;">
-        <table class="recent-table">
-          <thead><tr><th>Key</th><th>Created By</th><th>Created</th><th>Used By</th><th>Status</th><th style="text-align:right;">Action</th></tr></thead>
-          <tbody>
-            {% for key in keys %}
-            <tr>
-              <td data-label="Key"><span class="key-pill">{{ key.key }}</span></td>
-              <td data-label="Created By">
-                {% if key.created_by == 'owner' or key.created_by == 'MAHIR TCP' %}
-                  <span class="created-by-chip owner"><i class="fas fa-crown"></i> {{ key.created_by }}</span>
-                {% else %}
-                  <span class="created-by-chip"><i class="fas fa-user-tie"></i> {{ key.created_by }}</span>
-                {% endif %}
-              </td>
-              <td data-label="Created"><span class="created-date">{{ key.created_at[:10] if key.created_at else '—' }}</span></td>
-              <td data-label="Used By">
-                {% if key.used_by %}<span class="used-by-name">{{ key.used_by }}</span>{% else %}<span class="used-by-none">Not used yet</span>{% endif %}
-              </td>
-              <td data-label="Status">
-                {% if key.is_used %}
-                  <span class="status-badge status-used"><i class="fas fa-check-circle"></i> Used</span>
-                {% else %}
-                  <span class="status-badge status-available"><i class="fas fa-clock"></i> Available</span>
-                {% endif %}
-              </td>
-              <td data-label="Action" style="text-align:right;">
-                <form method="POST" action="{{ url_for('owner_delete_key', key_id=key.id) }}" onsubmit="return confirm('Delete key & users?');" style="display:inline;"><button type="submit" class="delete-key-btn" title="Delete key"><i class="fas fa-trash"></i></button></form>
-              </td>
-            </tr>
-            {% else %}<tr><td colspan="6" style="text-align:center;padding:36px;color:var(--muted);font-style:italic;">No keys yet</td></tr>{% endfor %}
-          </tbody>
-        </table>
-      </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key" style="color:var(--purple);"></i> Recent Keys (All)</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>KEY</th>
+            <th>CREATED BY</th>
+            <th>CREATED</th>
+            <th>DURATION</th>
+            <th>USED BY</th>
+            <th>STATUS</th>
+            <th style="text-align:right;">ACTION</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for key in keys %}
+          <tr>
+            <td><span class="key-code">{{ key.key }}</span></td>
+            <td>
+              {% if key.created_by == 'MAHIR TCP' or key.created_by == 'admin' or key.created_by == 'OWNER' %}
+                <span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+              {% else %}
+                <span class="creator-badge agent"><i class="fas fa-user-tie"></i> {{ key.created_by or '—' }}</span>
+              {% endif %}
+            </td>
+            <td style="color:var(--muted);font-size:.78rem;">{{ key.created_at[:16] if key.created_at else '—' }}</td>
+            <td>
+              {% if key.duration_days == 0 %}
+                <span class="duration-tag" style="background:rgba(74,222,128,.15);color:#4ade80;border-color:rgba(74,222,128,.4);">∞ Permanent</span>
+              {% else %}
+                <span class="duration-tag">{{ key.duration_days }}d</span>
+              {% endif %}
+            </td>
+            <td>{% if key.used_by %}<span class="used-by"><i class="fas fa-user user-icon"></i>{{ key.used_by }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}</td>
+            <td>{% if key.is_used %}<span class="status-badge used"><i class="fas fa-check-circle"></i> USED</span>{% else %}<span class="status-badge available"><i class="fas fa-clock"></i> AVAILABLE</span>{% endif %}</td>
+            <td style="text-align:right;">
+              <form method="POST" action="/owner/delete_key/{{ key.id }}" onsubmit="return confirm('Delete this key and associated users?');" style="display:inline;">
+                <button type="submit" class="delete-key-btn" title="Delete"><i class="fas fa-trash"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% else %}<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No keys yet.</td></tr>{% endfor %}
+        </tbody>
+      </table>
     </div>
   </div>
 
-  <a href="{{ url_for('logout') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Main Site</a>
+  <a href="/logout" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
 </div>
 
 <div class="modal-overlay" id="disableModal">
@@ -1677,8 +1631,11 @@ document.getElementById('createAgentForm').addEventListener('submit',function(){
 </script>
 </body></html>'''
 
-# ==================== USER DETAILS ====================
-USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>User Details - MAHIR OWNER</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
+
+# ============================================================
+#  USER DETAILS (Owner view)
+# ============================================================
+USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>User Details - OWNER PANEL</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:12px}
 .detail-item{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:14px;padding:14px 16px}
 .detail-label{font-size:.65rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--gold2);font-weight:700;margin-bottom:6px}
@@ -1693,18 +1650,18 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   <div class="card header">
     <h1><i class="fas fa-user-circle"></i> {{ user.username }}</h1>
     <div class="flex">
-      {% if not user.is_owner %}
-      <a href="{{ url_for('owner_login_as', user_id=user.id) }}" class="btn btn-gold btn-sm" onclick="return confirm('Login as {{ user.username }}?');"><i class="fas fa-sign-in-alt"></i> Login As</a>
+      {% if not user.is_admin %}
+      <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm"><i class="fas fa-sign-in-alt"></i> Login as this user</a>
       {% endif %}
-      <a href="{{ url_for('owner_dashboard') }}" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
-      <a href="{{ url_for('owner_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+      <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
     </div>
   </div>
 
   <div class="card">
     <div class="card-title"><i class="fas fa-id-card"></i> Account Information</div>
     <div style="text-align:center;margin-bottom:16px;">
-      {% if user.bot_disabled_by_owner %}<span class="live-badge live-offline"><i class="fas fa-hand-paper"></i> OWNER DISABLED</span>
+      {% if user.bot_disabled_by_admin %}<span class="live-badge live-offline"><i class="fas fa-hand-paper"></i> OWNER DISABLED</span>
       {% elif user.sub_status == 'expired' %}<span class="live-badge live-offline"><i class="fas fa-clock"></i> EXPIRED</span>
       {% elif live and live.is_running %}<span class="live-badge live-online"><i class="fas fa-circle"></i> LIVE · RUNNING</span>
       {% else %}<span class="live-badge live-offline"><i class="fas fa-circle"></i> OFFLINE</span>{% endif %}
@@ -1714,29 +1671,29 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
       <div class="detail-item"><div class="detail-label">Username</div><div class="detail-value big">{{ user.username }}<button class="copy-btn" onclick="copyT('{{ user.username }}')">Copy</button></div></div>
       <div class="detail-item"><div class="detail-label">Email</div><div class="detail-value">{{ user.email }}</div></div>
       <div class="detail-item"><div class="detail-label">Password</div><div class="detail-value">{{ user.password }}<button class="copy-btn" onclick="copyT('{{ user.password }}')">Copy</button></div></div>
-      <div class="detail-item"><div class="detail-label">Role</div><div class="detail-value">{% if user.is_owner %}OWNER{% elif user.is_agent %}AGENT{% else %}USER{% endif %}</div></div>
+      <div class="detail-item"><div class="detail-label">Role</div><div class="detail-value">{% if user.is_admin %}OWNER{% elif user.is_agent %}AGENT{% else %}USER{% endif %}</div></div>
       <div class="detail-item"><div class="detail-label">Created</div><div class="detail-value">{{ user.created_at }}</div></div>
       <div class="detail-item"><div class="detail-label">Subscription</div><div class="detail-value">{% if user.sub_status == 'unlimited' %}<span style="color:#4ade80;">∞ Unlimited</span>{% elif user.sub_status == 'expired' %}<span style="color:#ff5a76;">Expired</span>{% else %}<span style="color:#4ade80;">{{ user.sub_days }} days left</span>{% endif %}{% if user.sub_expiry %}<br><small style="color:var(--muted);">Expires: {{ user.sub_expiry }}</small>{% endif %}</div></div>
-      <div class="detail-item"><div class="detail-label">Keys Created</div><div class="detail-value">{{ user.key_count }}{% if user.key_limit >= 0 %} / {{ user.key_limit }}{% else %} / ∞{% endif %}</div></div>
       <div class="detail-item"><div class="detail-label">Registration Key</div><div class="detail-value">{{ user.registration_key }}</div></div>
+      <div class="detail-item"><div class="detail-label">Created By</div><div class="detail-value">{{ user.created_by_agent or 'Owner' }}</div></div>
     </div>
   </div>
 
-  {% if user.bot_uid != '—' %}
+  {% if user.bot_uid != '—' and not user.is_agent %}
   <div class="card">
     <div class="card-title"><i class="fas fa-robot"></i> Bot Information</div>
     <div class="detail-grid">
       <div class="detail-item"><div class="detail-label">Bot UID</div><div class="detail-value big">{{ user.bot_uid }}</div></div>
       <div class="detail-item"><div class="detail-label">Bot Password</div><div class="detail-value">{{ user.bot_pw }}</div></div>
       <div class="detail-item"><div class="detail-label">Bot File</div><div class="detail-value">{{ user.bot_file }}</div></div>
-      <div class="detail-item"><div class="detail-label">Owner UIDs</div><div class="detail-value">{{ user.owner_uid }}</div></div>
+      <div class="detail-item"><div class="detail-label">Owner UIDs</div><div class="detail-value">{{ user.admin_uid }}</div></div>
       <div class="detail-item"><div class="detail-label">Bot Status</div><div class="detail-value">{{ user.bot_status }}</div></div>
-      <div class="detail-item"><div class="detail-label">Owner Disabled</div><div class="detail-value">{% if user.bot_disabled_by_owner %}<span style="color:#ff5a76;">YES</span>{% else %}<span style="color:#4ade80;">NO</span>{% endif %}</div></div>
+      <div class="detail-item"><div class="detail-label">Force Active</div><div class="detail-value">{% if user.bot_force_active %}<span style="color:#4ade80;">YES</span>{% else %}<span style="color:var(--muted);">NO</span>{% endif %}</div></div>
     </div>
   </div>
   {% endif %}
 
-  {% if live %}
+  {% if live and not user.is_agent %}
   <div class="card">
     <div class="card-title"><i class="fas fa-satellite-dish"></i> Live Bot Status</div>
     <div class="detail-grid">
@@ -1750,9 +1707,11 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   </div>
   {% endif %}
 
+  {# ---------- USER ONLY: Subscription Management + Bot Controls ---------- #}
+  {% if not user.is_agent and not user.is_admin %}
   <div class="card">
     <div class="card-title"><i class="fas fa-sync"></i> Subscription Management</div>
-    <form method="POST" action="{{ url_for('owner_renew_subscription', user_id=user.id) }}" class="flex">
+    <form method="POST" action="/owner/renew_subscription/{{ user.id }}" class="flex">
       <label style="color:var(--gold2);font-weight:600;">Package:</label>
       <select name="mode" style="padding:10px;border-radius:10px;background:#0a0a14;color:#fff;border:1px solid rgba(245,200,66,.2);">
         <option value="extend">Extend from current</option>
@@ -1767,22 +1726,24 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   <div class="card">
     <div class="card-title"><i class="fas fa-cog"></i> Bot Controls</div>
     <div class="flex" style="gap:10px;">
-      <form method="POST" action="{{ url_for('owner_start_single_bot', user_id=user.id) }}"><button type="submit" class="btn btn-success"><i class="fas fa-play"></i> Force Start</button></form>
-      <form method="POST" action="{{ url_for('owner_stop_single_bot', user_id=user.id) }}"><button type="submit" class="btn btn-stop"><i class="fas fa-stop"></i> Stop Bot</button></form>
-      {% if user.bot_disabled_by_owner %}
-      <form method="POST" action="{{ url_for('owner_toggle_user_bot', user_id=user.id) }}"><button type="submit" class="btn btn-success"><i class="fas fa-check"></i> Enable User</button></form>
+      {% if user.bot_disabled_by_admin %}
+      <form method="POST" action="/owner/toggle_user_bot/{{ user.id }}"><button type="submit" class="btn btn-success"><i class="fas fa-play"></i> Enable Bot</button></form>
       {% else %}
-      <button type="button" class="btn btn-warning" onclick="document.getElementById('disableModalDetails').classList.add('active')"><i class="fas fa-hand-paper"></i> Disable User</button>
+      <button type="button" class="btn btn-warning" onclick="document.getElementById('disableModalDetails').classList.add('active')"><i class="fas fa-hand-paper"></i> Disable Bot</button>
       {% endif %}
+      <form method="POST" action="/owner/force_start_bot/{{ user.id }}"><button type="submit" class="btn btn-gold"><i class="fas fa-bolt"></i> Force Start (Global Stop Override)</button></form>
       {% if user.sub_status == 'expired' or not user.bot_file %}
-      <form method="POST" action="{{ url_for('owner_recreate_bot', user_id=user.id) }}"><button type="submit" class="btn btn-gold"><i class="fas fa-plus-circle"></i> Recreate Bot</button></form>
+      <form method="POST" action="/owner/recreate_bot/{{ user.id }}"><button type="submit" class="btn btn-gold"><i class="fas fa-plus-circle"></i> Recreate Bot File</button></form>
       {% endif %}
     </div>
   </div>
+  {% endif %}
 
+  {# ---------- AGENT ONLY: Key Limit + DB Access ---------- #}
+  {% if user.is_agent %}
   <div class="card">
     <div class="card-title"><i class="fas fa-key"></i> Key Limit</div>
-    <form method="POST" action="{{ url_for('owner_set_key_limit', agent_id=user.id) }}" class="flex">
+    <form method="POST" action="/owner/set_key_limit/{{ user.id }}" class="flex">
       <label style="color:var(--gold2);font-weight:600;">Key Limit (-1=∞):</label>
       <input type="number" name="key_limit" value="{{ user.key_limit }}" min="-1" style="width:140px;"/>
       <button type="submit" class="btn btn-gold btn-sm"><i class="fas fa-save"></i> Save</button>
@@ -1793,11 +1754,12 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
     <div class="card-title"><i class="fas fa-database"></i> DB Access</div>
     <div class="flex">
       <span>Status: {% if user.can_manage_db %}<span class="badge badge-running">ON</span>{% else %}<span class="badge badge-stopped">OFF</span>{% endif %}</span>
-      <form method="POST" action="{{ url_for('owner_toggle_db_access', agent_id=user.id) }}"><button type="submit" class="btn {% if user.can_manage_db %}btn-danger{% else %}btn-success{% endif %} btn-sm"><i class="fas fa-toggle-{% if user.can_manage_db %}on{% else %}off{% endif %}"></i> Toggle</button></form>
+      <form method="POST" action="/owner/toggle_db_access/{{ user.id }}"><button type="submit" class="btn {% if user.can_manage_db %}btn-danger{% else %}btn-success{% endif %} btn-sm"><i class="fas fa-toggle-{% if user.can_manage_db %}on{% else %}off{% endif %}"></i> Toggle</button></form>
     </div>
   </div>
+  {% endif %}
 
-  <a href="{{ url_for('owner_dashboard') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
+  <a href="/owner/dashboard" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
 </div>
 
 <div class="modal-overlay" id="disableModalDetails">
@@ -1819,51 +1781,11 @@ function copyT(t){navigator.clipboard.writeText(t).then(function(){alert('Copied
 </script>
 </body></html>'''
 
-# ==================== ALL KEYS LOG ====================
-ALL_KEYS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>All Keys - MAHIR OWNER</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
-<div class="container">
-  <div class="card header">
-    <h1><i class="fas fa-key"></i> All Keys Log</h1>
-    <div class="flex">
-      <a href="{{ url_for('owner_dashboard') }}" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
-      <a href="{{ url_for('owner_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
-    </div>
-  </div>
-  <div class="card">
-    <div class="stats-grid">
-      <div class="stat-card"><div class="stat-label">Total Keys</div><div class="stat-value">{{ total }}</div></div>
-      <div class="stat-card"><div class="stat-label">Used</div><div class="stat-value" style="color:#4ade80;">{{ used }}</div></div>
-      <div class="stat-card"><div class="stat-label">Available</div><div class="stat-value" style="color:#F5C842;">{{ available }}</div></div>
-    </div>
-  </div>
-  <div class="card">
-    <div class="card-title"><i class="fas fa-list"></i> All Keys</div>
-    <div class="table-wrapper">
-      <table>
-        <thead><tr><th>#</th><th>Key</th><th>Created By</th><th>Role</th><th>Created At</th><th>Duration</th><th>Used By</th><th>Used At</th><th>Status</th></tr></thead>
-        <tbody>
-          {% for k in all_keys %}
-          <tr>
-            <td>{{ loop.index }}</td>
-            <td><code style="font-size:.72rem;">{{ k.key }}</code></td>
-            <td><strong style="color:var(--gold2);">{{ k.created_by }}</strong></td>
-            <td>{% if k.is_owner %}<span class="badge badge-owner">OWNER</span>{% elif k.is_agent %}<span class="badge badge-agent">AGENT</span>{% else %}<span class="badge badge-user">UNKNOWN</span>{% endif %}</td>
-            <td><small>{{ k.created_at[:16] if k.created_at else '—' }}</small></td>
-            <td><span class="badge badge-unused">{{ k.duration }}</span></td>
-            <td>{{ k.used_by or '—' }}</td>
-            <td><small>{{ k.used_at[:16] if k.used_at else '—' }}</small></td>
-            <td>{% if k.status == 'Used' %}<span class="badge badge-used">Used</span>{% elif k.status == 'Expired' %}<span class="badge badge-expired">Expired</span>{% else %}<span class="badge badge-unused">Available</span>{% endif %}</td>
-          </tr>
-          {% else %}<tr class="empty-row"><td colspan="9">No keys created yet</td></tr>{% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-  <a href="{{ url_for('owner_dashboard') }}" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
-</div></body></html>'''
 
-# ==================== FILE MANAGER ====================
-FILE_MANAGER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>File Manager - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
+# ============================================================
+#  FILE MANAGER
+# ============================================================
+FILE_MANAGER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>File Manager - OWNER</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .modal-box.fullscreen{max-width:96vw !important;width:96vw;height:94vh;max-height:94vh}
 .modal-box.fullscreen #editContent{height:calc(94vh - 200px) !important}
 .fs-btn{position:absolute;top:12px;right:60px;background:rgba(59,140,255,.15);border:1px solid rgba(59,140,255,.35);color:#6db2ff;width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center}
@@ -1872,13 +1794,13 @@ FILE_MANAGER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   <div class="card header">
     <h1><i class="fas fa-folder-open"></i> File Manager</h1>
     <div class="flex">
-      <a href="{{ url_for('owner_dashboard') }}" class="btn btn-primary btn-sm"><i class="fas fa-th-large"></i> Dashboard</a>
-      <a href="{{ url_for('owner_logout') }}" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+      <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-th-large"></i> Dashboard</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
     </div>
   </div>
   <div class="card">
     <div class="card-title"><i class="fas fa-upload"></i> Upload File (ZIP auto-extracted)</div>
-    <form method="POST" action="{{ url_for('owner_upload_file') }}" enctype="multipart/form-data" class="upload-form" id="uploadForm">
+    <form method="POST" action="/owner/upload_file" enctype="multipart/form-data" class="upload-form" id="uploadForm">
       <input type="file" name="uploaded_file" required style="flex:1;min-width:200px;"/>
       <button type="submit" class="btn btn-gold" id="uploadBtn"><i class="fas fa-cloud-upload-alt"></i> Upload</button>
     </form>
@@ -1886,18 +1808,18 @@ FILE_MANAGER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   </div>
   <div class="card">
     <div class="card-title"><i class="fas fa-folder"></i> Directory: <span class="current-dir">{{ current_path }}</span></div>
-    <div class="breadcrumb"><a href="{{ url_for('owner_file_manager') }}">/</a>{% for part in breadcrumb_parts %} / <a href="{{ url_for('owner_file_manager', path=part) }}">{{ part }}</a>{% endfor %}</div>
+    <div class="breadcrumb"><a href="/owner/files">/</a>{% for part in breadcrumb_parts %} / <a href="/owner/files/{{ part }}">{{ part }}</a>{% endfor %}</div>
     <div class="table-wrapper">
       <table>
         <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th style="text-align:right;">Actions</th></tr></thead>
         <tbody>
-          {% if parent_dir is not none %}<tr><td><a href="{{ url_for('owner_file_manager', path=parent_dir) }}" class="folder-link"><i class="fas fa-arrow-up"></i> ..</a></td><td>—</td><td>—</td><td>—</td></tr>{% endif %}
+          {% if parent_dir is not none %}<tr><td><a href="/owner/files/{{ parent_dir }}" class="folder-link"><i class="fas fa-arrow-up"></i> ..</a></td><td>—</td><td>—</td><td>—</td></tr>{% endif %}
           {% for item in files %}
           <tr>
-            <td>{% if item.is_dir %}<a href="{{ url_for('owner_file_manager', path=item.path) }}" class="folder-link"><i class="fas fa-folder"></i> {{ item.name }}</a>{% else %}<span class="file-name"><i class="fas fa-file"></i> {{ item.name }}</span>{% endif %}</td>
+            <td>{% if item.is_dir %}<a href="/owner/files/{{ item.path }}" class="folder-link"><i class="fas fa-folder"></i> {{ item.name }}</a>{% else %}<span class="file-name"><i class="fas fa-file"></i> {{ item.name }}</span>{% endif %}</td>
             <td>{{ item.size if not item.is_dir else '—' }}</td>
             <td>{{ item.modified }}</td>
-            <td><div class="td-actions">{% if not item.is_dir %}<a href="{{ url_for('owner_download_file', path=item.path) }}" class="btn btn-info btn-sm"><i class="fas fa-download"></i></a><button onclick="editFile('{{ item.path }}')" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></button><button onclick="deleteFile('{{ item.path }}', this)" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>{% endif %}</div></td>
+            <td><div class="td-actions">{% if not item.is_dir %}<a href="/owner/download/{{ item.path }}" class="btn btn-info btn-sm"><i class="fas fa-download"></i></a><button onclick="editFile('{{ item.path }}')" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></button><button onclick="deleteFile('{{ item.path }}', this)" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>{% endif %}</div></td>
           </tr>
           {% else %}<tr class="empty-row"><td colspan="4">Empty</td></tr>{% endfor %}
         </tbody>
@@ -1929,10 +1851,12 @@ function deleteFile(path,btn){if(!confirm('Delete?'))return;if(btn)btn.disabled=
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){var box=document.getElementById('editModalBox');if(box && box.classList.contains('fullscreen')){toggleFullscreen();return;}closeEditModal();}});
 </script></body></html>'''
 
-# ==================== USER PANEL ====================
+
+# ============================================================
+#  USER PANEL
+# ============================================================
 USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>MAHIR PREMIUM | Bot Controller</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .logout-btn{position:fixed;top:20px;right:20px;z-index:999}
-.return-owner-btn{position:fixed;top:20px;right:130px;z-index:999}
 .cover-section{position:relative;border-radius:22px;overflow:hidden;margin-bottom:24px;border:1px solid rgba(245,200,66,.15)}
 .cover-section img.cover-image{width:100%;height:260px;object-fit:cover;display:block}
 .cover-overlay{position:absolute;inset:0;background:linear-gradient(100deg,rgba(7,7,15,.92) 20%,rgba(7,7,15,.5) 60%,rgba(7,7,15,.25));display:flex;flex-direction:column;justify-content:center;padding:32px 40px}
@@ -1968,7 +1892,7 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 .chart-container{position:relative;height:250px}
 .config-form{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
 .config-status{padding:13px 16px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.12);border-left:4px solid var(--gold);border-radius:10px;color:var(--gold2);font-size:.85rem;margin-bottom:18px}
-@media(max-width:768px){.download-card{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}.return-owner-btn{top:70px;right:20px}}
+@media(max-width:768px){.download-card{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}}
 </style></head><body>
 
 <div class="notice-indicator" id="noticeBtn" onclick="showNotice()" style="display:none;"><i class="fas fa-bullhorn"></i> Owner Notice</div>
@@ -1990,11 +1914,24 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
   </div>
 </div>
 
+<div class="notice-overlay" id="loginNoticePopup">
+  <div class="notice-box" style="border-color:rgba(59,140,255,.5);">
+    <button class="modal-close" onclick="document.getElementById('loginNoticePopup').classList.remove('show')">&times;</button>
+    <span class="notice-icon">🔔</span>
+    <div class="notice-title" style="background:linear-gradient(120deg,#3B8CFF,#00d9f5,#F5C842);-webkit-background-clip:text;background-clip:text;color:transparent;">IMPORTANT NOTICE</div>
+    <div class="notice-msg" id="loginNoticeMsg"></div>
+    <div class="notice-contact-title">Contact Owner</div>
+    <div class="notice-buttons">
+      <a href="https://t.me/mahirtcpchat" target="_blank" class="notice-btn notice-btn-tg"><i class="fab fa-telegram"></i> Telegram</a>
+      <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="notice-btn notice-btn-tt"><i class="fab fa-tiktok"></i> TikTok</a>
+      <a href="https://whatsapp.com/channel/0029Vb9Omjk2ZjCevpv6h209" target="_blank" class="notice-btn notice-btn-wa-ch"><i class="fab fa-whatsapp"></i> WhatsApp Channel</a>
+      <a href="https://MAHIR.XO.JE/" target="_blank" class="notice-btn notice-btn-web"><i class="fas fa-globe"></i> Website</a>
+    </div>
+  </div>
+</div>
+
 <div class="container">
   <button class="logout-btn btn btn-danger btn-sm" onclick="window.location.href='/logout'"><i class="fas fa-sign-out-alt"></i> Logout</button>
-  {% if session.get('impersonating') %}
-  <button class="return-owner-btn btn btn-gold btn-sm" onclick="window.location.href='/owner/return_to_owner'"><i class="fas fa-arrow-left"></i> Back to Owner</button>
-  {% endif %}
   <div class="cover-section">
     <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover"/>
     <div class="cover-overlay">
@@ -2017,8 +1954,8 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
     <div class="card-title"><i class="fas fa-cog"></i> Bot Configuration</div>
     {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
     <div class="config-status"><i class="fas fa-info-circle"></i> Free Fire bot credentials দিন।</div>
-    <form method="POST" action="{{ url_for('configure_bot') }}" class="config-form" id="configForm">
-      <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Owner UID</label><input type="text" name="owner_uid" placeholder="e.g., 1120167200" required/></div>
+    <form method="POST" action="/configure" class="config-form" id="configForm">
+      <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Owner UID</label><input type="text" name="admin_uid" placeholder="e.g., 1120167200" required/></div>
       <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Bot UID</label><input type="text" name="bot_uid" placeholder="Bot UID" required/></div>
       <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Bot Password</label><input type="text" name="bot_pw" placeholder="Password hash" required/></div>
       <button type="submit" class="btn btn-gold btn-block" id="deployBtn"><i class="fas fa-play"></i> Deploy Bot</button>
@@ -2085,20 +2022,20 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
       <button onclick="sendAction('start')" id="btnStart" class="btn btn-start"><i class="fas fa-play"></i> Start</button>
       <button onclick="sendAction('stop')" id="btnStop" class="btn btn-stop"><i class="fas fa-stop"></i> Stop</button>
       <button onclick="sendAction('reset')" id="btnReset" class="btn btn-reset"><i class="fas fa-sync-alt"></i> Reset</button>
-      <button onclick="openOwnerPanel()" id="btnOwner" class="btn btn-owner"><i class="fas fa-cog"></i> Owner Control Panel</button>
+      <button onclick="openAdminPanel()" id="btnAdmin" class="btn btn-admin"><i class="fas fa-cog"></i> Admin Control Panel</button>
     </div>
   </div>
   {% endif %}
 </div>
 
-<div id="ownerModal" class="modal-overlay">
+<div id="adminModal" class="modal-overlay">
   <div class="modal-box">
-    <button class="modal-close" onclick="closeOwnerPanel()">&times;</button>
-    <div class="modal-title"><i class="fas fa-crown"></i> Owner Control Panel</div>
+    <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
+    <div class="modal-title"><i class="fas fa-cog"></i> Admin Control Panel</div>
     <div class="modal-section">
-      <h3><i class="fas fa-shield-alt"></i> Owner UIDs</h3>
-      <div class="modal-input-group"><label>UIDs:</label><input type="text" id="ownerUidsInput" placeholder="1120167200, 3020431227"/></div>
-      <button onclick="updateOwnerUIDs()" id="ownerUidsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
+      <h3><i class="fas fa-user-shield"></i> Owner UIDs</h3>
+      <div class="modal-input-group"><label>UIDs:</label><input type="text" id="adminUidsInput" placeholder="1120167200, 3020431227"/></div>
+      <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
     </div>
     <div class="modal-section">
       <h3><i class="fas fa-key"></i> Bot Credentials</h3>
@@ -2116,7 +2053,7 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
       </div>
       <div id="friendResult" class="modal-result-box">Result...</div>
     </div>
-    <div style="text-align:right;"><button onclick="closeOwnerPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close</button></div>
+    <div style="text-align:right;"><button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close</button></div>
   </div>
 </div>
 
@@ -2126,6 +2063,8 @@ var GLOBAL_NOTICE = {{ notice_json|safe }};
 var IS_BLOCKED = {{ 'true' if blocked else 'false' }};
 var BLOCK_TYPE = "{{ block_type or '' }}";
 var BLOCK_MSG = {{ block_msg_json|safe }};
+var LOGIN_NOTICE_ENABLED = {{ 'true' if login_notice_enabled else 'false' }};
+var LOGIN_NOTICE_TEXT = {{ login_notice_json|safe }};
 
 function showNotice(){
   document.getElementById('noticeMsg').innerHTML = GLOBAL_NOTICE;
@@ -2135,16 +2074,26 @@ function showNotice(){
 }
 function hideNotice(){document.getElementById('noticePopup').classList.remove('show');}
 document.getElementById('noticePopup').addEventListener('click', function(e){if(e.target===this)hideNotice();});
+document.getElementById('loginNoticePopup').addEventListener('click', function(e){if(e.target===this)this.classList.remove('show');});
 
 document.addEventListener('DOMContentLoaded', function(){
   if (IS_BLOCKED) {
     document.getElementById('noticeMsg').innerHTML = BLOCK_MSG;
     if (BLOCK_TYPE === 'global') { document.getElementById('noticeIcon').textContent = '🛠️'; document.getElementById('noticeTitle').textContent = 'SYSTEM MAINTENANCE'; }
     else if (BLOCK_TYPE === 'expired') { document.getElementById('noticeIcon').textContent = '⏰'; document.getElementById('noticeTitle').textContent = 'SUBSCRIPTION EXPIRED'; }
-    else if (BLOCK_TYPE === 'owner_disabled') { document.getElementById('noticeIcon').textContent = '🚫'; document.getElementById('noticeTitle').textContent = 'BOT DISABLED'; }
+    else if (BLOCK_TYPE === 'admin_disabled') { document.getElementById('noticeIcon').textContent = '🚫'; document.getElementById('noticeTitle').textContent = 'BOT DISABLED'; }
     document.getElementById('noticePopup').classList.add('show');
-  } else if (GLOBAL_NOTICE && GLOBAL_NOTICE.trim()) {
-    document.getElementById('noticeBtn').style.display = 'flex';
+  } else {
+    if (GLOBAL_NOTICE && GLOBAL_NOTICE.trim()) {
+      document.getElementById('noticeBtn').style.display = 'flex';
+    }
+    // Login notice (only if not blocked)
+    if (LOGIN_NOTICE_ENABLED && LOGIN_NOTICE_TEXT && LOGIN_NOTICE_TEXT.trim()) {
+      setTimeout(function(){
+        document.getElementById('loginNoticeMsg').innerHTML = LOGIN_NOTICE_TEXT;
+        document.getElementById('loginNoticePopup').classList.add('show');
+      }, 800);
+    }
   }
 });
 
@@ -2165,13 +2114,13 @@ function downloadText(text,filename){var blob=new Blob([text],{type:'text/plain'
 function exportLogs(){fetch('/api/export_logs').then(function(r){return r.json();}).then(function(d){if(d.logs&&d.logs.length){downloadText(d.logs.join('\\n'),'logs.txt');showNotification('Exported!','success');}});}
 function exportErrors(){fetch('/api/export_errors').then(function(r){return r.json();}).then(function(d){if(d.errors&&d.errors.length){downloadText(d.errors.join('\\n'),'errors.txt');showNotification('Exported!','success');}});}
 function exportMessages(){fetch('/api/export_messages').then(function(r){return r.json();}).then(function(d){if(d.messages&&d.messages.length){var t='';d.messages.forEach(function(m){t+='['+m.timestamp+'] '+m.data.nickname+' ('+m.data.sender_uid+'): '+m.data.message+'\\n';});downloadText(t,'messages.txt');showNotification('Exported!','success');}});}
-function sendAction(action){if(IS_BLOCKED){showNotification('⛔ Bot blocked!','error');return;}var btnMap={start:'btnStart',stop:'btnStop',reset:'btnReset'};var btn=getBtn(btnMap[action]);setLoading(btn,true);fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})}).then(function(r){return r.json();}).then(function(d){setLoading(btn,false);if(d.error){showNotification(d.error,'error');}else{showNotification(action.toUpperCase()+' done!','success');setTimeout(updateUI,500);}}).catch(function(){setLoading(btn,false);showNotification('Failed','error');});}
+function sendAction(action){var btnMap={start:'btnStart',stop:'btnStop',reset:'btnReset'};var btn=getBtn(btnMap[action]);setLoading(btn,true);fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})}).then(function(r){return r.json();}).then(function(d){setLoading(btn,false);if(d.error){showNotification(d.error,'error');}else{showNotification(action.toUpperCase()+' done!','success');setTimeout(updateUI,500);}}).catch(function(){setLoading(btn,false);showNotification('Failed','error');});}
 
-function openOwnerPanel(){document.getElementById('ownerModal').classList.add('active');fetch('/api/owner_uids').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById('ownerUidsInput').value=d.uids.join(', ');}).catch(function(){});fetch('/api/bot_creds').then(function(r){return r.json();}).then(function(d){document.getElementById('botUidInput').value=d.uid||'';document.getElementById('botPwInput').value=d.pw||'';}).catch(function(){});}
-function closeOwnerPanel(){document.getElementById('ownerModal').classList.remove('active');}
-document.getElementById('ownerModal') && document.getElementById('ownerModal').addEventListener('click',function(e){if(e.target===this)closeOwnerPanel();});
-function updateOwnerUIDs(){var input=document.getElementById('ownerUidsInput').value;var uids=input.split(',').map(function(s){return s.trim();}).filter(function(s){return s;});if(!uids.length){showNotification('Enter UIDs','error');return;}var btn=document.getElementById('ownerUidsBtn');setLoading(btn,true);fetch('/api/owner_uids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uids:uids})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Updated! DB synced.','success');setTimeout(updateUI,3000);}else showNotification('Failed','error');});}
-function updateBotCreds(){var uid=document.getElementById('botUidInput').value.trim();var pw=document.getElementById('botPwInput').value.trim();if(!uid||!pw){showNotification('Fill both','error');return;}var btn=document.getElementById('botCredsBtn');setLoading(btn,true);fetch('/api/bot_creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:uid,pw:pw})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Updated! DB synced.','success');setTimeout(updateUI,3000);}else showNotification('Failed','error');});}
+function openAdminPanel(){document.getElementById('adminModal').classList.add('active');fetch('/api/admin_uids').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById('adminUidsInput').value=d.uids.join(', ');}).catch(function(){});fetch('/api/bot_creds').then(function(r){return r.json();}).then(function(d){document.getElementById('botUidInput').value=d.uid||'';document.getElementById('botPwInput').value=d.pw||'';}).catch(function(){});}
+function closeAdminPanel(){document.getElementById('adminModal').classList.remove('active');}
+document.getElementById('adminModal') && document.getElementById('adminModal').addEventListener('click',function(e){if(e.target===this)closeAdminPanel();});
+function updateAdminUIDs(){var input=document.getElementById('adminUidsInput').value;var uids=input.split(',').map(function(s){return s.trim();}).filter(function(s){return s;});if(!uids.length){showNotification('Enter UIDs','error');return;}var btn=document.getElementById('adminUidsBtn');setLoading(btn,true);fetch('/api/admin_uids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uids:uids})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Updated!','success');setTimeout(updateUI,3000);}else showNotification('Failed','error');});}
+function updateBotCreds(){var uid=document.getElementById('botUidInput').value.trim();var pw=document.getElementById('botPwInput').value.trim();if(!uid||!pw){showNotification('Fill both','error');return;}var btn=document.getElementById('botCredsBtn');setLoading(btn,true);fetch('/api/bot_creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:uid,pw:pw})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Updated!','success');setTimeout(updateUI,3000);}else showNotification('Failed','error');});}
 function friendAction(action){var uid=document.getElementById('friendUidInput').value.trim();if(action!=='list'&&!uid){showNotification('Enter UID','error');return;}var btnMap={add:'friendAddBtn',remove:'friendRemoveBtn',list:'friendListBtn'};var btn=document.getElementById(btnMap[action]);setLoading(btn,true);var payload={action:action};if(uid)payload.uid=uid;document.getElementById('friendResult').innerHTML='Loading...';fetch('/api/friend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);var t='';if(action==='list'){if(data.status==='success'&&data.friends){t='Friends:\\n'+(data.friends.length?data.friends.map(function(f,i){return (i+1)+'. '+f.name+' ('+f.uid+')';}).join('\\n'):'Empty');}else{t='Error: '+(data.message||'');}}else{t=JSON.stringify(data,null,2);}document.getElementById('friendResult').innerHTML=escapeHtml(t).replace(/\\n/g,'<br>');});}
 
 function updateUI(){
@@ -2191,34 +2140,30 @@ function updateUI(){
 setInterval(updateUI,1500);updateUI();
 </script></body></html>'''
 
-# =============================================================================
-# ROUTES
-# =============================================================================
 
+# ============================================================
+#  ROUTES
+# ============================================================
 @app.route('/')
 def index():
-    if session.get('is_owner'): return redirect(url_for('owner_dashboard'))
-    elif session.get('is_agent'): return redirect(url_for('agent_dashboard'))
-    elif session.get('user_id'): return redirect(url_for('user_dashboard'))
+    if session.get('owner_mode'):
+        return redirect(url_for('owner_dashboard'))
+    if session.get('is_admin'):
+        return redirect(url_for('owner_dashboard'))
+    elif session.get('is_agent'):
+        return redirect(url_for('agent_dashboard'))
+    elif session.get('user_id'):
+        return redirect(url_for('user_dashboard'))
     return redirect(url_for('login'))
 
 
+@app.errorhandler(500)
 @app.errorhandler(sqlite3.OperationalError)
-def handle_db_busy(e):
+def handle_db_error(e):
     try:
         init_db(); migrate_db()
-    except Exception:
-        pass
-    return ('<div style="font-family:sans-serif;text-align:center;padding:60px 20px;color:#eee">'
-            '<h2>\u26a0\ufe0f Database is busy</h2><p>Please wait a moment and '
-            '<a href="javascript:location.reload()">retry</a>.</p></div>', 503)
-
-@app.errorhandler(500)
-def handle_500(e):
-    app.logger.error(f"Internal error: {e}")
-    return ('<div style="font-family:sans-serif;text-align:center;padding:60px 20px;color:#eee">'
-            '<h2>\u26a0\ufe0f Internal server error</h2><p>'
-            '<a href="javascript:location.reload()">Retry</a></p></div>', 500)
+    except: pass
+    return redirect(url_for('login'))
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -2226,16 +2171,15 @@ def login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('SELECT id, username, password, is_owner, is_agent FROM users WHERE username=?', (username,))
+        c.execute('SELECT id, username, password, is_admin, is_agent FROM users WHERE username=?', (username,))
         user = c.fetchone()
         conn.close()
         if user and check_password(user[2], password):
             session['user_id'] = user[0]; session['username'] = user[1]
-            session['is_owner'] = bool(user[3]); session['is_agent'] = bool(user[4])
-            session.permanent = True
-            if session['is_owner']: return redirect(url_for('owner_dashboard'))
+            session['is_admin'] = bool(user[3]); session['is_agent'] = bool(user[4])
+            if session['is_admin']: return redirect(url_for('owner_dashboard'))
             elif session['is_agent']: return redirect(url_for('agent_dashboard'))
             else: return redirect(url_for('user_dashboard'))
         flash('Invalid credentials', 'error')
@@ -2249,7 +2193,7 @@ def register():
         password = request.form['password']
         email = request.form.get('email', '')
         reg_key = request.form['registration_key']
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('SELECT id, expiry_date, created_by FROM keys WHERE key=? AND is_used=0', (reg_key,))
         key_row = c.fetchone()
@@ -2269,8 +2213,8 @@ def register():
             conn.close()
             flash('Username taken', 'error')
             return render_template_string(REGISTER_HTML)
-        agent_name = key_row[2] if key_row[2] and key_row[2] not in ('owner', 'system') else None
-        c.execute('''INSERT INTO users (username, password, email, registration_key, is_owner, is_agent, subscription_expiry, created_by_agent)
+        agent_name = key_row[2] if key_row[2] and key_row[2] not in ('admin', 'system', 'MAHIR TCP', 'OWNER') else None
+        c.execute('''INSERT INTO users (username, password, email, registration_key, is_admin, is_agent, subscription_expiry, created_by_agent)
                      VALUES (?, ?, ?, ?, 0, 0, ?, ?)''', (username, password, email, reg_key, key_row[1], agent_name))
         c.execute('UPDATE keys SET is_used=1, used_by=?, used_at=CURRENT_TIMESTAMP WHERE key=?', (username, reg_key))
         conn.commit(); conn.close()
@@ -2284,7 +2228,7 @@ def recover():
     if request.method == 'POST':
         username = request.form['username']
         email = request.form['email']
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('SELECT password FROM users WHERE username=? AND email=?', (username, email))
         row = c.fetchone()
@@ -2309,21 +2253,21 @@ def logout():
     session.clear()
     return redirect(url_for('login'))
 
+
 # ========== AGENT ROUTES ==========
 @app.route('/agent/login', methods=['GET', 'POST'])
 def agent_login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('SELECT id, username, password, is_agent FROM users WHERE username=?', (username,))
         user = c.fetchone()
         conn.close()
         if user and user[3] == 1 and check_password(user[2], password):
             session['user_id'] = user[0]; session['username'] = user[1]
-            session['is_agent'] = True; session['is_owner'] = False
-            session.permanent = True
+            session['is_agent'] = True; session['is_admin'] = False
             return redirect(url_for('agent_dashboard'))
         flash('Invalid', 'error')
     return render_template_string(AGENT_LOGIN_HTML)
@@ -2332,18 +2276,23 @@ def agent_login():
 @app.route('/agent/dashboard')
 @agent_required
 def agent_dashboard():
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Only own keys
-    c.execute('''SELECT id, key, created_at, used_by, is_used, expiry_date 
+    c.execute('''SELECT id, key, created_at, used_by, is_used, expiry_date, duration_days 
                  FROM keys WHERE created_by=? ORDER BY id DESC''', (session['username'],))
-    keys = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4], 'expiry_date': r[5]} for r in c.fetchall()]
+    keys = []
+    for r in c.fetchall():
+        keys.append({
+            'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3],
+            'is_used': r[4], 'expiry_date': r[5],
+            'duration_days': r[6] if r[6] is not None else 0
+        })
     c.execute('SELECT key_limit, can_manage_db FROM users WHERE id=?', (session['user_id'],))
     row = c.fetchone()
     key_limit = row[0] if row and row[0] is not None else -1
     can_manage_db = bool(row[1]) if row else False
     c.execute('''SELECT id, username, email, bot_uid, bot_status, subscription_expiry, registration_key 
-                 FROM users WHERE created_by_agent=? AND is_owner=0 AND is_agent=0 ORDER BY id DESC''',
+                 FROM users WHERE created_by_agent=? AND is_admin=0 AND is_agent=0 ORDER BY id DESC''',
               (session['username'],))
     users_rows = c.fetchall()
     conn.close()
@@ -2358,14 +2307,13 @@ def agent_dashboard():
         })
     return render_template_string(AGENT_DASHBOARD_HTML, keys=keys, new_key=None,
                                   key_limit=key_limit, key_count=len(keys),
-                                  can_manage_db=can_manage_db, my_users=my_users,
-                                  now_iso=datetime.now().isoformat())
+                                  can_manage_db=can_manage_db, my_users=my_users)
 
 
 @app.route('/agent/renew_subscription/<int:user_id>', methods=['POST'])
 @agent_required
 def agent_renew_subscription(user_id):
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT created_by_agent FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
@@ -2380,7 +2328,7 @@ def agent_renew_subscription(user_id):
 @agent_required
 def agent_create_key():
     days = int(request.form.get('days_valid', 30))
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT key_limit FROM users WHERE id=?', (session['user_id'],))
     row = c.fetchone()
@@ -2392,18 +2340,10 @@ def agent_create_key():
         return redirect(url_for('agent_dashboard'))
     key = secrets.token_hex(16).upper()
     expiry = None if days == 0 else datetime.now() + timedelta(days=days)
-    c.execute('INSERT INTO keys (key, created_by, expiry_date) VALUES (?, ?, ?)',
-              (key, session['username'], expiry.isoformat() if expiry else None))
+    c.execute('INSERT INTO keys (key, created_by, expiry_date, duration_days) VALUES (?, ?, ?, ?)',
+              (key, session['username'], expiry.isoformat() if expiry else None, days))
     conn.commit(); conn.close()
     flash(f'🔑 New Key: {key}', 'success')
-    return redirect(url_for('agent_dashboard'))
-
-
-@app.route('/agent/delete_key/<int:key_id>', methods=['POST', 'GET'])
-@agent_required
-def agent_delete_key(key_id):
-    """Agent cannot delete keys — only Owner can delete keys."""
-    flash('⛔ Access Denied! শুধুমাত্র Owner key delete করতে পারে।', 'error')
     return redirect(url_for('agent_dashboard'))
 
 
@@ -2416,7 +2356,7 @@ def agent_logout():
 @app.route('/agent/download_db')
 @agent_required
 def agent_download_db():
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT can_manage_db FROM users WHERE id=?', (session['user_id'],))
     row = c.fetchone()
@@ -2432,7 +2372,7 @@ def agent_download_db():
 @app.route('/agent/upload_db', methods=['POST'])
 @agent_required
 def agent_upload_db():
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT can_manage_db FROM users WHERE id=?', (session['user_id'],))
     row = c.fetchone()
@@ -2442,29 +2382,77 @@ def agent_upload_db():
         return redirect(url_for('agent_dashboard'))
     return _handle_db_upload(redirect_endpoint='agent_dashboard')
 
+
 # ========== OWNER ROUTES ==========
 @app.route('/owner/login', methods=['GET', 'POST'])
 def owner_login():
     if request.method == 'POST':
         username = request.form['username']
         password = request.form['password']
-        if username == 'MAHIR TCP' and password == 'MAHIR0208@':
-            session['user_id'] = 0; session['username'] = 'owner'
-            session['is_owner'] = True; session['is_agent'] = False
-            session.permanent = True
+        if username == OWNER_USERNAME and password == OWNER_PASSWORD:
+            session.clear()
+            session['user_id'] = 0
+            session['username'] = 'OWNER'
+            session['is_admin'] = True
+            session['is_agent'] = False
+            session['owner_mode'] = True
             return redirect(url_for('owner_dashboard'))
         flash('Invalid owner credentials', 'error')
     return render_template_string(OWNER_LOGIN_HTML)
 
 
+@app.route('/owner/logout')
+def owner_logout():
+    session.clear()
+    return redirect(url_for('owner_login'))
+
+
+@app.route('/owner/login_as/<int:user_id>')
+def owner_login_as(user_id):
+    if not session.get('owner_mode'):
+        flash('Owner access required', 'error')
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT id, username, is_admin, is_agent FROM users WHERE id=?', (user_id,))
+    u = c.fetchone()
+    conn.close()
+    if not u:
+        flash('User not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    session['user_id'] = u[0]
+    session['username'] = u[1]
+    session['is_admin'] = bool(u[2])
+    session['is_agent'] = bool(u[3])
+    if session['is_admin']:
+        return redirect(url_for('owner_dashboard'))
+    elif session['is_agent']:
+        return redirect(url_for('agent_dashboard'))
+    else:
+        return redirect(url_for('user_dashboard'))
+
+
+@app.route('/owner/return')
+def owner_return():
+    if not session.get('owner_mode'):
+        return redirect(url_for('login'))
+    session['user_id'] = 0
+    session['username'] = 'OWNER'
+    session['is_admin'] = True
+    session['is_agent'] = False
+    return redirect(url_for('owner_dashboard'))
+
+
 @app.route('/owner/dashboard')
-@owner_required
 def owner_dashboard():
-    conn = get_db()
+    if not session.get('is_admin'):
+        flash('Owner access required', 'error')
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT id, username, email, created_at, bot_status, bot_file, 
-                 is_owner, is_agent, key_limit, can_manage_db, password,
-                 bot_disabled_by_owner, subscription_expiry, registration_key, bot_uid, created_by_agent
+                 is_admin, is_agent, key_limit, can_manage_db, password,
+                 bot_disabled_by_admin, subscription_expiry, registration_key, bot_uid, created_by_agent
                  FROM users ORDER BY id DESC''')
     rows = c.fetchall()
     users = []; agents = []
@@ -2472,10 +2460,10 @@ def owner_dashboard():
         sub = check_subscription_status(r[0])
         user_dict = {
             'id': r[0], 'username': r[1], 'email': r[2], 'created_at': r[3],
-            'bot_status': r[4], 'bot_file': r[5], 'is_owner': r[6], 'is_agent': r[7],
+            'bot_status': r[4], 'bot_file': r[5], 'is_admin': r[6], 'is_agent': r[7],
             'key_limit': r[8] if r[8] is not None else -1,
             'can_manage_db': r[9] or 0, 'password': r[10],
-            'bot_disabled_by_owner': r[11] or 0,
+            'bot_disabled_by_admin': r[11] or 0,
             'sub_status': sub['status'], 'sub_days': sub['days_left'], 'bot_uid': r[14],
             'created_by_agent': r[15]
         }
@@ -2487,8 +2475,15 @@ def owner_dashboard():
             c2.close()
             ag = user_dict.copy(); ag['key_count'] = kc
             agents.append(ag)
-    c.execute('SELECT id, key, created_by, created_at, used_by, is_used, expiry_date FROM keys ORDER BY id DESC LIMIT 30')
-    keys = [{'id': r[0], 'key': r[1], 'created_by': r[2], 'created_at': r[3], 'used_by': r[4], 'is_used': r[5], 'expiry_date': r[6]} for r in c.fetchall()]
+    c.execute('''SELECT id, key, created_by, created_at, used_by, is_used, expiry_date, duration_days 
+                 FROM keys ORDER BY id DESC LIMIT 50''')
+    keys = []
+    for r in c.fetchall():
+        keys.append({
+            'id': r[0], 'key': r[1], 'created_by': r[2], 'created_at': r[3],
+            'used_by': r[4], 'is_used': r[5], 'expiry_date': r[6],
+            'duration_days': r[7] if r[7] is not None else 0
+        })
     conn.close()
     stats = {'cpu': 0, 'ram_percent': 0, 'ram_used': 0, 'ram_total': 0, 'disk_percent': 0, 'disk_used': 0, 'disk_total': 0}
     try:
@@ -2500,170 +2495,16 @@ def owner_dashboard():
     except: pass
     return render_template_string(OWNER_DASHBOARD_HTML, users=users, agents=agents, keys=keys,
                                   new_key=None, global_stop=get_global_stop(),
-                                  global_notice=get_global_notice(), **stats)
-
-
-@app.route('/owner/start_single_bot/<int:user_id>', methods=['POST'])
-@owner_required
-def owner_start_single_bot(user_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT bot_file, bot_uid, bot_disabled_by_owner FROM users WHERE id=?', (user_id,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        flash('❌ User not found', 'error')
-        return redirect(url_for('owner_dashboard'))
-    bot_file, bot_uid, disabled = row
-    if not bot_file:
-        flash('❌ Bot file missing — recreate first', 'error')
-        return redirect(url_for('owner_dashboard'))
-    if disabled:
-        flash('⚠️ Bot is owner-disabled. Enable it first.', 'error')
-        return redirect(url_for('owner_dashboard'))
-    path = os.path.join(USER_BOTS_DIR, bot_file)
-    if not os.path.exists(path):
-        flash('❌ Bot file not on disk', 'error')
-        return redirect(url_for('owner_dashboard'))
-    sub = check_subscription_status(user_id)
-    if sub['status'] == 'expired':
-        flash('❌ Subscription expired — renew first', 'error')
-        return redirect(url_for('owner_dashboard'))
-    with monitors_lock:
-        if user_id in monitors:
-            try:
-                monitors[user_id].watchdog_running = False
-                monitors[user_id].stop_process()
-            except: pass
-            del monitors[user_id]
-    m = ProcessMonitor(user_id, path)
-    m.force_start = True
-    with monitors_lock:
-        monitors[user_id] = m
-    m._force_spawn_process()
-    flash(f'✅ Bot force-started for user #{user_id} (bypassed global stop)', 'success')
-    return redirect(request.referrer or url_for('owner_dashboard'))
-
-
-@app.route('/owner/stop_single_bot/<int:user_id>', methods=['POST'])
-@owner_required
-def owner_stop_single_bot(user_id):
-    stopped = False
-    with monitors_lock:
-        if user_id in monitors:
-            try:
-                monitors[user_id].watchdog_running = False
-                monitors[user_id].stop_process()
-            except: pass
-            del monitors[user_id]
-            stopped = True
-    if not stopped:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('SELECT bot_pid FROM users WHERE id=?', (user_id,))
-        r = c.fetchone()
-        if r and r[0]:
-            try:
-                p = psutil.Process(r[0])
-                p.kill()
-            except: pass
-        c.execute('UPDATE users SET bot_pid=NULL, bot_status="stopped" WHERE id=?', (user_id,))
-        conn.commit(); conn.close()
-    flash(f'🛑 Bot stopped for user #{user_id}', 'success')
-    return redirect(request.referrer or url_for('owner_dashboard'))
-
-
-@app.route('/owner/login_as/<int:user_id>')
-@owner_required
-def owner_login_as(user_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT id, username, is_owner, is_agent FROM users WHERE id=?', (user_id,))
-    user = c.fetchone()
-    conn.close()
-    if not user:
-        flash('❌ User not found', 'error')
-        return redirect(url_for('owner_dashboard'))
-    session['owner_backup'] = {
-        'user_id': session.get('user_id'),
-        'username': session.get('username'),
-        'is_owner': session.get('is_owner'),
-        'is_agent': session.get('is_agent'),
-    }
-    session['user_id'] = user[0]
-    session['username'] = user[1]
-    session['is_owner'] = False
-    session['is_agent'] = False
-    session['impersonating'] = True
-    session.permanent = True
-    flash(f'✅ Logged in as {user[1]} (impersonating)', 'success')
-    return redirect(url_for('user_dashboard'))
-
-
-@app.route('/owner/return_to_owner')
-def owner_return_to_owner():
-    backup = session.pop('owner_backup', None)
-    if backup:
-        session['user_id'] = backup['user_id']
-        session['username'] = backup['username']
-        session['is_owner'] = backup['is_owner']
-        session['is_agent'] = backup['is_agent']
-        session.pop('impersonating', None)
-        flash('✅ Returned to Owner', 'success')
-        return redirect(url_for('owner_dashboard'))
-    return redirect(url_for('login'))
-
-
-@app.route('/owner/all_keys')
-@owner_required
-def owner_all_keys():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('''SELECT k.id, k.key, k.created_by, k.created_at, k.used_by, k.used_at, 
-                 k.is_used, k.expiry_date,
-                 u.is_owner, u.is_agent
-                 FROM keys k 
-                 LEFT JOIN users u ON u.username = k.created_by
-                 ORDER BY k.id DESC''')
-    rows = c.fetchall()
-    conn.close()
-    all_keys = []
-    for r in rows:
-        created_by = r[2] or '—'
-        is_owner_created = bool(r[8])
-        is_agent_created = bool(r[9])
-        duration_text = "Permanent"
-        if r[7]:
-            try:
-                expiry_dt = datetime.fromisoformat(r[7])
-                if r[3]:
-                    created_dt = datetime.fromisoformat(r[3])
-                    days = (expiry_dt - created_dt).days
-                    duration_text = f"{days} days"
-                else:
-                    duration_text = expiry_dt.strftime('%Y-%m-%d')
-            except: pass
-        status = "Available"
-        if r[6]: status = "Used"
-        elif r[7]:
-            try:
-                if datetime.fromisoformat(r[7]) < datetime.now(): status = "Expired"
-            except: pass
-        all_keys.append({
-            'id': r[0], 'key': r[1], 'created_by': created_by,
-            'created_at': r[3], 'used_by': r[4], 'used_at': r[5],
-            'duration': duration_text, 'status': status,
-            'is_owner': is_owner_created, 'is_agent': is_agent_created,
-        })
-    return render_template_string(ALL_KEYS_HTML, all_keys=all_keys,
-                                  total=len(all_keys),
-                                  used=sum(1 for k in all_keys if k['status'] == 'Used'),
-                                  available=sum(1 for k in all_keys if k['status'] == 'Available'))
+                                  global_notice=get_global_notice(),
+                                  login_notice_enabled=is_user_login_notice_enabled(),
+                                  login_notice_text=get_user_login_notice(),
+                                  **stats)
 
 
 @app.route('/owner/preview_global_notice')
-@owner_required
 def owner_preview_global_notice():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     notice = get_global_notice()
     return f'''<!DOCTYPE html><html><head><title>Notice Preview</title><style>
 body{{background:#07070f;color:#e9e9f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}}
@@ -2673,36 +2514,48 @@ body{{background:#07070f;color:#e9e9f8;font-family:Inter,sans-serif;display:flex
 .msg{{color:#c5c5e5;font-size:.95rem;line-height:1.7;padding:16px;background:rgba(0,0,0,.4);border-radius:14px;border:1px solid rgba(245,200,66,.1);margin-bottom:22px;text-align:left}}
 .btns{{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}}
 .btn{{display:inline-flex;align-items:center;gap:8px;padding:12px 20px;border-radius:12px;text-decoration:none;font-weight:700;font-size:.85rem;color:#fff}}
-.tg{{background:linear-gradient(135deg,#0088cc,#005f8a)}}
-.tt{{background:linear-gradient(135deg,#ff0050,#c40040)}}
-.web{{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}}
-.wach{{background:linear-gradient(135deg,#25D366,#128C7E)}}
-.wagp{{background:linear-gradient(135deg,#075E54,#128C7E)}}
 </style></head><body><div class="box">
 <span class="icon">📢</span>
 <div class="title">OWNER NOTICE</div>
-<div class="msg">{notice}</div>
-<div class="btns">
-<a href="https://t.me/mahirtcpchat" target="_blank" class="btn tg">Telegram</a>
-<a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="btn tt">TikTok</a>
-<a href="https://whatsapp.com/channel/0029Vb9Omjk2ZjCevpv6h209" target="_blank" class="btn wach">WhatsApp Channel</a>
-<a href="https://chat.whatsapp.com/CTiEuMnEKacHZ7wirSNjqs" target="_blank" class="btn wagp">WhatsApp Group</a>
-<a href="https://MAHIR.XO.JE/" target="_blank" class="btn web">Website</a>
-</div></div></body></html>'''
+<div class="msg">{notice}</div></div></body></html>'''
 
 
 @app.route('/owner/set_global_notice', methods=['POST'])
-@owner_required
 def owner_set_global_notice():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     notice = request.form.get('notice_text', '').strip()
     set_setting('global_notice_text', notice)
     flash('✅ Global notice updated!', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
+@app.route('/owner/set_user_login_notice', methods=['POST'])
+def owner_set_user_login_notice():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    action = request.form.get('action', 'save')
+    notice_text = request.form.get('notice_text', '').strip()
+
+    if action == 'enable':
+        set_setting('user_login_notice_enabled', '1')
+        set_setting('user_login_notice_text', notice_text)
+        flash('✅ User login notice ENABLED!', 'success')
+    elif action == 'disable':
+        set_setting('user_login_notice_enabled', '0')
+        if notice_text:
+            set_setting('user_login_notice_text', notice_text)
+        flash('🔕 User login notice DISABLED.', 'success')
+    else:
+        set_setting('user_login_notice_text', notice_text)
+        flash('✅ Notice text saved!', 'success')
+    return redirect(url_for('owner_dashboard'))
+
+
 @app.route('/owner/stop_all_bots', methods=['POST'])
-@owner_required
 def owner_stop_all_bots():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     set_setting('global_bot_stop', '1')
     with monitors_lock:
         for uid, m in list(monitors.items()):
@@ -2710,26 +2563,61 @@ def owner_stop_all_bots():
                 m.watchdog_running = False
                 m.stop_process()
             except: pass
-    flash('🛑 All bots STOPPED globally! (Individual start still allowed)', 'success')
+    flash('🛑 All bots STOPPED globally!', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
 @app.route('/owner/start_all_bots', methods=['POST'])
-@owner_required
 def owner_start_all_bots():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     set_setting('global_bot_stop', '0')
     success, fail = reset_all_bots()
     flash(f'✅ Global stop OFF! {success} bots restarted.', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
-@app.route('/owner/disable_user/<int:user_id>', methods=['POST'])
-@owner_required
-def owner_disable_user(user_id):
-    reason = request.form.get('reason', '').strip() or 'Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।'
-    conn = get_db()
+@app.route('/owner/force_start_bot/<int:user_id>', methods=['POST'])
+def owner_force_start_bot(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('UPDATE users SET bot_disabled_by_owner=1, disable_reason=? WHERE id=?', (reason, user_id))
+    c.execute('UPDATE users SET bot_force_active=1, bot_disabled_by_admin=0 WHERE id=?', (user_id,))
+    conn.commit()
+    c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0]:
+        path = os.path.join(USER_BOTS_DIR, row[0])
+        if os.path.exists(path):
+            with monitors_lock:
+                if user_id in monitors:
+                    try:
+                        monitors[user_id].watchdog_running = False
+                        monitors[user_id].stop_process()
+                    except: pass
+                    del monitors[user_id]
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            m.start_process()
+            flash(f'⚡ Bot force-started for user {user_id}!', 'success')
+        else:
+            flash('❌ Bot file not found', 'error')
+    else:
+        flash('❌ No bot file for this user', 'error')
+    return redirect(request.referrer or url_for('owner_dashboard'))
+
+
+@app.route('/owner/disable_user/<int:user_id>', methods=['POST'])
+def owner_disable_user(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    reason = request.form.get('reason', '').strip() or 'Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।'
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE users SET bot_disabled_by_admin=1, disable_reason=?, bot_force_active=0 WHERE id=?', (reason, user_id))
     conn.commit(); conn.close()
     with monitors_lock:
         if user_id in monitors:
@@ -2742,15 +2630,16 @@ def owner_disable_user(user_id):
 
 
 @app.route('/owner/toggle_user_bot/<int:user_id>', methods=['POST'])
-@owner_required
 def owner_toggle_user_bot(user_id):
-    conn = get_db()
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT bot_disabled_by_owner FROM users WHERE id=?', (user_id,))
+    c.execute('SELECT bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
     if row:
         new_val = 0 if row[0] else 1
-        c.execute('UPDATE users SET bot_disabled_by_owner=?, disable_reason=? WHERE id=?',
+        c.execute('UPDATE users SET bot_disabled_by_admin=?, disable_reason=? WHERE id=?',
                   (new_val, None if not new_val else 'Owner disabled', user_id))
         conn.commit()
         if new_val:
@@ -2763,11 +2652,8 @@ def owner_toggle_user_bot(user_id):
             flash('🛑 User bot DISABLED.', 'success')
         else:
             flash('✅ User bot ENABLED.', 'success')
-            conn2 = get_db()
-            c2 = conn2.cursor()
-            c2.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
-            r2 = c2.fetchone()
-            conn2.close()
+            c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
+            r2 = c.fetchone()
             if r2 and r2[0]:
                 path = os.path.join(USER_BOTS_DIR, r2[0])
                 if os.path.exists(path):
@@ -2780,17 +2666,18 @@ def owner_toggle_user_bot(user_id):
 
 
 @app.route('/owner/recreate_bot/<int:user_id>', methods=['POST'])
-@owner_required
 def owner_recreate_bot(user_id):
-    conn = get_db()
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT username, owner_uid, bot_uid, bot_pw FROM users WHERE id=?', (user_id,))
+    c.execute('SELECT username, admin_uid, bot_uid, bot_pw FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
     conn.close()
     if not row:
         flash('User not found', 'error')
         return redirect(url_for('owner_dashboard'))
-    username, owner_uid, bot_uid, bot_pw = row
+    username, admin_uid, bot_uid, bot_pw = row
     if not bot_uid or not bot_pw:
         flash('Bot credentials missing.', 'error')
         return redirect(url_for('owner_user_details', user_id=user_id))
@@ -2799,15 +2686,15 @@ def owner_recreate_bot(user_id):
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
     try:
         shutil.copy2(MAHIR_SOURCE, bot_file_path)
-        owner_uids_list = parse_owner_uids(owner_uid)
-        ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, owner_uids_list)
+        admin_uids_list = parse_admin_uids(admin_uid)
+        ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, admin_uids_list)
         if not ok:
             flash(f'Error: {msg}', 'error')
             return redirect(url_for('owner_user_details', user_id=user_id))
         new_expiry = (datetime.now() + timedelta(days=30)).isoformat()
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('UPDATE users SET bot_file=?, bot_status="configured", bot_disabled_by_owner=0, subscription_expiry=? WHERE id=?',
+        c.execute('UPDATE users SET bot_file=?, bot_status="configured", bot_disabled_by_admin=0, subscription_expiry=? WHERE id=?',
                   (bot_filename, new_expiry, user_id))
         conn.commit(); conn.close()
         m = ProcessMonitor(user_id, bot_file_path)
@@ -2821,25 +2708,27 @@ def owner_recreate_bot(user_id):
 
 
 @app.route('/owner/renew_subscription/<int:user_id>', methods=['POST'])
-@owner_required
 def owner_renew_subscription(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     return _renew_subscription(user_id, 'owner_user_details')
 
 
 @app.route('/owner/create_agent', methods=['POST'])
-@owner_required
 def owner_create_agent():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     username = request.form['username']
     email = request.form['email']
     password = request.form['password']
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT id FROM users WHERE username=?', (username,))
     if c.fetchone():
         flash('Username exists', 'error')
         conn.close()
         return redirect(url_for('owner_dashboard'))
-    c.execute('''INSERT INTO users (username, password, email, registration_key, is_agent, is_owner, bot_status, key_limit, can_manage_db)
+    c.execute('''INSERT INTO users (username, password, email, registration_key, is_agent, is_admin, bot_status, key_limit, can_manage_db)
                  VALUES (?, ?, ?, ?, 1, 0, 'agent', -1, 0)''', (username, password, email, 'agent_created'))
     conn.commit(); conn.close()
     flash(f'Agent {username} created', 'success')
@@ -2847,9 +2736,10 @@ def owner_create_agent():
 
 
 @app.route('/owner/delete_agent/<int:agent_id>', methods=['POST'])
-@owner_required
 def owner_delete_agent(agent_id):
-    conn = get_db()
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT username, bot_file FROM users WHERE id=? AND is_agent=1', (agent_id,))
     row = c.fetchone()
@@ -2867,9 +2757,10 @@ def owner_delete_agent(agent_id):
 
 
 @app.route('/owner/delete_key/<int:key_id>', methods=['POST'])
-@owner_required
 def owner_delete_key(key_id):
-    conn = get_db()
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT key FROM keys WHERE id=?', (key_id,))
     kr = c.fetchone()
@@ -2892,45 +2783,48 @@ def owner_delete_key(key_id):
                     if os.path.exists(fp):
                         try: os.remove(fp)
                         except: pass
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         for uid, _ in users: c.execute('DELETE FROM users WHERE id=?', (uid,))
         c.execute('DELETE FROM keys WHERE id=?', (key_id,))
         conn.commit(); conn.close()
-        flash('Deleted', 'success')
+        flash('Key deleted with associated users', 'success')
     else:
         conn.close()
+        flash('Key not found', 'error')
     return redirect(url_for('owner_dashboard'))
 
 
 @app.route('/owner/create_key', methods=['POST'])
-@owner_required
 def owner_create_key():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     days = int(request.form.get('days_valid', 30))
     key = secrets.token_hex(16).upper()
     expiry = None if days == 0 else datetime.now() + timedelta(days=days)
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('INSERT INTO keys (key, created_by, expiry_date) VALUES (?, ?, ?)',
-              (key, session['username'], expiry.isoformat() if expiry else None))
+    c.execute('INSERT INTO keys (key, created_by, expiry_date, duration_days) VALUES (?, ?, ?, ?)',
+              (key, 'OWNER', expiry.isoformat() if expiry else None, days))
     conn.commit(); conn.close()
     flash(f'🔑 Key: {key}', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
 @app.route('/owner/delete_user/<int:user_id>', methods=['POST'])
-@owner_required
 def owner_delete_user(user_id):
-    conn = get_db()
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT bot_file FROM users WHERE id=? AND is_owner=0 AND is_agent=0', (user_id,))
+    c.execute('SELECT bot_file FROM users WHERE id=? AND is_admin=0 AND is_agent=0', (user_id,))
     row = c.fetchone()
     if row and row[0]:
         fp = os.path.join(USER_BOTS_DIR, row[0])
         if os.path.exists(fp):
             try: os.remove(fp)
             except: pass
-    c.execute('DELETE FROM users WHERE id=? AND is_owner=0 AND is_agent=0', (user_id,))
+    c.execute('DELETE FROM users WHERE id=? AND is_admin=0 AND is_agent=0', (user_id,))
     conn.commit(); conn.close()
     with monitors_lock:
         if user_id in monitors:
@@ -2943,22 +2837,168 @@ def owner_delete_user(user_id):
     return redirect(url_for('owner_dashboard'))
 
 
-@app.route('/owner/logout')
-def owner_logout():
-    session.clear()
-    return redirect(url_for('owner_login'))
+@app.route('/owner/user_details/<int:user_id>')
+def owner_user_details(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT id, username, email, password, bot_uid, bot_pw, bot_file, 
+                 bot_status, bot_pid, admin_uid, is_admin, is_agent, key_limit, 
+                 can_manage_db, created_at, registration_key, bot_disabled_by_admin, 
+                 subscription_expiry, bot_force_active, created_by_agent
+                 FROM users WHERE id=?''', (user_id,))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        flash('Not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    c.execute('SELECT COUNT(*) FROM keys WHERE created_by=?', (user[1],))
+    key_count = c.fetchone()[0]
+    c.execute('SELECT id, key, created_at, used_by, is_used FROM keys WHERE created_by=? ORDER BY id DESC', (user[1],))
+    keys_list = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4]} for r in c.fetchall()]
+    conn.close()
+    sub = check_subscription_status(user_id)
+    user_data = {
+        'id': user[0], 'username': user[1], 'email': user[2] or '—',
+        'password': user[3], 'bot_uid': user[4] or '—', 'bot_pw': user[5] or '—',
+        'bot_file': user[6] or '—', 'bot_status': user[7] or 'unknown',
+        'bot_pid': user[8], 'admin_uid': user[9] or '—',
+        'is_admin': user[10], 'is_agent': user[11],
+        'key_limit': user[12] if user[12] is not None else -1,
+        'can_manage_db': user[13] or 0, 'created_at': user[14],
+        'registration_key': user[15], 'key_count': key_count,
+        'bot_disabled_by_admin': user[16] or 0,
+        'sub_status': sub['status'], 'sub_days': sub['days_left'],
+        'sub_expiry': sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else None,
+        'bot_force_active': user[18] or 0,
+        'created_by_agent': user[19] or 'Owner'
+    }
+    live = None
+    with monitors_lock:
+        if user_id in monitors:
+            try: live = monitors[user_id].get_status()
+            except: pass
+    return render_template_string(USER_DETAILS_HTML, user=user_data, live=live, keys=keys_list)
+
+
+@app.route('/owner/set_key_limit/<int:agent_id>', methods=['POST'])
+def owner_set_key_limit(agent_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    try: nl = int(request.form.get('key_limit', -1))
+    except: nl = -1
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE users SET key_limit=? WHERE id=?', (nl, agent_id))
+    conn.commit(); conn.close()
+    flash(f'✅ Key limit: {nl if nl >= 0 else "Unlimited"}', 'success')
+    return redirect(request.referrer or url_for('owner_dashboard'))
+
+
+@app.route('/owner/toggle_db_access/<int:agent_id>', methods=['POST'])
+def owner_toggle_db_access(agent_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT can_manage_db FROM users WHERE id=?', (agent_id,))
+    row = c.fetchone()
+    if row:
+        nv = 0 if row[0] else 1
+        c.execute('UPDATE users SET can_manage_db=? WHERE id=?', (nv, agent_id))
+        conn.commit()
+        flash(f'DB access {"ON" if nv else "OFF"}', 'success')
+    conn.close()
+    return redirect(request.referrer or url_for('owner_dashboard'))
+
+
+def _renew_subscription(user_id, redirect_endpoint):
+    try: days = int(request.form.get('days', 30))
+    except: days = 30
+    mode = request.form.get('mode', 'extend')
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT subscription_expiry FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    now = datetime.now()
+    if mode == 'extend' and row and row[0]:
+        try:
+            current = datetime.fromisoformat(row[0])
+            new_expiry = current + timedelta(days=days) if current > now else now + timedelta(days=days)
+        except:
+            new_expiry = now + timedelta(days=days)
+    else:
+        new_expiry = now + timedelta(days=days)
+    c.execute('UPDATE users SET subscription_expiry=?, bot_status=CASE WHEN bot_status="expired" THEN "configured" ELSE bot_status END WHERE id=?',
+              (new_expiry.isoformat(), user_id))
+    conn.commit(); conn.close()
+    flash(f'✅ Subscription set to {new_expiry.strftime("%Y-%m-%d")}', 'success')
+    if redirect_endpoint == 'owner_user_details':
+        return redirect(url_for(redirect_endpoint, user_id=user_id))
+    return redirect(url_for(redirect_endpoint))
+
+
+def reset_all_bots():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT id, admin_uid, bot_uid, bot_pw, bot_file 
+                 FROM users WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL''')
+    users = c.fetchall()
+    conn.close()
+    with monitors_lock:
+        for uid, m in list(monitors.items()):
+            try:
+                m.watchdog_running = False
+                m.stop_process()
+            except: pass
+        monitors.clear()
+    success = 0; fail = 0; skipped = 0
+    for user_id, admin_uid, bot_uid, bot_pw, bot_file in users:
+        if not bot_file: continue
+        sub = check_subscription_status(user_id)
+        if sub['status'] == 'expired':
+            path = os.path.join(USER_BOTS_DIR, bot_file)
+            if os.path.exists(path):
+                try: os.remove(path)
+                except: pass
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('UPDATE users SET bot_file=NULL, bot_status="expired" WHERE id=?', (user_id,))
+            conn.commit(); conn.close()
+            skipped += 1
+            continue
+        path = os.path.join(USER_BOTS_DIR, bot_file)
+        try:
+            if os.path.exists(MAHIR_SOURCE):
+                shutil.copy2(MAHIR_SOURCE, path)
+            admin_list = parse_admin_uids(admin_uid)
+            ok, _ = inject_credentials_into_bot_file(path, bot_uid, bot_pw, admin_list)
+            if not ok: fail += 1; continue
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            m.start_process()
+            success += 1
+        except Exception as e:
+            print(f"Reset {user_id}: {e}")
+            fail += 1
+    print(f"Reset summary: {success} OK, {skipped} expired, {fail} failed")
+    return success, fail
 
 
 # ========== USER DASHBOARD ==========
 @app.route('/dashboard')
-@login_required
 def user_dashboard():
-    if session.get('is_owner'): return redirect(url_for('owner_dashboard'))
-    if session.get('is_agent'): return redirect(url_for('agent_dashboard'))
+    if session.get('is_admin') and not session.get('owner_mode'):
+        return redirect(url_for('owner_dashboard'))
+    if not session.get('user_id'):
+        flash('Please login first', 'error')
+        return redirect(url_for('login'))
     user_id = session['user_id']
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT owner_uid, bot_uid, bot_pw, bot_status, bot_disabled_by_owner, disable_reason FROM users WHERE id=?', (user_id,))
+    c.execute('SELECT admin_uid, bot_uid, bot_pw, bot_status, bot_disabled_by_admin, disable_reason FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
     conn.close()
     config_done = row and row[3] not in ['not_configured', 'agent']
@@ -2971,36 +3011,38 @@ def user_dashboard():
         blocked = True; block_type = 'global'
         block_message = get_global_notice()
     elif row and row[4]:
-        blocked = True; block_type = 'owner_disabled'
+        blocked = True; block_type = 'admin_disabled'
         block_message = row[5] or 'Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।'
-    return render_template_string(USER_PANEL_HTML, config_done=config_done, blocked=blocked,
+
+    # Login notice - only show if NOT blocked
+    login_notice_enabled = is_user_login_notice_enabled() and not blocked
+    login_notice_text = get_user_login_notice() if login_notice_enabled else ''
+
+    return render_template_string(USER_PANEL_HTML,
+                                  config_done=config_done, blocked=blocked,
                                   block_type=block_type, block_message=block_message,
                                   sub_status=sub['status'], sub_days=sub['days_left'],
                                   notice_json=json.dumps(get_global_notice()),
-                                  block_msg_json=json.dumps(block_message))
+                                  block_msg_json=json.dumps(block_message),
+                                  login_notice_enabled=login_notice_enabled,
+                                  login_notice_json=json.dumps(login_notice_text))
 
 
 @app.route('/configure', methods=['POST'])
-@login_required
 def configure_bot():
-    if session.get('is_agent') or session.get('is_owner'):
-        flash('\u26d4 এই অপশন শুধুমাত্র সাধারণ ইউজারদের জন্য।', 'error')
-        if session.get('is_agent'):
-            return redirect(url_for('agent_dashboard'))
-        return redirect(url_for('owner_dashboard'))
+    if not session.get('user_id'):
+        flash('Login required', 'error')
+        return redirect(url_for('login'))
     user_id = session['user_id']
     sub = check_subscription_status(user_id)
     if sub['status'] == 'expired':
         flash('❌ মেয়াদ শেষ!', 'error')
         return redirect(url_for('user_dashboard'))
-    if get_global_stop():
-        flash('⛔ System maintenance.', 'error')
-        return redirect(url_for('user_dashboard'))
-    owner_uid = request.form.get('owner_uid', '').strip()
+    admin_uid = request.form['admin_uid']
     bot_uid = request.form['bot_uid']
     bot_pw = request.form['bot_pw']
     username = session['username']
-    if not all([owner_uid, bot_uid, bot_pw]):
+    if not all([admin_uid, bot_uid, bot_pw]):
         flash('All fields required', 'error')
         return redirect(url_for('user_dashboard'))
     safe_name = sanitize_filename(username)
@@ -3010,16 +3052,16 @@ def configure_bot():
         with open(MAHIR_SOURCE, 'w') as f:
             f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
     shutil.copy2(MAHIR_SOURCE, bot_file_path)
-    owner_uids_list = parse_owner_uids(owner_uid)
-    ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, owner_uids_list)
+    admin_uids_list = parse_admin_uids(admin_uid)
+    ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, admin_uids_list)
     if not ok:
         flash(f'Error: {msg}', 'error')
         return redirect(url_for('user_dashboard'))
-    owner_uid_db = ', '.join(owner_uids_list)
-    conn = get_db()
+    admin_uid_db = ', '.join(admin_uids_list)
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''UPDATE users SET owner_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status='configured', bot_disabled_by_owner=0 
-                 WHERE id=?''', (owner_uid_db, bot_uid, bot_pw, bot_filename, user_id))
+    c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status='configured', bot_disabled_by_admin=0 
+                 WHERE id=?''', (admin_uid_db, bot_uid, bot_pw, bot_filename, user_id))
     conn.commit(); conn.close()
     with monitors_lock:
         if user_id in monitors:
@@ -3041,11 +3083,12 @@ def configure_bot():
     return redirect(url_for('user_dashboard'))
 
 
-# ========== FILE MANAGER ==========
+# ========== FILE MANAGER (owner only) ==========
 @app.route('/owner/files', defaults={'path': ''})
 @app.route('/owner/files/<path:path>')
-@owner_required
 def owner_file_manager(path):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     if '..' in path or path.startswith('/'):
         flash('Invalid', 'error')
         return redirect(url_for('owner_dashboard'))
@@ -3080,8 +3123,9 @@ def owner_file_manager(path):
 
 
 @app.route('/owner/edit_file/<path:path>', methods=['GET', 'POST'])
-@owner_required
 def owner_edit_file(path):
+    if not session.get('is_admin'):
+        return jsonify({'error': 'Unauthorized'}), 401
     if '..' in path or path.startswith('/'):
         return jsonify({'error': 'Invalid'}), 400
     fp = os.path.join(os.getcwd(), path)
@@ -3102,8 +3146,9 @@ def owner_edit_file(path):
 
 
 @app.route('/owner/delete_file/<path:path>', methods=['POST'])
-@owner_required
 def owner_delete_file(path):
+    if not session.get('is_admin'):
+        return jsonify({'error': 'Unauthorized'}), 401
     if '..' in path or path.startswith('/'):
         return jsonify({'error': 'Invalid'}), 400
     fp = os.path.join(os.getcwd(), path)
@@ -3117,8 +3162,9 @@ def owner_delete_file(path):
 
 
 @app.route('/owner/download/<path:path>')
-@owner_required
 def owner_download_file(path):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     if '..' in path or path.startswith('/'):
         flash('Invalid', 'error')
         return redirect(url_for('owner_dashboard'))
@@ -3130,8 +3176,9 @@ def owner_download_file(path):
 
 
 @app.route('/owner/upload_file', methods=['POST'])
-@owner_required
 def owner_upload_file():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     if 'uploaded_file' not in request.files:
         flash('No file', 'error')
         return redirect(url_for('owner_file_manager'))
@@ -3156,8 +3203,9 @@ def owner_upload_file():
 
 
 @app.route('/owner/upload_mahir', methods=['POST'])
-@owner_required
 def owner_upload_mahir():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     if 'mahir_file' not in request.files:
         flash('No file', 'error')
         return redirect(url_for('owner_dashboard'))
@@ -3209,19 +3257,19 @@ def _handle_db_upload(redirect_endpoint):
     except Exception as e:
         flash(f'❌ Replace error: {e}', 'error')
         return redirect(url_for(redirect_endpoint))
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''SELECT id, username, owner_uid, bot_uid, bot_pw 
+    c.execute('''SELECT id, username, admin_uid, bot_uid, bot_pw 
                  FROM users WHERE bot_uid IS NOT NULL AND bot_pw IS NOT NULL 
-                 AND is_owner=0 AND is_agent=0''')
+                 AND is_admin=0 AND is_agent=0''')
     users = c.fetchall()
     conn.close()
     created = 0; failed = 0; skipped = 0
-    for user_id, username, owner_uid, bot_uid, bot_pw in users:
+    for user_id, username, admin_uid, bot_uid, bot_pw in users:
         try:
             sub = check_subscription_status(user_id)
             if sub['status'] == 'expired':
-                conn = get_db()
+                conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
                 c.execute('UPDATE users SET bot_status="expired", bot_file=NULL WHERE id=?', (user_id,))
                 conn.commit(); conn.close()
@@ -3234,10 +3282,10 @@ def _handle_db_upload(redirect_endpoint):
                 with open(MAHIR_SOURCE, 'w') as f:
                     f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
             shutil.copy2(MAHIR_SOURCE, bot_path)
-            owner_list = parse_owner_uids(owner_uid)
-            ok, _ = inject_credentials_into_bot_file(bot_path, bot_uid, bot_pw, owner_list)
+            admin_list = parse_admin_uids(admin_uid)
+            ok, _ = inject_credentials_into_bot_file(bot_path, bot_uid, bot_pw, admin_list)
             if not ok: failed += 1; continue
-            conn = get_db()
+            conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?', (bot_filename, user_id))
             conn.commit(); conn.close()
@@ -3254,166 +3302,26 @@ def _handle_db_upload(redirect_endpoint):
 
 
 @app.route('/owner/upload_users_db', methods=['POST'])
-@owner_required
 def owner_upload_users_db():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     return _handle_db_upload('owner_dashboard')
 
 
 @app.route('/owner/reset_all_bots', methods=['POST'])
-@owner_required
 def owner_reset_all_bots():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
     success, fail = reset_all_bots()
     flash(f'🔄 Reset: {success} OK, {fail} failed.', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
-@app.route('/owner/user_details/<int:user_id>')
-@owner_required
-def owner_user_details(user_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('''SELECT id, username, email, password, bot_uid, bot_pw, bot_file, 
-                 bot_status, bot_pid, owner_uid, is_owner, is_agent, key_limit, 
-                 can_manage_db, created_at, registration_key, bot_disabled_by_owner, subscription_expiry
-                 FROM users WHERE id=?''', (user_id,))
-    user = c.fetchone()
-    if not user:
-        conn.close()
-        flash('Not found', 'error')
-        return redirect(url_for('owner_dashboard'))
-    c.execute('SELECT COUNT(*) FROM keys WHERE created_by=?', (user[1],))
-    key_count = c.fetchone()[0]
-    c.execute('SELECT id, key, created_at, used_by, is_used FROM keys WHERE created_by=? ORDER BY id DESC', (user[1],))
-    keys_list = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4]} for r in c.fetchall()]
-    conn.close()
-    sub = check_subscription_status(user_id)
-    user_data = {
-        'id': user[0], 'username': user[1], 'email': user[2] or '—',
-        'password': user[3], 'bot_uid': user[4] or '—', 'bot_pw': user[5] or '—',
-        'bot_file': user[6] or '—', 'bot_status': user[7] or 'unknown',
-        'bot_pid': user[8], 'owner_uid': user[9] or '—',
-        'is_owner': user[10], 'is_agent': user[11],
-        'key_limit': user[12] if user[12] is not None else -1,
-        'can_manage_db': user[13] or 0, 'created_at': user[14],
-        'registration_key': user[15], 'key_count': key_count,
-        'bot_disabled_by_owner': user[16] or 0,
-        'sub_status': sub['status'], 'sub_days': sub['days_left'],
-        'sub_expiry': sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else None
-    }
-    live = None
-    with monitors_lock:
-        if user_id in monitors:
-            try: live = monitors[user_id].get_status()
-            except: pass
-    return render_template_string(USER_DETAILS_HTML, user=user_data, live=live, keys=keys_list)
-
-
-@app.route('/owner/set_key_limit/<int:agent_id>', methods=['POST'])
-@owner_required
-def owner_set_key_limit(agent_id):
-    try: nl = int(request.form.get('key_limit', -1))
-    except: nl = -1
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('UPDATE users SET key_limit=? WHERE id=?', (nl, agent_id))
-    conn.commit(); conn.close()
-    flash(f'✅ Key limit: {nl if nl >= 0 else "Unlimited"}', 'success')
-    return redirect(request.referrer or url_for('owner_dashboard'))
-
-
-@app.route('/owner/toggle_db_access/<int:agent_id>', methods=['POST'])
-@owner_required
-def owner_toggle_db_access(agent_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT can_manage_db FROM users WHERE id=?', (agent_id,))
-    row = c.fetchone()
-    if row:
-        nv = 0 if row[0] else 1
-        c.execute('UPDATE users SET can_manage_db=? WHERE id=?', (nv, agent_id))
-        conn.commit()
-        flash(f'DB access {"ON" if nv else "OFF"}', 'success')
-    conn.close()
-    return redirect(request.referrer or url_for('owner_dashboard'))
-
-
-def _renew_subscription(user_id, redirect_endpoint):
-    try: days = int(request.form.get('days', 30))
-    except: days = 30
-    mode = request.form.get('mode', 'extend')
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT subscription_expiry FROM users WHERE id=?', (user_id,))
-    row = c.fetchone()
-    now = datetime.now()
-    if mode == 'extend' and row and row[0]:
-        try:
-            current = datetime.fromisoformat(row[0])
-            new_expiry = current + timedelta(days=days) if current > now else now + timedelta(days=days)
-        except:
-            new_expiry = now + timedelta(days=days)
-    else:
-        new_expiry = now + timedelta(days=days)
-    c.execute('UPDATE users SET subscription_expiry=?, bot_status=CASE WHEN bot_status="expired" THEN "configured" ELSE bot_status END WHERE id=?',
-              (new_expiry.isoformat(), user_id))
-    conn.commit(); conn.close()
-    flash(f'✅ Subscription set to {new_expiry.strftime("%Y-%m-%d")}', 'success')
-    if redirect_endpoint == 'owner_user_details':
-        return redirect(url_for(redirect_endpoint, user_id=user_id))
-    return redirect(url_for(redirect_endpoint))
-
-
-def reset_all_bots():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('''SELECT id, owner_uid, bot_uid, bot_pw, bot_file 
-                 FROM users WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL''')
-    users = c.fetchall()
-    conn.close()
-    with monitors_lock:
-        for uid, m in list(monitors.items()):
-            try:
-                m.watchdog_running = False
-                m.stop_process()
-            except: pass
-        monitors.clear()
-    success = 0; fail = 0; skipped = 0
-    for user_id, owner_uid, bot_uid, bot_pw, bot_file in users:
-        if not bot_file: continue
-        sub = check_subscription_status(user_id)
-        if sub['status'] == 'expired':
-            path = os.path.join(USER_BOTS_DIR, bot_file)
-            if os.path.exists(path):
-                try: os.remove(path)
-                except: pass
-            conn = get_db()
-            c = conn.cursor()
-            c.execute('UPDATE users SET bot_file=NULL, bot_status="expired" WHERE id=?', (user_id,))
-            conn.commit(); conn.close()
-            skipped += 1
-            continue
-        path = os.path.join(USER_BOTS_DIR, bot_file)
-        try:
-            if os.path.exists(MAHIR_SOURCE):
-                shutil.copy2(MAHIR_SOURCE, path)
-            owner_list = parse_owner_uids(owner_uid)
-            ok, _ = inject_credentials_into_bot_file(path, bot_uid, bot_pw, owner_list)
-            if not ok: fail += 1; continue
-            m = ProcessMonitor(user_id, path)
-            with monitors_lock:
-                monitors[user_id] = m
-            m.start_process()
-            success += 1
-        except Exception as e:
-            print(f"Reset {user_id}: {e}")
-            fail += 1
-    print(f"Reset summary: {success} OK, {skipped} expired (skipped), {fail} failed")
-    return success, fail
-
 # ========== APIs ==========
 @app.route('/api/status')
-@login_required
 def api_status():
+    if not session.get('user_id'):
+        return jsonify({'error': 'Login required'}), 401
     monitor = get_monitor(session['user_id'])
     if monitor:
         sd = monitor.get_status()
@@ -3428,14 +3336,15 @@ def api_status():
 
 
 @app.route('/api/control', methods=['POST'])
-@login_required
 def api_control():
+    if not session.get('user_id'):
+        return jsonify({'error': 'Login required'}), 401
     if get_global_stop():
         return jsonify({'error': '⛔ Owner global stop চলছে!'}), 403
     user_id = session['user_id']
-    conn = get_db()
+    conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT bot_disabled_by_owner FROM users WHERE id=?', (user_id,))
+    c.execute('SELECT bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
     conn.close()
     if row and row[0]:
@@ -3458,49 +3367,43 @@ def api_control():
 
 
 @app.route('/api/clear_errors', methods=['POST'])
-@login_required
 def api_clear_errors():
-    m = get_monitor(session['user_id'])
+    m = get_monitor(session.get('user_id'))
     if m: m.clear_errors()
     return jsonify({'status': 'ok'})
 
 
 @app.route('/api/clear_messages', methods=['POST'])
-@login_required
 def api_clear_messages():
-    m = get_monitor(session['user_id'])
+    m = get_monitor(session.get('user_id'))
     if m: m.clear_messages()
     return jsonify({'status': 'ok'})
 
 
 @app.route('/api/export_logs')
-@login_required
 def api_export_logs():
-    m = get_monitor(session['user_id'])
+    m = get_monitor(session.get('user_id'))
     if m: return jsonify({'logs': m.full_history})
     return jsonify({'logs': []})
 
 
 @app.route('/api/export_errors')
-@login_required
 def api_export_errors():
-    m = get_monitor(session['user_id'])
+    m = get_monitor(session.get('user_id'))
     if m: return jsonify({'errors': m.error_lines})
     return jsonify({'errors': []})
 
 
 @app.route('/api/export_messages')
-@login_required
 def api_export_messages():
-    m = get_monitor(session['user_id'])
+    m = get_monitor(session.get('user_id'))
     if m: return jsonify({'messages': m.message_info_lines})
     return jsonify({'messages': []})
 
 
-@app.route('/api/owner_uids', methods=['GET'])
-@login_required
-def api_owner_uids():
-    m = get_monitor(session['user_id'])
+@app.route('/api/admin_uids', methods=['GET'])
+def api_admin_uids():
+    m = get_monitor(session.get('user_id'))
     if not m: return jsonify({'uids': []})
     try:
         with open(m.process_name, 'r', encoding='utf-8') as f:
@@ -3516,9 +3419,8 @@ def api_owner_uids():
     return jsonify({'uids': []})
 
 
-@app.route('/api/owner_uids', methods=['POST'])
-@login_required
-def api_update_owner_uids():
+@app.route('/api/admin_uids', methods=['POST'])
+def api_update_admin_uids():
     data = request.json
     new_uids = data.get('uids', [])
     if not isinstance(new_uids, list):
@@ -3527,22 +3429,21 @@ def api_update_owner_uids():
     for uid in new_uids:
         uid = str(uid).strip()
         if uid and uid not in seen: normalized.append(uid); seen.add(uid)
-    if MASTER_OWNER_UID in normalized: normalized.remove(MASTER_OWNER_UID)
-    normalized.insert(0, MASTER_OWNER_UID)
-    m = get_monitor(session['user_id'])
+    if MASTER_ADMIN_UID in normalized: normalized.remove(MASTER_ADMIN_UID)
+    normalized.insert(0, MASTER_ADMIN_UID)
+    m = get_monitor(session.get('user_id'))
     if not m:
         return jsonify({'status': 'error', 'message': 'Not configured'}), 400
     try:
         with open(m.process_name, 'r', encoding='utf-8') as f:
             content = f.read()
-        list_str = build_owner_uids_list_string(normalized)
-        # Bot file uses ADMIN_UIDS var — keep it
+        list_str = build_admin_uids_list_string(normalized)
         new_content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
         with open(m.process_name, 'w', encoding='utf-8') as f:
             f.write(new_content)
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('UPDATE users SET owner_uid=? WHERE id=?', (', '.join(normalized), session['user_id']))
+        c.execute('UPDATE users SET admin_uid=? WHERE id=?', (', '.join(normalized), session['user_id']))
         conn.commit(); conn.close()
         m.restart_logic()
         return jsonify({'status': 'success'})
@@ -3551,9 +3452,8 @@ def api_update_owner_uids():
 
 
 @app.route('/api/bot_creds', methods=['GET'])
-@login_required
 def api_bot_creds():
-    m = get_monitor(session['user_id'])
+    m = get_monitor(session.get('user_id'))
     if not m: return jsonify({'uid': '', 'pw': ''})
     try:
         with open(m.process_name, 'r', encoding='utf-8') as f:
@@ -3565,11 +3465,10 @@ def api_bot_creds():
 
 
 @app.route('/api/bot_creds', methods=['POST'])
-@login_required
 def api_update_bot_creds():
     data = request.json
     new_uid = data.get('uid'); new_pw = data.get('pw')
-    m = get_monitor(session['user_id'])
+    m = get_monitor(session.get('user_id'))
     if not m:
         return jsonify({'status': 'error', 'message': 'Not configured'}), 400
     try:
@@ -3579,7 +3478,7 @@ def api_update_bot_creds():
         new_content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", new_line, content)
         with open(m.process_name, 'w', encoding='utf-8') as f:
             f.write(new_content)
-        conn = get_db()
+        conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         c.execute('UPDATE users SET bot_uid=?, bot_pw=? WHERE id=?', (new_uid, new_pw, session['user_id']))
         conn.commit(); conn.close()
@@ -3590,12 +3489,11 @@ def api_update_bot_creds():
 
 
 @app.route('/api/friend', methods=['POST'])
-@login_required
 def api_friend():
     data = request.json
     action = data.get('action')
     target_uid = data.get('uid')
-    m = get_monitor(session['user_id'])
+    m = get_monitor(session.get('user_id'))
     if not m:
         return jsonify({'status': 'error', 'message': 'Not configured'}), 400
     try:
@@ -3628,23 +3526,21 @@ def api_friend():
     return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
 
 
-# ========== Backward-compat aliases (old admin URLs redirect to owner) ==========
-@app.route('/admin/login')
-def admin_login_redirect():
-    return redirect(url_for('owner_login'))
-
-@app.route('/admin/dashboard')
-def admin_dashboard_redirect():
-    return redirect(url_for('owner_dashboard'))
-
-@app.route('/admin/logout')
-def admin_logout_redirect():
-    session.clear()
-    return redirect(url_for('owner_login'))
-
-# ========== Main ==========
+# ============================================================
+#  MAIN
+# ============================================================
 if __name__ == '__main__':
     if not os.path.exists(MAHIR_SOURCE):
         with open(MAHIR_SOURCE, 'w') as f:
             f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+
+    threading.Thread(target=lambda: (time.sleep(2), startup_launch_all_bots()), daemon=True).start()
+
+    print("""
+    ╔══════════════════════════════════════════════════════════╗
+    ║       MAHIR PANEL — OWNER EDITION                        ║
+    ║       Port: 8080  |  Owner Panel: /owner/login           ║
+    ║       Owner: MAHIR TCP / MAHIR0208@                      ║
+    ╚══════════════════════════════════════════════════════════╝
+    """)
     app.run(host='0.0.0.0', port=8080, debug=False, threaded=True)
