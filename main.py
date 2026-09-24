@@ -1511,6 +1511,7 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             <th>USER DAYS LEFT</th>
             <th>USED BY</th>
             <th>STATUS</th>
+            <th style="text-align:right;">ACTION</th>
           </tr>
         </thead>
         <tbody>
@@ -1537,8 +1538,15 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             </td>
             <td>{% if key.used_by %}<span class="used-by"><i class="fas fa-user user-icon"></i>{{ key.used_by }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}</td>
             <td>{% if key.is_used %}<span class="status-badge used"><i class="fas fa-check-circle"></i> USED</span>{% else %}<span class="status-badge available"><i class="fas fa-clock"></i> AVAILABLE</span>{% endif %}</td>
+            <td style="text-align:right;">
+              {% if key.used_user_id %}
+                <a href="/agent/customer_history/{{ key.used_user_id }}" class="btn btn-info btn-xs" style="font-size:.7rem;"><i class="fas fa-eye"></i> Details</a>
+              {% else %}
+                <span style="color:var(--muted);font-size:.72rem;">—</span>
+              {% endif %}
+            </td>
           </tr>
-          {% else %}<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:30px;">No keys yet. Generate one above.</td></tr>{% endfor %}
+          {% else %}<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px;">No keys yet. Generate one above.</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>
@@ -2910,10 +2918,12 @@ def agent_dashboard():
         used_by = r[3]
         user_sub_days = None
         user_sub_status = None
+        used_user_id = None
         if used_by:
             c.execute('SELECT id FROM users WHERE username=?', (used_by,))
             ur = c.fetchone()
             if ur:
+                used_user_id = ur[0]
                 sub = check_subscription_status(ur[0])
                 user_sub_status = sub['status']
                 if sub['status'] == 'unlimited':
@@ -2927,7 +2937,8 @@ def agent_dashboard():
             'is_used': r[4], 'expiry_date': r[5],
             'duration_days': r[6] if r[6] is not None else 0,
             'user_sub_days': user_sub_days,
-            'user_sub_status': user_sub_status
+            'user_sub_status': user_sub_status,
+            'used_user_id': used_user_id
         })
     c.execute('SELECT key_limit, can_manage_db FROM users WHERE id=?', (session['user_id'],))
     row = c.fetchone()
