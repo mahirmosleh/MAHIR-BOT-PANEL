@@ -111,6 +111,17 @@ def init_db():
         key TEXT PRIMARY KEY,
         value TEXT
     )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS subscription_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        extended_by TEXT,
+        days_added INTEGER,
+        mode TEXT,
+        old_expiry TIMESTAMP,
+        new_expiry TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
     conn.commit()
     conn.close()
 
@@ -141,6 +152,21 @@ def migrate_db():
         if 'duration_days' not in kcols:
             c.execute('ALTER TABLE keys ADD COLUMN duration_days INTEGER DEFAULT 0')
 
+        # subscription_history table
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='subscription_history'")
+        if not c.fetchone():
+            c.execute('''CREATE TABLE subscription_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                extended_by TEXT,
+                days_added INTEGER,
+                mode TEXT,
+                old_expiry TIMESTAMP,
+                new_expiry TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+
         conn.commit()
         conn.close()
     except Exception as e:
@@ -169,6 +195,21 @@ def set_setting(key, value):
     except: return False
 
 
+def log_subscription_history(user_id, username, extended_by, days_added, mode, old_expiry, new_expiry):
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''INSERT INTO subscription_history 
+                     (user_id, username, extended_by, days_added, mode, old_expiry, new_expiry)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                  (user_id, username, extended_by, days_added, mode,
+                   old_expiry.isoformat() if old_expiry else None,
+                   new_expiry.isoformat() if new_expiry else None))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print(f"History log error: {e}")
+
+
 def get_global_stop():
     return get_setting('global_bot_stop', '0') == '1'
 
@@ -179,18 +220,18 @@ def get_global_notice():
         '╔══════════════════════════════╗\n'
         '🌸 **আসসালামু আলাইকুম** 🌸\n'
         '╚══════════════════════════════╝\n\n'
-        '💙 **প্রিয় TCP Bot User সবাইকে,**\n\n'
+        '💙 **প্রিয় TCP Bot User সবাইকে,**\n\n'
         'আশা করি আল্লাহর রহমতে আপনারা সবাই ভালো আছেন এবং সুস্থ আছেন। 🤍\n\n'
         '🔥 **MAHIR TCP BOT**-এর সাথে থাকার জন্য আপনাদের সবাইকে আন্তরিকভাবে ধন্যবাদ। 🫶\n\n'
-        '⚙️ Bot ব্যবহার করার সময় যদি কোনো **সমস্যা • Bug • Error • Update Issue** '
+        '⚙️ Bot ব্যবহার করার সময় যদি কোনো **সমস্যা • Bug • Error • Update Issue** '
         'অথবা অন্য কোনো সমস্যা দেখতে পান, তাহলে অবশ্যই আমাদের জানাবেন।\n\n'
-        '🛠️ আপনাদের দেওয়া রিপোর্ট অনুযায়ী সমস্যাগুলো ঠিক করার সর্বোচ্চ চেষ্টা করব, ইনশাআল্লাহ। ❤️\n\n'
-        '⏳ কাজের ব্যস্ততার কারণে কোনো Update বা Fix দিতে মাঝে মাঝে একটু সময় লাগতে পারে। '
-        'তবে চিন্তা করবেন না—সময় পেলেই সবকিছু ঠিক করার চেষ্টা করব। ⚡\n\n'
+        '🛠️ আপনাদের দেওয়া রিপোর্ট অনুযায়ী সমস্যাগুলো ঠিক করার সর্বোচ্চ চেষ্টা করব, ইনশাআল্লাহ। ❤️\n\n'
+        '⏳ কাজের ব্যস্ততার কারণে কোনো Update বা Fix দিতে মাঝে মাঝে একটু সময় লাগতে পারে। '
+        'তবে চিন্তা করবেন না—সময় পেলেই সবকিছু ঠিক করার চেষ্টা করব। ⚡\n\n'
         '━━━━━━━━━━━━━━━━━━━━━━\n\n'
         '🌸 **সবাই ভালো থাকবেন**\n'
         '🤍 **সুস্থ থাকবেন**\n'
-        '🤲 **নিজেদের খেয়াল রাখবেন**\n\n'
+        '🤲 **নিজেদের খেয়াল রাখবেন**\n\n'
         '🔥 **MAHIR TCP BOT** 🔥\n'
         '💫 *Stay Connected • Stay Updated* 💫\n\n'
         '╚══════════════════════════════╝'
@@ -198,7 +239,6 @@ def get_global_notice():
 
 
 def get_user_login_notice():
-    """User panel-এ login করলে যে notice দেখাবে"""
     return get_setting('user_login_notice_text', '')
 
 
@@ -323,6 +363,24 @@ def check_subscription_status(user_id):
         return {'status': 'active', 'days_left': days_left, 'expiry': expiry_dt, 'hours_left': int(total_hours)}
     except:
         return {'status': 'unknown', 'days_left': 0, 'expiry': None}
+
+
+def format_time_left(expiry_dt):
+    """Return human-readable time left string like '5d 12h 30m'"""
+    if not expiry_dt:
+        return '∞'
+    diff = expiry_dt - datetime.now()
+    total = int(diff.total_seconds())
+    if total <= 0:
+        return 'Expired'
+    days = total // 86400
+    hours = (total % 86400) // 3600
+    minutes = (total % 3600) // 60
+    parts = []
+    if days > 0: parts.append(f"{days}d")
+    if hours > 0: parts.append(f"{hours}h")
+    if minutes > 0 and days < 7: parts.append(f"{minutes}m")
+    return ' '.join(parts) if parts else 'Less than 1m'
 
 
 def expire_user_bot(user_id):
@@ -476,12 +534,10 @@ class ProcessMonitor:
         self.temp_guild_name = "N/A"
         self.temp_pfp_url = "N/A"
 
-        # Auto-restart monitor
         self.auto_restart_running = True
         self.auto_restart_thread = threading.Thread(target=self._auto_restart_loop, daemon=True)
         self.auto_restart_thread.start()
 
-        # Expiry watchdog
         self.watchdog_running = True
         self.watchdog_thread = threading.Thread(target=self._expiry_watchdog, daemon=True)
         self.watchdog_thread.start()
@@ -1041,6 +1097,7 @@ a{color:var(--gold2)}
 .btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
 .btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}
 .btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+.btn-admin{background:linear-gradient(135deg,#00d9f5,#8540F5);color:#fff}
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}
@@ -1177,6 +1234,10 @@ td code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(-
 .status-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 14px;border-radius:20px;font-size:.68rem;font-weight:800;letter-spacing:.8px;text-transform:uppercase}
 .status-badge.used{background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(15,76,191,.15));color:#7ab5ff;border:1px solid rgba(59,140,255,.4)}
 .status-badge.available{background:linear-gradient(135deg,rgba(245,200,66,.15),rgba(201,154,26,.15));color:#FFE28A;border:1px solid rgba(245,200,66,.4)}
+.days-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;font-size:.72rem;font-weight:800;letter-spacing:.5px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(15,76,191,.15));color:#7ab5ff;border:1px solid rgba(59,140,255,.4)}
+.days-badge.warn{background:linear-gradient(135deg,rgba(245,200,66,.15),rgba(201,154,26,.15));color:#FFE28A;border-color:rgba(245,200,66,.4)}
+.days-badge.danger{background:linear-gradient(135deg,rgba(212,42,58,.15),rgba(138,26,40,.15));color:#ff5a76;border-color:rgba(212,42,58,.4)}
+.days-badge.permanent{background:linear-gradient(135deg,rgba(74,222,128,.15),rgba(34,140,80,.15));color:#4ade80;border-color:rgba(74,222,128,.4)}
 '''
 
 SIDEBAR_JS = '''
@@ -1302,15 +1363,32 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> আপনার তৈরি key দিয়ে যারা register হয়েছে। Renew / Extend করতে পারবেন।</p>
     <div class="table-wrapper">
       <table>
-        <thead><tr><th>ID</th><th>Username</th><th>Bot UID</th><th>Status</th><th>Subscription</th><th style="text-align:right;">Renew</th></tr></thead>
+        <thead><tr><th>ID</th><th>Username</th><th>Bot UID</th><th>Status</th><th>Days Left</th><th>Expiry Date</th><th style="text-align:right;">Renew</th></tr></thead>
         <tbody>
           {% for u in my_users %}
           <tr>
             <td>{{ u.id }}</td>
             <td><strong>{{ u.username }}</strong><br><small style="color:var(--muted);font-size:.7rem;">{{ u.email or '—' }}</small></td>
             <td>{{ u.bot_uid or '—' }}</td>
-            <td>{% if u.sub_status == 'expired' %}<span class="badge badge-expired">Expired</span>{% elif u.sub_status == 'unlimited' %}<span class="badge badge-permanent">∞</span>{% else %}<span class="badge badge-active">{{ u.sub_days }}d</span>{% endif %}</td>
-            <td>{% if u.sub_expiry %}<small>{{ u.sub_expiry }}</small>{% else %}—{% endif %}</td>
+            <td>
+              {% if u.sub_status == 'expired' %}<span class="badge badge-expired">Expired</span>
+              {% elif u.sub_status == 'unlimited' %}<span class="badge badge-permanent">∞</span>
+              {% else %}<span class="badge badge-active">Active</span>{% endif %}
+            </td>
+            <td>
+              {% if u.sub_status == 'unlimited' %}
+                <span class="days-badge permanent"><i class="fas fa-infinity"></i> Unlimited</span>
+              {% elif u.sub_status == 'expired' %}
+                <span class="days-badge danger"><i class="fas fa-times-circle"></i> 0 days</span>
+              {% elif u.sub_days <= 3 %}
+                <span class="days-badge danger"><i class="fas fa-exclamation-triangle"></i> {{ u.sub_days }} days</span>
+              {% elif u.sub_days <= 7 %}
+                <span class="days-badge warn"><i class="fas fa-clock"></i> {{ u.sub_days }} days</span>
+              {% else %}
+                <span class="days-badge"><i class="fas fa-check-circle"></i> {{ u.sub_days }} days</span>
+              {% endif %}
+            </td>
+            <td>{% if u.sub_expiry %}<small style="color:var(--muted);">{{ u.sub_expiry }}</small>{% else %}—{% endif %}</td>
             <td>
               <form method="POST" action="/agent/renew_subscription/{{ u.id }}" style="display:flex;gap:4px;justify-content:flex-end;">
                 <input type="number" name="days" value="30" min="1" style="width:70px;padding:4px;font-size:.72rem;"/>
@@ -1322,7 +1400,7 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
               </form>
             </td>
           </tr>
-          {% else %}<tr class="empty-row"><td colspan="6">No customers yet.</td></tr>{% endfor %}
+          {% else %}<tr class="empty-row"><td colspan="7">No customers yet.</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>
@@ -1336,7 +1414,7 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
           <tr>
             <th>KEY</th>
             <th>CREATED</th>
-            <th>DURATION</th>
+            <th>USER DAYS LEFT</th>
             <th>USED BY</th>
             <th>STATUS</th>
           </tr>
@@ -1347,10 +1425,20 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             <td><span class="key-code">{{ key.key }}</span></td>
             <td style="color:var(--muted);font-size:.78rem;">{{ key.created_at[:16] if key.created_at else '—' }}</td>
             <td>
-              {% if key.duration_days == 0 %}
-                <span class="duration-tag" style="background:rgba(74,222,128,.15);color:#4ade80;border-color:rgba(74,222,128,.4);">∞ Permanent</span>
+              {% if key.user_sub_status == 'unlimited' %}
+                <span class="days-badge permanent"><i class="fas fa-infinity"></i> Unlimited</span>
+              {% elif key.user_sub_status == 'expired' %}
+                <span class="days-badge danger"><i class="fas fa-times-circle"></i> Expired</span>
+              {% elif key.user_sub_days is not none and key.user_sub_days >= 0 %}
+                {% if key.user_sub_days <= 3 %}
+                  <span class="days-badge danger"><i class="fas fa-exclamation-triangle"></i> {{ key.user_sub_days }} days left</span>
+                {% elif key.user_sub_days <= 7 %}
+                  <span class="days-badge warn"><i class="fas fa-clock"></i> {{ key.user_sub_days }} days left</span>
+                {% else %}
+                  <span class="days-badge"><i class="fas fa-check-circle"></i> {{ key.user_sub_days }} days left</span>
+                {% endif %}
               {% else %}
-                <span class="duration-tag">{{ key.duration_days }}d</span>
+                <span style="color:var(--muted);font-size:.75rem;">— (unused)</span>
               {% endif %}
             </td>
             <td>{% if key.used_by %}<span class="used-by"><i class="fas fa-user user-icon"></i>{{ key.used_by }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}</td>
@@ -1516,7 +1604,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     <div class="card-title"><i class="fas fa-users"></i> Registered Users</div>
     <div class="table-wrapper">
       <table>
-        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Bot Status</th><th>Subscription</th><th>Role</th><th style="text-align:right;">Actions</th></tr></thead>
+        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Bot Status</th><th>Days Left</th><th>Renewals</th><th>Role</th><th style="text-align:right;">Actions</th></tr></thead>
         <tbody>
           {% for user in users %}
           <tr>
@@ -1524,7 +1612,26 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             <td><strong>{{ user.username }}</strong>{% if user.created_by_agent %}<br><small style="color:var(--muted);font-size:.68rem;">by: {{ user.created_by_agent }}</small>{% endif %}</td>
             <td>{{ user.email or '-' }}</td>
             <td>{% if user.is_agent %}<span class="badge badge-agent">AGENT</span>{% elif user.bot_status == 'running' %}<span class="badge badge-running">Running</span>{% elif user.bot_status == 'expired' %}<span class="badge badge-expired">Expired</span>{% elif user.bot_status == 'stopped' %}<span class="badge badge-stopped">Stopped</span>{% else %}<span class="badge badge-unused">{{ user.bot_status or 'Not Configured' }}</span>{% endif %}</td>
-            <td>{% if user.sub_status == 'unlimited' %}<span class="badge badge-permanent">∞</span>{% elif user.sub_status == 'expired' %}<span class="badge badge-expired">Expired</span>{% else %}<span style="color:var(--green);">{{ user.sub_days }}d</span>{% endif %}</td>
+            <td>
+              {% if user.sub_status == 'unlimited' %}
+                <span class="days-badge permanent"><i class="fas fa-infinity"></i> ∞</span>
+              {% elif user.sub_status == 'expired' %}
+                <span class="days-badge danger"><i class="fas fa-times-circle"></i> Expired</span>
+              {% elif user.sub_days <= 3 %}
+                <span class="days-badge danger"><i class="fas fa-exclamation-triangle"></i> {{ user.sub_days }}d</span>
+              {% elif user.sub_days <= 7 %}
+                <span class="days-badge warn"><i class="fas fa-clock"></i> {{ user.sub_days }}d</span>
+              {% else %}
+                <span class="days-badge"><i class="fas fa-check-circle"></i> {{ user.sub_days }}d</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if user.renew_count and user.renew_count > 0 %}
+                <span class="days-badge"><i class="fas fa-redo"></i> {{ user.renew_count }}x <small style="opacity:.7;">(+{{ user.renew_days }}d)</small></span>
+              {% else %}
+                <span style="color:var(--muted);font-size:.75rem;">—</span>
+              {% endif %}
+            </td>
             <td>{% if user.is_admin %}<span class="badge badge-owner">OWNER</span>{% elif user.is_agent %}<span class="badge badge-agent">Agent</span>{% else %}<span class="badge badge-user">User</span>{% endif %}</td>
             <td>
               <div class="td-actions">
@@ -1542,7 +1649,78 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
               </div>
             </td>
           </tr>
-          {% else %}<tr class="empty-row"><td colspan="7">No users</td></tr>{% endfor %}
+          {% else %}<tr class="empty-row"><td colspan="8">No users</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-history" style="color:var(--purple);"></i> Subscription Renewal Summary (Per User)</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> কোন user-এর মেয়াদ কতবার, কত দিন করে বাড়ানো হয়েছে।</p>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>USERNAME</th>
+            <th>RENEWALS</th>
+            <th>TOTAL DAYS ADDED</th>
+            <th style="text-align:right;">ACTION</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in sub_summary %}
+          <tr>
+            <td><strong style="color:#FFE28A;">{{ s.username }}</strong></td>
+            <td><span class="days-badge"><i class="fas fa-redo"></i> {{ s.count }} time{{ 's' if s.count != 1 else '' }}</span></td>
+            <td><span class="days-badge permanent"><i class="fas fa-plus-circle"></i> +{{ s.total_days }} days</span></td>
+            <td style="text-align:right;"><a href="/owner/user_details/{{ s.user_id }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i> Details</a></td>
+          </tr>
+          {% else %}<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:30px;">No renewals yet.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-list-alt" style="color:var(--purple);"></i> Recent Subscription History (Latest 100)</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>USERNAME</th>
+            <th>DAYS ADDED</th>
+            <th>MODE</th>
+            <th>OLD EXPIRY</th>
+            <th>NEW EXPIRY</th>
+            <th>EXTENDED BY</th>
+            <th>WHEN</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in sub_history %}
+          <tr>
+            <td><strong style="color:#FFE28A;">{{ h.username }}</strong></td>
+            <td>
+              {% if h.mode == 'reset' %}
+                <span class="days-badge warn"><i class="fas fa-sync"></i> Reset +{{ h.days_added }}d</span>
+              {% else %}
+                <span class="days-badge permanent"><i class="fas fa-plus-circle"></i> +{{ h.days_added }} days</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.mode }}</small></td>
+            <td><small style="color:var(--muted);">{{ h.old_expiry[:16] if h.old_expiry else '—' }}</small></td>
+            <td><small style="color:#7dd3fc;">{{ h.new_expiry[:16] if h.new_expiry else '—' }}</small></td>
+            <td>
+              {% if h.extended_by == 'MAHIR TCP' or h.extended_by == 'OWNER' %}
+                <span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+              {% else %}
+                <span class="creator-badge agent"><i class="fas fa-user-tie"></i> {{ h.extended_by or '—' }}</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.created_at[:16] if h.created_at else '—' }}</small></td>
+          </tr>
+          {% else %}<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No subscription history yet.</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>
@@ -1673,7 +1851,17 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
       <div class="detail-item"><div class="detail-label">Password</div><div class="detail-value">{{ user.password }}<button class="copy-btn" onclick="copyT('{{ user.password }}')">Copy</button></div></div>
       <div class="detail-item"><div class="detail-label">Role</div><div class="detail-value">{% if user.is_admin %}OWNER{% elif user.is_agent %}AGENT{% else %}USER{% endif %}</div></div>
       <div class="detail-item"><div class="detail-label">Created</div><div class="detail-value">{{ user.created_at }}</div></div>
-      <div class="detail-item"><div class="detail-label">Subscription</div><div class="detail-value">{% if user.sub_status == 'unlimited' %}<span style="color:#4ade80;">∞ Unlimited</span>{% elif user.sub_status == 'expired' %}<span style="color:#ff5a76;">Expired</span>{% else %}<span style="color:#4ade80;">{{ user.sub_days }} days left</span>{% endif %}{% if user.sub_expiry %}<br><small style="color:var(--muted);">Expires: {{ user.sub_expiry }}</small>{% endif %}</div></div>
+      <div class="detail-item">
+        <div class="detail-label">Subscription</div>
+        <div class="detail-value">
+          {% if user.sub_status == 'unlimited' %}<span style="color:#4ade80;">∞ Unlimited</span>
+          {% elif user.sub_status == 'expired' %}<span style="color:#ff5a76;">Expired</span>
+          {% else %}<span style="color:#4ade80;">{{ user.sub_days }} days left</span>{% endif %}
+          <br><small style="color:var(--muted);">Time: {{ user.sub_time_left }}</small>
+          {% if user.sub_expiry %}<br><small style="color:var(--muted);">Expires: {{ user.sub_expiry }}</small>{% endif %}
+        </div>
+      </div>
+      <div class="detail-item"><div class="detail-label">Renew Count</div><div class="detail-value big">{{ user.renew_count }}x <small style="color:#4ade80;">(+{{ user.renew_days }}d)</small></div></div>
       <div class="detail-item"><div class="detail-label">Registration Key</div><div class="detail-value">{{ user.registration_key }}</div></div>
       <div class="detail-item"><div class="detail-label">Created By</div><div class="detail-value">{{ user.created_by_agent or 'Owner' }}</div></div>
     </div>
@@ -1707,7 +1895,6 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   </div>
   {% endif %}
 
-  {# ---------- USER ONLY: Subscription Management + Bot Controls ---------- #}
   {% if not user.is_agent and not user.is_admin %}
   <div class="card">
     <div class="card-title"><i class="fas fa-sync"></i> Subscription Management</div>
@@ -1722,7 +1909,55 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
       <button type="submit" class="btn btn-gold"><i class="fas fa-save"></i> Apply</button>
     </form>
   </div>
+  {% endif %}
 
+  {% if sub_history %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-history"></i> Renewal History ({{ sub_history|length }})</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>DAYS ADDED</th>
+            <th>MODE</th>
+            <th>OLD EXPIRY</th>
+            <th>NEW EXPIRY</th>
+            <th>EXTENDED BY</th>
+            <th>WHEN</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in sub_history %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td>
+              {% if h.mode == 'reset' %}
+                <span class="days-badge warn"><i class="fas fa-sync"></i> Reset +{{ h.days_added }}d</span>
+              {% else %}
+                <span class="days-badge permanent"><i class="fas fa-plus-circle"></i> +{{ h.days_added }} days</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.mode }}</small></td>
+            <td><small style="color:var(--muted);">{{ h.old_expiry[:16] if h.old_expiry else '—' }}</small></td>
+            <td><small style="color:#7dd3fc;">{{ h.new_expiry[:16] if h.new_expiry else '—' }}</small></td>
+            <td>
+              {% if h.extended_by == 'MAHIR TCP' or h.extended_by == 'OWNER' %}
+                <span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+              {% else %}
+                <span class="creator-badge agent"><i class="fas fa-user-tie"></i> {{ h.extended_by or '—' }}</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.created_at[:16] if h.created_at else '—' }}</small></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if not user.is_agent and not user.is_admin %}
   <div class="card">
     <div class="card-title"><i class="fas fa-cog"></i> Bot Controls</div>
     <div class="flex" style="gap:10px;">
@@ -1739,7 +1974,6 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   </div>
   {% endif %}
 
-  {# ---------- AGENT ONLY: Key Limit + DB Access ---------- #}
   {% if user.is_agent %}
   <div class="card">
     <div class="card-title"><i class="fas fa-key"></i> Key Limit</div>
@@ -1892,7 +2126,17 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 .chart-container{position:relative;height:250px}
 .config-form{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
 .config-status{padding:13px 16px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.12);border-left:4px solid var(--gold);border-radius:10px;color:var(--gold2);font-size:.85rem;margin-bottom:18px}
-@media(max-width:768px){.download-card{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}}
+.subscription-hero{background:linear-gradient(135deg,rgba(15,10,30,.95),rgba(10,5,20,.95));border:1px solid rgba(245,200,66,.2);border-radius:20px;padding:22px;margin-bottom:20px;box-shadow:0 15px 40px rgba(0,0,0,.4)}
+.sub-hero-title{font-size:.85rem;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:2px;margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.sub-hero-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+.sub-hero-item{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:14px;padding:16px;text-align:center}
+.sub-hero-label{font-size:.62rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);font-weight:700;margin-bottom:8px}
+.sub-hero-value{font-size:1.4rem;font-weight:800;color:#fff;word-break:break-word;line-height:1.2}
+.sub-hero-value.small{font-size:1rem}
+.sub-hero-value.green{color:#4ade80}
+.sub-hero-value.red{color:#ff5a76}
+.sub-hero-value.gold{color:#F5C842}
+@media(max-width:768px){.download-card{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}.sub-hero-value{font-size:1.1rem}}
 </style></head><body>
 
 <div class="notice-indicator" id="noticeBtn" onclick="showNotice()" style="display:none;"><i class="fas fa-bullhorn"></i> Owner Notice</div>
@@ -1946,6 +2190,40 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
   {% if sub_status == 'active' and sub_days <= 3 %}
   <div class="card" style="background:rgba(212,42,58,.1);border-color:rgba(212,42,58,.35);">
     <div style="color:var(--red2);font-weight:700;"><i class="fas fa-exclamation-triangle"></i> আপনার সাবস্ক্রিপশন {{ sub_days }} দিনের মধ্যে শেষ! এখনই renew করুন।</div>
+  </div>
+  {% endif %}
+
+  {% if sub_status != 'expired' %}
+  <div class="subscription-hero">
+    <div class="sub-hero-title"><i class="fas fa-clock" style="color:#F5C842;"></i> Your Subscription Status</div>
+    <div class="sub-hero-grid">
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Status</div>
+        <div class="sub-hero-value small {% if sub_status == 'unlimited' %}green{% elif sub_status == 'expired' %}red{% else %}green{% endif %}">
+          {% if sub_status == 'unlimited' %}∞ UNLIMITED{% elif sub_status == 'expired' %}EXPIRED{% else %}ACTIVE{% endif %}
+        </div>
+      </div>
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Days Left</div>
+        <div class="sub-hero-value {% if sub_days <= 3 %}red{% elif sub_days <= 7 %}gold{% else %}green{% endif %}">
+          {% if sub_status == 'unlimited' %}∞{% else %}{{ sub_days }}{% endif %}
+        </div>
+      </div>
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Time Remaining</div>
+        <div class="sub-hero-value small gold">{{ sub_time_left }}</div>
+      </div>
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Expires On</div>
+        <div class="sub-hero-value small" style="font-size:.85rem;">{{ sub_expiry_display }}</div>
+      </div>
+      {% if renew_count > 0 %}
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Total Renewals</div>
+        <div class="sub-hero-value small gold">{{ renew_count }}x (+{{ renew_days }}d)</div>
+      </div>
+      {% endif %}
+    </div>
   </div>
   {% endif %}
 
@@ -2087,7 +2365,6 @@ document.addEventListener('DOMContentLoaded', function(){
     if (GLOBAL_NOTICE && GLOBAL_NOTICE.trim()) {
       document.getElementById('noticeBtn').style.display = 'flex';
     }
-    // Login notice (only if not blocked)
     if (LOGIN_NOTICE_ENABLED && LOGIN_NOTICE_TEXT && LOGIN_NOTICE_TEXT.trim()) {
       setTimeout(function(){
         document.getElementById('loginNoticeMsg').innerHTML = LOGIN_NOTICE_TEXT;
@@ -2282,10 +2559,27 @@ def agent_dashboard():
                  FROM keys WHERE created_by=? ORDER BY id DESC''', (session['username'],))
     keys = []
     for r in c.fetchall():
+        used_by = r[3]
+        user_sub_days = None
+        user_sub_status = None
+        if used_by:
+            c.execute('SELECT id FROM users WHERE username=?', (used_by,))
+            ur = c.fetchone()
+            if ur:
+                sub = check_subscription_status(ur[0])
+                user_sub_status = sub['status']
+                if sub['status'] == 'unlimited':
+                    user_sub_days = None  # Will show unlimited
+                elif sub['status'] == 'expired':
+                    user_sub_days = 0
+                else:
+                    user_sub_days = sub['days_left']
         keys.append({
-            'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3],
+            'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': used_by,
             'is_used': r[4], 'expiry_date': r[5],
-            'duration_days': r[6] if r[6] is not None else 0
+            'duration_days': r[6] if r[6] is not None else 0,
+            'user_sub_days': user_sub_days,
+            'user_sub_status': user_sub_status
         })
     c.execute('SELECT key_limit, can_manage_db FROM users WHERE id=?', (session['user_id'],))
     row = c.fetchone()
@@ -2458,6 +2752,11 @@ def owner_dashboard():
     users = []; agents = []
     for r in rows:
         sub = check_subscription_status(r[0])
+        # renew info from history
+        c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (r[0],))
+        rn = c.fetchone()
+        renew_count = rn[0] if rn else 0
+        renew_days = rn[1] if rn else 0
         user_dict = {
             'id': r[0], 'username': r[1], 'email': r[2], 'created_at': r[3],
             'bot_status': r[4], 'bot_file': r[5], 'is_admin': r[6], 'is_agent': r[7],
@@ -2465,7 +2764,8 @@ def owner_dashboard():
             'can_manage_db': r[9] or 0, 'password': r[10],
             'bot_disabled_by_admin': r[11] or 0,
             'sub_status': sub['status'], 'sub_days': sub['days_left'], 'bot_uid': r[14],
-            'created_by_agent': r[15]
+            'created_by_agent': r[15],
+            'renew_count': renew_count, 'renew_days': renew_days
         }
         users.append(user_dict)
         if r[7] == 1:
@@ -2475,6 +2775,27 @@ def owner_dashboard():
             c2.close()
             ag = user_dict.copy(); ag['key_count'] = kc
             agents.append(ag)
+
+    # Subscription history recent 100
+    c.execute('''SELECT id, user_id, username, extended_by, days_added, mode, old_expiry, new_expiry, created_at
+                 FROM subscription_history ORDER BY id DESC LIMIT 100''')
+    sub_history = []
+    for r in c.fetchall():
+        sub_history.append({
+            'id': r[0], 'user_id': r[1], 'username': r[2], 'extended_by': r[3],
+            'days_added': r[4], 'mode': r[5], 'old_expiry': r[6], 'new_expiry': r[7],
+            'created_at': r[8]
+        })
+
+    # Subscription summary per user
+    c.execute('''SELECT user_id, username, COUNT(*) as cnt, COALESCE(SUM(days_added),0) as total_days
+                 FROM subscription_history GROUP BY user_id ORDER BY cnt DESC LIMIT 100''')
+    sub_summary = []
+    for r in c.fetchall():
+        sub_summary.append({
+            'user_id': r[0], 'username': r[1], 'count': r[2], 'total_days': r[3]
+        })
+
     c.execute('''SELECT id, key, created_by, created_at, used_by, is_used, expiry_date, duration_days 
                  FROM keys ORDER BY id DESC LIMIT 50''')
     keys = []
@@ -2498,6 +2819,7 @@ def owner_dashboard():
                                   global_notice=get_global_notice(),
                                   login_notice_enabled=is_user_login_notice_enabled(),
                                   login_notice_text=get_user_login_notice(),
+                                  sub_history=sub_history, sub_summary=sub_summary,
                                   **stats)
 
 
@@ -2857,8 +3179,24 @@ def owner_user_details(user_id):
     key_count = c.fetchone()[0]
     c.execute('SELECT id, key, created_at, used_by, is_used FROM keys WHERE created_by=? ORDER BY id DESC', (user[1],))
     keys_list = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4]} for r in c.fetchall()]
+    # renewal info
+    c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (user_id,))
+    rn = c.fetchone()
+    renew_count = rn[0] if rn else 0
+    renew_days = rn[1] if rn else 0
+    # per-user history
+    c.execute('''SELECT id, user_id, username, extended_by, days_added, mode, old_expiry, new_expiry, created_at
+                 FROM subscription_history WHERE user_id=? ORDER BY id DESC''', (user_id,))
+    sub_history = []
+    for r in c.fetchall():
+        sub_history.append({
+            'id': r[0], 'user_id': r[1], 'username': r[2], 'extended_by': r[3],
+            'days_added': r[4], 'mode': r[5], 'old_expiry': r[6], 'new_expiry': r[7],
+            'created_at': r[8]
+        })
     conn.close()
     sub = check_subscription_status(user_id)
+    sub_time_left = format_time_left(sub['expiry']) if sub['expiry'] else '∞'
     user_data = {
         'id': user[0], 'username': user[1], 'email': user[2] or '—',
         'password': user[3], 'bot_uid': user[4] or '—', 'bot_pw': user[5] or '—',
@@ -2870,16 +3208,19 @@ def owner_user_details(user_id):
         'registration_key': user[15], 'key_count': key_count,
         'bot_disabled_by_admin': user[16] or 0,
         'sub_status': sub['status'], 'sub_days': sub['days_left'],
+        'sub_time_left': sub_time_left,
         'sub_expiry': sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else None,
         'bot_force_active': user[18] or 0,
-        'created_by_agent': user[19] or 'Owner'
+        'created_by_agent': user[19] or 'Owner',
+        'renew_count': renew_count,
+        'renew_days': renew_days
     }
     live = None
     with monitors_lock:
         if user_id in monitors:
             try: live = monitors[user_id].get_status()
             except: pass
-    return render_template_string(USER_DETAILS_HTML, user=user_data, live=live, keys=keys_list)
+    return render_template_string(USER_DETAILS_HTML, user=user_data, live=live, keys=keys_list, sub_history=sub_history)
 
 
 @app.route('/owner/set_key_limit/<int:agent_id>', methods=['POST'])
@@ -2919,21 +3260,38 @@ def _renew_subscription(user_id, redirect_endpoint):
     mode = request.form.get('mode', 'extend')
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT subscription_expiry FROM users WHERE id=?', (user_id,))
+    c.execute('SELECT subscription_expiry, username FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
+    if not row:
+        conn.close()
+        flash('❌ User not found', 'error')
+        if redirect_endpoint == 'owner_user_details':
+            return redirect(url_for('owner_dashboard'))
+        return redirect(url_for(redirect_endpoint))
+
+    old_expiry_str = row[0]
+    username = row[1]
     now = datetime.now()
-    if mode == 'extend' and row and row[0]:
-        try:
-            current = datetime.fromisoformat(row[0])
-            new_expiry = current + timedelta(days=days) if current > now else now + timedelta(days=days)
-        except:
-            new_expiry = now + timedelta(days=days)
+    old_expiry_dt = None
+    if old_expiry_str:
+        try: old_expiry_dt = datetime.fromisoformat(old_expiry_str)
+        except: old_expiry_dt = None
+
+    if mode == 'extend' and old_expiry_dt and old_expiry_dt > now:
+        new_expiry = old_expiry_dt + timedelta(days=days)
     else:
         new_expiry = now + timedelta(days=days)
+
     c.execute('UPDATE users SET subscription_expiry=?, bot_status=CASE WHEN bot_status="expired" THEN "configured" ELSE bot_status END WHERE id=?',
               (new_expiry.isoformat(), user_id))
     conn.commit(); conn.close()
-    flash(f'✅ Subscription set to {new_expiry.strftime("%Y-%m-%d")}', 'success')
+
+    extended_by = session.get('username', 'Unknown')
+    if extended_by == 'OWNER':
+        extended_by = 'MAHIR TCP'
+    log_subscription_history(user_id, username, extended_by, days, mode, old_expiry_dt, new_expiry)
+
+    flash(f'✅ Subscription set to {new_expiry.strftime("%Y-%m-%d")} (+{days} days)', 'success')
     if redirect_endpoint == 'owner_user_details':
         return redirect(url_for(redirect_endpoint, user_id=user_id))
     return redirect(url_for(redirect_endpoint))
@@ -3000,9 +3358,26 @@ def user_dashboard():
     c = conn.cursor()
     c.execute('SELECT admin_uid, bot_uid, bot_pw, bot_status, bot_disabled_by_admin, disable_reason FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
+    # renewal info
+    c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (user_id,))
+    rn = c.fetchone()
+    renew_count = rn[0] if rn else 0
+    renew_days = rn[1] if rn else 0
     conn.close()
     config_done = row and row[3] not in ['not_configured', 'agent']
     sub = check_subscription_status(user_id)
+
+    # Compute time left & expiry display
+    if sub['status'] == 'unlimited':
+        sub_time_left = '∞ Unlimited'
+        sub_expiry_display = 'Never'
+    elif sub['status'] == 'expired':
+        sub_time_left = 'Expired'
+        sub_expiry_display = sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else '—'
+    else:
+        sub_time_left = format_time_left(sub['expiry'])
+        sub_expiry_display = sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else '—'
+
     blocked = False; block_type = None; block_message = ''
     if sub['status'] == 'expired':
         blocked = True; block_type = 'expired'
@@ -3014,7 +3389,6 @@ def user_dashboard():
         blocked = True; block_type = 'admin_disabled'
         block_message = row[5] or 'Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।'
 
-    # Login notice - only show if NOT blocked
     login_notice_enabled = is_user_login_notice_enabled() and not blocked
     login_notice_text = get_user_login_notice() if login_notice_enabled else ''
 
@@ -3022,6 +3396,9 @@ def user_dashboard():
                                   config_done=config_done, blocked=blocked,
                                   block_type=block_type, block_message=block_message,
                                   sub_status=sub['status'], sub_days=sub['days_left'],
+                                  sub_time_left=sub_time_left,
+                                  sub_expiry_display=sub_expiry_display,
+                                  renew_count=renew_count, renew_days=renew_days,
                                   notice_json=json.dumps(get_global_notice()),
                                   block_msg_json=json.dumps(block_message),
                                   login_notice_enabled=login_notice_enabled,
