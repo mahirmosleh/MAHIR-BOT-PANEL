@@ -64,6 +64,8 @@ MASTER_ADMIN_UID = "1120167200"
 OWNER_USERNAME = "MAHIR TCP"
 OWNER_PASSWORD = "MAHIR0208@"
 
+DB_DOWNLOAD_PASSWORD = "MAHIRDB"
+
 monitors_lock = threading.Lock()
 
 
@@ -94,7 +96,9 @@ def init_db():
         disable_reason TEXT,
         subscription_expiry TIMESTAMP NULL,
         created_by_agent TEXT,
-        bot_force_active INTEGER DEFAULT 0
+        bot_force_active INTEGER DEFAULT 0,
+        personal_notice TEXT,
+        personal_notice_enabled INTEGER DEFAULT 0
     )''')
     c.execute('''CREATE TABLE IF NOT EXISTS keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,6 +151,10 @@ def migrate_db():
             c.execute('ALTER TABLE users ADD COLUMN created_by_agent TEXT')
         if 'bot_force_active' not in cols:
             c.execute('ALTER TABLE users ADD COLUMN bot_force_active INTEGER DEFAULT 0')
+        if 'personal_notice' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN personal_notice TEXT')
+        if 'personal_notice_enabled' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN personal_notice_enabled INTEGER DEFAULT 0')
 
         c.execute("PRAGMA table_info(keys)")
         kcols = {row[1] for row in c.fetchall()}
@@ -179,11 +187,7 @@ def migrate_db():
         print(f"Migration warning: {e}")
 
 
-# ============================================================
-#  ONE-TIME FIX: Backfill created_by_agent for existing users
-# ============================================================
 def backfill_created_by_agent():
-    """Migrate old users: set created_by_agent from their key's created_by"""
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
@@ -213,10 +217,9 @@ def backfill_created_by_agent():
 
 
 # ============================================================
-#  MASKING HELPERS (Agent Panel Privacy)
+#  MASKING HELPERS
 # ============================================================
 def mask_email(email):
-    """Mask email: te**@gmail.com"""
     if not email or '@' not in str(email):
         return '—'
     email = str(email)
@@ -229,21 +232,18 @@ def mask_email(email):
 
 
 def mask_password(pw, length=8):
-    """Mask password fully with bullets"""
     if not pw:
         return '—'
     return '●' * length
 
 
 def mask_bot_password(pw, length=10):
-    """Mask bot password"""
     if not pw:
         return '—'
     return '●' * length
 
 
 def mask_uid(uid):
-    """Partially mask UID: 1120****00"""
     if not uid:
         return '—'
     uid = str(uid)
@@ -353,7 +353,7 @@ def validate_db_file(filepath):
 
 init_db()
 migrate_db()
-backfill_created_by_agent()  # ✅ Auto-fix old users
+backfill_created_by_agent()
 
 
 # ============================================================
@@ -1416,6 +1416,7 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     <h1><i class="fas fa-user-tie"></i> Agent Dashboard</h1>
     <div class="flex">
       <a href="/agent/subscription" class="btn btn-gold btn-sm"><i class="fas fa-clock-rotate-left"></i> Subscription Management</a>
+      <button type="button" class="btn btn-info btn-sm" onclick="openDbDownloadModal()"><i class="fas fa-database"></i> Download DB</button>
       <span class="welcome-text">Welcome, <strong>{{ session.username }}</strong></span>
       <a href="/agent/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
     </div>
@@ -1553,7 +1554,34 @@ AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
   </div>
 
   <a href="/login" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
-</div></body></html>'''
+</div>
+
+<div class="modal-overlay" id="dbDownloadModal">
+  <div class="modal-box" style="max-width:420px;">
+    <button class="modal-close" onclick="closeDbDownloadModal()">&times;</button>
+    <div class="modal-title"><i class="fas fa-database" style="color:var(--gold);"></i> Database Download</div>
+    <p style="color:var(--muted);font-size:.85rem;margin-bottom:14px;">
+      <i class="fas fa-lock" style="color:var(--red2);"></i> DB download করতে password দিন।
+    </p>
+    <form method="POST" action="/agent/download_db" id="dbDownloadForm">
+      <input type="password" name="db_password" placeholder="Enter DB Password" required style="width:100%;margin-bottom:12px;"/>
+      <div style="text-align:right;display:flex;gap:8px;justify-content:flex-end;">
+        <button type="button" onclick="closeDbDownloadModal()" class="btn btn-clear btn-sm">Cancel</button>
+        <button type="submit" class="btn btn-gold btn-sm" id="dbDownloadBtn"><i class="fas fa-download"></i> Download</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+function openDbDownloadModal(){document.getElementById('dbDownloadModal').classList.add('active');}
+function closeDbDownloadModal(){document.getElementById('dbDownloadModal').classList.remove('active');}
+document.getElementById('dbDownloadModal').addEventListener('click', function(e){if(e.target===this)closeDbDownloadModal();});
+document.getElementById('dbDownloadForm').addEventListener('submit', function(){
+  var b=document.getElementById('dbDownloadBtn'); b.disabled=true; b.innerHTML='<span class="spinner"></span> Downloading...';
+});
+</script>
+</body></html>'''
 
 
 # ============================================================
@@ -1844,7 +1872,7 @@ AGENT_CUSTOMER_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta char
 
 
 # ============================================================
-#  OWNER DASHBOARD
+#  OWNER DASHBOARD (✅ FIXED - notice button uses data-* attributes)
 # ============================================================
 OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Owner Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 <div class="container">
@@ -1892,7 +1920,8 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
   <div class="card">
     <div class="card-title"><i class="fas fa-bell"></i> User Login Notice (Popup)</div>
     <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;">
-      <i class="fas fa-info-circle"></i> এই notice enable করলে <b style="color:var(--gold2);">প্রত্যেক user</b> তার panel-এ login করলে এই popup দেখতে পাবে।
+      <i class="fas fa-info-circle"></i> এই notice enable করলে <b style="color:var(--gold2);">প্রত্যেক user</b> তার panel-এ login করলে এই popup দেখতে পাবে। <br>
+      <b style="color:var(--red2);">⚠️ Important:</b> কোন নির্দিষ্ট user কে personal notice পাঠালে, সেটা এই global notice কে override করবে।
     </p>
     <form method="POST" action="/owner/set_user_login_notice">
       <div class="flex" style="margin-bottom:12px;">
@@ -1947,7 +1976,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     </form>
     <div class="table-wrapper">
       <table>
-        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Keys/Limit</th><th>DB</th><th>Action</th></tr></thead>
+        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Keys/Limit</th><th>Action</th></tr></thead>
         <tbody>
           {% for agent in agents %}
           <tr>
@@ -1962,12 +1991,6 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
               </form>
             </td>
             <td>
-              {% if agent.can_manage_db %}<span class="badge badge-running">ON</span>{% else %}<span class="badge badge-stopped">OFF</span>{% endif %}
-              <form method="POST" action="/owner/toggle_db_access/{{ agent.id }}" style="margin-top:4px;">
-                <button type="submit" class="btn btn-xs {% if agent.can_manage_db %}btn-danger{% else %}btn-success{% endif %}"><i class="fas fa-toggle-{% if agent.can_manage_db %}on{% else %}off{% endif %}"></i></button>
-              </form>
-            </td>
-            <td>
               <div class="td-actions">
                 <a href="/owner/login_as/{{ agent.id }}" class="btn btn-warning btn-sm" title="Login as this user"><i class="fas fa-sign-in-alt"></i></a>
                 <a href="/owner/user_details/{{ agent.id }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i></a>
@@ -1975,7 +1998,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
               </div>
             </td>
           </tr>
-          {% else %}<tr class="empty-row"><td colspan="6">No agents</td></tr>{% endfor %}
+          {% else %}<tr class="empty-row"><td colspan="5">No agents</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>
@@ -1993,7 +2016,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     <div class="card-title"><i class="fas fa-users"></i> Registered Users</div>
     <div class="table-wrapper">
       <table>
-        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Bot Status</th><th>Days Left</th><th>Renewals</th><th>Role</th><th style="text-align:right;">Actions</th></tr></thead>
+        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Bot Status</th><th>Days Left</th><th>Renewals</th><th>Notice</th><th>Role</th><th style="text-align:right;">Actions</th></tr></thead>
         <tbody>
           {% for user in users %}
           <tr>
@@ -2021,9 +2044,19 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
                 <span style="color:var(--muted);font-size:.75rem;">—</span>
               {% endif %}
             </td>
+            <td>
+              {% if user.personal_notice_enabled %}
+                <span class="badge badge-running"><i class="fas fa-bell"></i> ON</span>
+              {% else %}
+                <span style="color:var(--muted);font-size:.75rem;">—</span>
+              {% endif %}
+            </td>
             <td>{% if user.is_admin %}<span class="badge badge-owner">OWNER</span>{% elif user.is_agent %}<span class="badge badge-agent">Agent</span>{% else %}<span class="badge badge-user">User</span>{% endif %}</td>
             <td>
               <div class="td-actions">
+                {% if not user.is_admin and not user.is_agent %}
+                  <button type="button" class="btn btn-primary btn-sm notice-trigger" title="Send Notice" data-uid="{{ user.id }}" data-uname="{{ user.username }}" data-notice="{{ user.personal_notice or '' }}" data-enabled="{{ '1' if user.personal_notice_enabled else '0' }}"><i class="fas fa-bullhorn"></i></button>
+                {% endif %}
                 <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm" title="Login as user"><i class="fas fa-sign-in-alt"></i></a>
                 <a href="/owner/user_details/{{ user.id }}" class="btn btn-info btn-sm" title="Details"><i class="fas fa-eye"></i></a>
                 {% if not user.is_admin and not user.is_agent %}
@@ -2038,7 +2071,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
               </div>
             </td>
           </tr>
-          {% else %}<tr class="empty-row"><td colspan="8">No users</td></tr>{% endfor %}
+          {% else %}<tr class="empty-row"><td colspan="9">No users</td></tr>{% endfor %}
         </tbody>
       </table>
     </div>
@@ -2159,6 +2192,33 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
   </div>
 </div>
 
+<div class="modal-overlay" id="noticeModal">
+  <div class="modal-box" style="max-width:560px;">
+    <button class="modal-close" onclick="closeNoticeModal()">&times;</button>
+    <div class="modal-title"><i class="fas fa-bullhorn" style="color:var(--gold);"></i> Send Personal Notice</div>
+    <p style="color:var(--muted);font-size:.85rem;margin-bottom:12px;">
+      User: <strong id="noticeUserName" style="color:var(--gold2);"></strong>
+      <br><small style="color:var(--red2);">⚠️ Personal notice, Global notice কে override করবে।</small>
+    </p>
+    <form method="POST" id="noticeForm">
+      <div class="modal-section">
+        <h3><i class="fas fa-comment-dots"></i> Notice Text</h3>
+        <textarea name="personal_notice" id="noticeText" rows="6" placeholder="Type notice here..."></textarea>
+      </div>
+      <div class="modal-section" style="display:flex;align-items:center;gap:12px;">
+        <label style="color:var(--gold2);font-weight:600;cursor:pointer;">
+          <input type="checkbox" name="enabled" id="noticeEnabled" value="1" style="width:auto;margin-right:8px;"/>
+          Enable this notice for this user
+        </label>
+      </div>
+      <div style="text-align:right;display:flex;gap:8px;justify-content:flex-end;">
+        <button type="button" onclick="closeNoticeModal()" class="modal-btn modal-btn-cancel">Cancel</button>
+        <button type="submit" class="modal-btn modal-btn-save"><i class="fas fa-paper-plane"></i> Save Notice</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>
 function openDisableModal(uid, uname){
   document.getElementById('disableUserName').textContent = uname;
@@ -2167,9 +2227,32 @@ function openDisableModal(uid, uname){
 }
 function closeDisableModal(){document.getElementById('disableModal').classList.remove('active');}
 document.getElementById('disableModal').addEventListener('click', function(e){if(e.target===this)closeDisableModal();});
+
+function openNoticeModal(uid, uname, currentNotice, enabled){
+  document.getElementById('noticeUserName').textContent = uname;
+  document.getElementById('noticeText').value = currentNotice || '';
+  document.getElementById('noticeEnabled').checked = !!enabled;
+  document.getElementById('noticeForm').action = '/owner/set_user_notice/' + uid;
+  document.getElementById('noticeModal').classList.add('active');
+}
+function closeNoticeModal(){document.getElementById('noticeModal').classList.remove('active');}
+document.getElementById('noticeModal').addEventListener('click', function(e){if(e.target===this)closeNoticeModal();});
+
 document.getElementById('uploadMahirForm').addEventListener('submit',function(e){var f=document.getElementById('mahirFileInput').files[0];if(f && f.name.toLowerCase()!=='mahir.py'){e.preventDefault();alert('❌ Only "mahir.py"!');return false;}var b=document.getElementById('uploadMahirBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Uploading...';});
 document.getElementById('uploadDbForm').addEventListener('submit',function(){var b=document.getElementById('uploadDbBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});
 document.getElementById('createAgentForm').addEventListener('submit',function(){var b=document.getElementById('createAgentBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Creating...';});
+
+// ✅ FIXED: Notice trigger using data-* attributes (no Jinja escaping issues)
+document.querySelectorAll('.notice-trigger').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    openNoticeModal(
+      this.dataset.uid,
+      this.dataset.uname,
+      this.dataset.notice,
+      this.dataset.enabled === '1'
+    );
+  });
+});
 </script>
 </body></html>'''
 
@@ -2338,14 +2421,6 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
       <input type="number" name="key_limit" value="{{ user.key_limit }}" min="-1" style="width:140px;"/>
       <button type="submit" class="btn btn-gold btn-sm"><i class="fas fa-save"></i> Save</button>
     </form>
-  </div>
-
-  <div class="card">
-    <div class="card-title"><i class="fas fa-database"></i> DB Access</div>
-    <div class="flex">
-      <span>Status: {% if user.can_manage_db %}<span class="badge badge-running">ON</span>{% else %}<span class="badge badge-stopped">OFF</span>{% endif %}</span>
-      <form method="POST" action="/owner/toggle_db_access/{{ user.id }}"><button type="submit" class="btn {% if user.can_manage_db %}btn-danger{% else %}btn-success{% endif %} btn-sm"><i class="fas fa-toggle-{% if user.can_manage_db %}on{% else %}off{% endif %}"></i> Toggle</button></form>
-    </div>
   </div>
   {% endif %}
 
@@ -2517,8 +2592,8 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 <div class="notice-overlay" id="loginNoticePopup">
   <div class="notice-box" style="border-color:rgba(59,140,255,.5);">
     <button class="modal-close" onclick="document.getElementById('loginNoticePopup').classList.remove('show')">&times;</button>
-    <span class="notice-icon">🔔</span>
-    <div class="notice-title" style="background:linear-gradient(120deg,#3B8CFF,#00d9f5,#F5C842);-webkit-background-clip:text;background-clip:text;color:transparent;">IMPORTANT NOTICE</div>
+    <span class="notice-icon" id="loginNoticeIcon">🔔</span>
+    <div class="notice-title" id="loginNoticeTitle" style="background:linear-gradient(120deg,#3B8CFF,#00d9f5,#F5C842);-webkit-background-clip:text;background-clip:text;color:transparent;">IMPORTANT NOTICE</div>
     <div class="notice-msg" id="loginNoticeMsg"></div>
     <div class="notice-contact-title">Contact Owner</div>
     <div class="notice-buttons">
@@ -2699,6 +2774,8 @@ var BLOCK_TYPE = "{{ block_type or '' }}";
 var BLOCK_MSG = {{ block_msg_json|safe }};
 var LOGIN_NOTICE_ENABLED = {{ 'true' if login_notice_enabled else 'false' }};
 var LOGIN_NOTICE_TEXT = {{ login_notice_json|safe }};
+var PERSONAL_NOTICE_ENABLED = {{ 'true' if personal_notice_enabled else 'false' }};
+var PERSONAL_NOTICE_TEXT = {{ personal_notice_json|safe }};
 
 function showNotice(){
   document.getElementById('noticeMsg').innerHTML = GLOBAL_NOTICE;
@@ -2721,11 +2798,16 @@ document.addEventListener('DOMContentLoaded', function(){
     if (GLOBAL_NOTICE && GLOBAL_NOTICE.trim()) {
       document.getElementById('noticeBtn').style.display = 'flex';
     }
-    if (LOGIN_NOTICE_ENABLED && LOGIN_NOTICE_TEXT && LOGIN_NOTICE_TEXT.trim()) {
-      setTimeout(function(){
-        document.getElementById('loginNoticeMsg').innerHTML = LOGIN_NOTICE_TEXT;
-        document.getElementById('loginNoticePopup').classList.add('show');
-      }, 800);
+    if (PERSONAL_NOTICE_ENABLED && PERSONAL_NOTICE_TEXT && PERSONAL_NOTICE_TEXT.trim()) {
+      document.getElementById('loginNoticeIcon').textContent = '📌';
+      document.getElementById('loginNoticeTitle').textContent = 'PERSONAL NOTICE';
+      document.getElementById('loginNoticeMsg').innerHTML = PERSONAL_NOTICE_TEXT;
+      setTimeout(function(){document.getElementById('loginNoticePopup').classList.add('show');}, 500);
+    } else if (LOGIN_NOTICE_ENABLED && LOGIN_NOTICE_TEXT && LOGIN_NOTICE_TEXT.trim()) {
+      document.getElementById('loginNoticeIcon').textContent = '🔔';
+      document.getElementById('loginNoticeTitle').textContent = 'IMPORTANT NOTICE';
+      document.getElementById('loginNoticeMsg').innerHTML = LOGIN_NOTICE_TEXT;
+      setTimeout(function(){document.getElementById('loginNoticePopup').classList.add('show');}, 800);
     }
   }
 });
@@ -3028,7 +3110,6 @@ def agent_subscription():
 @app.route('/agent/customer_history/<int:user_id>')
 @agent_required
 def agent_customer_history(user_id):
-    """Agent can view customer details but with MASKED sensitive data"""
     agent = session['username']
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -3038,7 +3119,22 @@ def agent_customer_history(user_id):
                  created_by_agent, is_admin, is_agent
                  FROM users WHERE id=? AND is_admin=0 AND is_agent=0''', (user_id,))
     u = c.fetchone()
-    if not u or u[14] != agent:
+    if not u:
+        conn.close()
+        flash('❌ Customer not found.', 'error')
+        return redirect(url_for('agent_subscription'))
+
+    owns_via_agent = (u[14] == agent)
+    owns_via_key = False
+    if not owns_via_agent and u[10]:
+        c.execute('SELECT created_by FROM keys WHERE key=?', (u[10],))
+        kr = c.fetchone()
+        if kr and kr[0] == agent:
+            owns_via_key = True
+            c.execute('UPDATE users SET created_by_agent=? WHERE id=? AND (created_by_agent IS NULL OR created_by_agent="")', (agent, user_id))
+            conn.commit()
+
+    if not owns_via_agent and not owns_via_key:
         conn.close()
         flash('❌ Access denied! This customer is not yours.', 'error')
         return redirect(url_for('agent_subscription'))
@@ -3141,34 +3237,17 @@ def agent_logout():
     return redirect(url_for('agent_login'))
 
 
-@app.route('/agent/download_db')
+@app.route('/agent/download_db', methods=['POST'])
 @agent_required
 def agent_download_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT can_manage_db FROM users WHERE id=?', (session['user_id'],))
-    row = c.fetchone()
-    conn.close()
-    if not row or not row[0]:
-        flash('❌ No permission', 'error')
+    password = request.form.get('db_password', '')
+    if password != DB_DOWNLOAD_PASSWORD:
+        flash('❌ Wrong DB password!', 'error')
         return redirect(url_for('agent_dashboard'))
     if os.path.exists(DB_FILE):
         return send_file(DB_FILE, as_attachment=True)
+    flash('❌ DB file not found', 'error')
     return redirect(url_for('agent_dashboard'))
-
-
-@app.route('/agent/upload_db', methods=['POST'])
-@agent_required
-def agent_upload_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT can_manage_db FROM users WHERE id=?', (session['user_id'],))
-    row = c.fetchone()
-    conn.close()
-    if not row or not row[0]:
-        flash('❌ No permission', 'error')
-        return redirect(url_for('agent_dashboard'))
-    return _handle_db_upload(redirect_endpoint='agent_dashboard')
 
 
 # ========== OWNER ROUTES ==========
@@ -3240,7 +3319,8 @@ def owner_dashboard():
     c = conn.cursor()
     c.execute('''SELECT id, username, email, created_at, bot_status, bot_file, 
                  is_admin, is_agent, key_limit, can_manage_db, password,
-                 bot_disabled_by_admin, subscription_expiry, registration_key, bot_uid, created_by_agent
+                 bot_disabled_by_admin, subscription_expiry, registration_key, bot_uid, 
+                 created_by_agent, personal_notice, personal_notice_enabled
                  FROM users ORDER BY id DESC''')
     rows = c.fetchall()
     users = []; agents = []
@@ -3258,6 +3338,8 @@ def owner_dashboard():
             'bot_disabled_by_admin': r[11] or 0,
             'sub_status': sub['status'], 'sub_days': sub['days_left'], 'bot_uid': r[14],
             'created_by_agent': r[15],
+            'personal_notice': r[16] or '',
+            'personal_notice_enabled': r[17] or 0,
             'renew_count': renew_count, 'renew_days': renew_days
         }
         users.append(user_dict)
@@ -3354,6 +3436,21 @@ def owner_set_user_login_notice():
         set_setting('user_login_notice_text', notice_text)
         flash('✅ Notice text saved!', 'success')
     return redirect(url_for('owner_dashboard'))
+
+
+@app.route('/owner/set_user_notice/<int:user_id>', methods=['POST'])
+def owner_set_user_notice(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    notice_text = request.form.get('personal_notice', '').strip()
+    enabled = 1 if request.form.get('enabled') == '1' else 0
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('UPDATE users SET personal_notice=?, personal_notice_enabled=? WHERE id=?',
+              (notice_text, enabled, user_id))
+    conn.commit(); conn.close()
+    flash(f'✅ Personal notice {"enabled" if enabled else "disabled"} for user #{user_id}', 'success')
+    return redirect(request.referrer or url_for('owner_dashboard'))
 
 
 @app.route('/owner/stop_all_bots', methods=['POST'])
@@ -3718,23 +3815,6 @@ def owner_set_key_limit(agent_id):
     return redirect(request.referrer or url_for('owner_dashboard'))
 
 
-@app.route('/owner/toggle_db_access/<int:agent_id>', methods=['POST'])
-def owner_toggle_db_access(agent_id):
-    if not session.get('is_admin'):
-        return redirect(url_for('owner_login'))
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT can_manage_db FROM users WHERE id=?', (agent_id,))
-    row = c.fetchone()
-    if row:
-        nv = 0 if row[0] else 1
-        c.execute('UPDATE users SET can_manage_db=? WHERE id=?', (nv, agent_id))
-        conn.commit()
-        flash(f'DB access {"ON" if nv else "OFF"}', 'success')
-    conn.close()
-    return redirect(request.referrer or url_for('owner_dashboard'))
-
-
 def _renew_subscription(user_id, redirect_endpoint):
     try: days = int(request.form.get('days', 30))
     except: days = 30
@@ -3846,7 +3926,9 @@ def user_dashboard():
     user_id = session['user_id']
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('SELECT admin_uid, bot_uid, bot_pw, bot_status, bot_disabled_by_admin, disable_reason FROM users WHERE id=?', (user_id,))
+    c.execute('''SELECT admin_uid, bot_uid, bot_pw, bot_status, bot_disabled_by_admin, 
+                 disable_reason, personal_notice, personal_notice_enabled 
+                 FROM users WHERE id=?''', (user_id,))
     row = c.fetchone()
     c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (user_id,))
     rn = c.fetchone()
@@ -3877,7 +3959,10 @@ def user_dashboard():
         blocked = True; block_type = 'admin_disabled'
         block_message = row[5] or 'Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।'
 
-    login_notice_enabled = is_user_login_notice_enabled() and not blocked
+    personal_notice_enabled = bool(row[6] and row[7]) if row else False
+    personal_notice_text = row[6] or '' if row else ''
+
+    login_notice_enabled = is_user_login_notice_enabled() and not blocked and not personal_notice_enabled
     login_notice_text = get_user_login_notice() if login_notice_enabled else ''
 
     return render_template_string(USER_PANEL_HTML,
@@ -3890,7 +3975,9 @@ def user_dashboard():
                                   notice_json=json.dumps(get_global_notice()),
                                   block_msg_json=json.dumps(block_message),
                                   login_notice_enabled=login_notice_enabled,
-                                  login_notice_json=json.dumps(login_notice_text))
+                                  login_notice_json=json.dumps(login_notice_text),
+                                  personal_notice_enabled=personal_notice_enabled,
+                                  personal_notice_json=json.dumps(personal_notice_text))
 
 
 @app.route('/configure', methods=['POST'])
@@ -4408,6 +4495,7 @@ if __name__ == '__main__':
     ║       Port: 8080  |  Owner Panel: /owner/login           ║
     ║       Agent Panel: /agent/login                          ║
     ║       Owner: MAHIR TCP / MAHIR0208@                      ║
+    ║       DB Download Password: MAHIRDB                      ║
     ╚══════════════════════════════════════════════════════════╝
     """)
-    app.run(host='0.0.0.0', port=8080, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=8090, debug=False, threaded=True)
