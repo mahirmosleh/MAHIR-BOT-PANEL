@@ -180,7 +180,40 @@ def migrate_db():
 
 
 # ============================================================
-#  MASKING HELPERS (NEW - Agent Panel Privacy)
+#  ONE-TIME FIX: Backfill created_by_agent for existing users
+# ============================================================
+def backfill_created_by_agent():
+    """Migrate old users: set created_by_agent from their key's created_by"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''SELECT id, registration_key FROM users 
+                     WHERE (created_by_agent IS NULL OR created_by_agent='') 
+                     AND is_admin=0 AND is_agent=0''')
+        rows = c.fetchall()
+        fixed = 0
+        for user_id, reg_key in rows:
+            if not reg_key:
+                continue
+            c.execute('SELECT created_by FROM keys WHERE key=?', (reg_key,))
+            kr = c.fetchone()
+            if not kr or not kr[0]:
+                continue
+            agent_name = kr[0]
+            if agent_name in ('admin', 'system', 'MAHIR TCP', 'OWNER'):
+                continue
+            c.execute('UPDATE users SET created_by_agent=? WHERE id=?', (agent_name, user_id))
+            fixed += 1
+        conn.commit()
+        conn.close()
+        if fixed:
+            print(f"✅ Backfilled created_by_agent for {fixed} users")
+    except Exception as e:
+        print(f"Backfill error: {e}")
+
+
+# ============================================================
+#  MASKING HELPERS (Agent Panel Privacy)
 # ============================================================
 def mask_email(email):
     """Mask email: te**@gmail.com"""
@@ -320,6 +353,7 @@ def validate_db_file(filepath):
 
 init_db()
 migrate_db()
+backfill_created_by_agent()  # ✅ Auto-fix old users
 
 
 # ============================================================
@@ -1653,7 +1687,7 @@ AGENT_SUBSCRIPTION_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset=
 
 
 # ============================================================
-#  AGENT CUSTOMER HISTORY / DETAILS PAGE (WITH MASKED DATA)
+#  AGENT CUSTOMER HISTORY / DETAILS PAGE (MASKED)
 # ============================================================
 AGENT_CUSTOMER_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Customer Details - Agent</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 <div class="container">
@@ -2987,7 +3021,6 @@ def agent_customer_history(user_id):
     agent = session['username']
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Verify ownership
     c.execute('''SELECT id, username, email, password, bot_uid, bot_pw, bot_file,
                  bot_status, admin_uid, created_at, registration_key,
                  subscription_expiry, bot_disabled_by_admin, bot_force_active,
@@ -3019,14 +3052,13 @@ def agent_customer_history(user_id):
         })
     conn.close()
 
-    # Build MASKED user data - sensitive fields hidden from agents
     user_data = {
         'id': u[0],
         'username': u[1],
-        'email_masked': mask_email(u[2]),              # ✅ MASKED
-        'password_masked': mask_password(u[3]),        # ✅ MASKED
+        'email_masked': mask_email(u[2]),
+        'password_masked': mask_password(u[3]),
         'bot_uid': u[4] or '—',
-        'bot_pw_masked': mask_bot_password(u[5]),      # ✅ MASKED
+        'bot_pw_masked': mask_bot_password(u[5]),
         'bot_file': u[6] or '—',
         'bot_status': u[7] or 'unknown',
         'admin_uid': u[8] or '—',
@@ -3043,7 +3075,6 @@ def agent_customer_history(user_id):
         'renew_days': renew_days
     }
 
-    # Live status
     live = None
     with monitors_lock:
         if user_id in monitors:
@@ -4077,6 +4108,7 @@ def _handle_db_upload(redirect_endpoint):
         if os.path.exists(DB_FILE): os.remove(DB_FILE)
         shutil.move(temp, DB_FILE)
         init_db(); migrate_db()
+        backfill_created_by_agent()
     except Exception as e:
         flash(f'❌ Replace error: {e}', 'error')
         return redirect(url_for(redirect_endpoint))
