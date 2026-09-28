@@ -891,82 +891,6 @@ class ProcessMonitor:
                 self.bot_status = "🟢 ACTIVE & ONLINE"
                 self.account_info_found = True
             return
-        if 'INVALID ACCOUNT' in clean.upper() or 'INVALID ACCOUNT ERROR' in clean.upper():
-            print(f"\n⚠️ INVALID ACCOUNT detected for user {self.user_id} → DB check + bot file update + restart")
-            with self.lock:
-                self.bot_status = "🟡 RECOVERING..."
-            # Prevent multiple simultaneous recoveries
-            if getattr(self, '_recovering_invalid', False):
-                return
-            self._recovering_invalid = True
-            def _recover():
-                try:
-                    # 1. Immediately check DB for current credentials
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute('SELECT bot_uid, bot_pw, admin_uid, bot_file, username FROM users WHERE id=?', (self.user_id,))
-                    row = c.fetchone()
-                    conn.close()
-                    if not row or not row[0] or not row[1]:
-                        print(f"[INVALID] User {self.user_id}: no credentials in DB")
-                        with self.lock:
-                            self.bot_status = "🔴 INVALID ACCOUNT"
-                        self._recovering_invalid = False
-                        return
-                    bot_uid, bot_pw, admin_uid, bot_file, username = row
-                    # 2. Update bot file with credentials from DB
-                    path = self.process_name
-                    if not os.path.exists(path) and bot_file:
-                        path = os.path.join(USER_BOTS_DIR, bot_file)
-                    if not os.path.exists(path):
-                        # Recreate from source if missing
-                        if os.path.exists(MAHIR_SOURCE):
-                            safe_name = sanitize_filename(username or f"user{self.user_id}")
-                            bot_filename = f"{safe_name}_mahir.py"
-                            path = os.path.join(USER_BOTS_DIR, bot_filename)
-                            shutil.copy2(MAHIR_SOURCE, path)
-                            self.process_name = path
-                            conn = sqlite3.connect(DB_FILE)
-                            c = conn.cursor()
-                            c.execute('UPDATE users SET bot_file=? WHERE id=?', (bot_filename, self.user_id))
-                            conn.commit(); conn.close()
-                        else:
-                            print(f"[INVALID] mahir.py source missing")
-                            self._recovering_invalid = False
-                            return
-                    admin_list = parse_admin_uids(admin_uid)
-                    ok, msg = inject_credentials_into_bot_file(path, bot_uid, bot_pw, admin_list)
-                    if not ok:
-                        print(f"[INVALID] inject failed: {msg}")
-                        with self.lock:
-                            self.bot_status = "🔴 INVALID ACCOUNT"
-                        self._recovering_invalid = False
-                        return
-                    print(f"[INVALID] Bot file updated from DB for user {self.user_id}")
-                    # 3. Stop current process and restart
-                    self.stop_process()
-                    time.sleep(1.5)
-                    started = self.start_process()
-                    if started:
-                        print(f"[INVALID] Bot restarted successfully for user {self.user_id}")
-                        with self.lock:
-                            self.bot_status = "🟢 ACTIVE & ONLINE"
-                        # Also refresh bio
-                        try:
-                            update_bot_bio(bot_uid, bot_pw, username)
-                        except: pass
-                    else:
-                        print(f"[INVALID] Restart failed for user {self.user_id}")
-                        with self.lock:
-                            self.bot_status = "🔴 INVALID ACCOUNT"
-                except Exception as e:
-                    print(f"[INVALID] Recovery error: {e}")
-                    with self.lock:
-                        self.bot_status = "🔴 INVALID ACCOUNT"
-                finally:
-                    self._recovering_invalid = False
-            threading.Thread(target=_recover, daemon=True).start()
-            return
 
     def is_error_line(self, line):
         if not line: return False
@@ -1111,8 +1035,6 @@ class ProcessMonitor:
         return True
 
     def hard_reset(self):
-        """Reset process only — no DB re-check, no credential re-injection.
-        Only Reset All / DB upload / mahir.py upload perform full rebuild."""
         self.stop_process()
         with self.lock:
             self.restart_count = 0
@@ -1124,45 +1046,7 @@ class ProcessMonitor:
             self.bot_dynamic_key = "N/A"; self.bot_dynamic_iv = "N/A"; self.bot_server = "N/A"
             self.bot_bd_time = "N/A"; self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
             self.last_nickname = "N/A"; self.last_message = "N/A"; self.last_pfp_url = "N/A"
-        # Force start without full can_start DB expiry gate (user requested pure process reset)
-        return self._force_start_process()
-
-    def _force_start_process(self):
-        """Start process ignoring subscription expiry check (used by hard_reset only)."""
-        with self.lock:
-            if self.process and self.process.poll() is None: return True
-            if self.process: self._stop_process_internal()
-            if not os.path.exists(self.process_name):
-                print(f"Error: {self.process_name} not found"); return False
-            try:
-                self.process = subprocess.Popen(
-                    [sys.executable, "-u", self.process_name],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, universal_newlines=True, errors='replace')
-                self.is_running = True
-                self.start_time = datetime.now()
-                self.bot_status = "🟢 ACTIVE & ONLINE"
-                try:
-                    conn = sqlite3.connect(DB_FILE)
-                    c = conn.cursor()
-                    c.execute('UPDATE users SET bot_status="running", bot_pid=? WHERE id=?',
-                              (self.process.pid, self.user_id))
-                    conn.commit(); conn.close()
-                except: pass
-                def enqueue():
-                    try:
-                        for line in iter(self.process.stdout.readline, ''):
-                            if line:
-                                ts = datetime.now().strftime('%H:%M:%S')
-                                self.output_queue.put(f"[{ts}] {line.rstrip()}")
-                                self.process_line(line, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                    except: pass
-                self.output_thread = threading.Thread(target=enqueue, daemon=True)
-                self.output_thread.start()
-                return True
-            except Exception as e:
-                self.output_lines.append(f"Error: {str(e)}")
-                return False
+        return self.start_process()
 
 
 # ============================================================
@@ -2691,11 +2575,6 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 .button-group{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
 .button-group .btn{flex:1;min-width:110px}
 .chart-container{position:relative;height:250px}
-.log-box{height:480px;min-height:300px;max-height:80vh;overflow-y:auto;background:#05050c;border:1px solid rgba(245,200,66,.12);border-radius:12px;padding:12px;font-family:var(--mono);font-size:.78rem;line-height:1.55;white-space:pre-wrap;word-break:break-all}
-.log-box.fullscreen{position:fixed;inset:0;z-index:99990;height:100vh !important;max-height:100vh !important;border-radius:0;padding:20px;background:#05050c}
-.fullscreen-btn{background:rgba(255,255,255,.08);border:1px solid rgba(245,200,66,.2);color:var(--gold2);padding:6px 12px;border-radius:8px;cursor:pointer;font-size:.75rem}
-.message-card img.pfp-preview{width:42px;height:42px;border-radius:50%;object-fit:cover;border:2px solid rgba(245,200,66,.3);margin-right:8px;vertical-align:middle}
-.pfp-url{font-size:.7rem;color:#7dd3fc;word-break:break-all;display:block;margin-top:4px}
 .config-form{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
 .config-status{padding:13px 16px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.12);border-left:4px solid var(--gold);border-radius:10px;color:var(--gold2);font-size:.85rem;margin-bottom:18px}
 .subscription-hero{background:linear-gradient(135deg,rgba(15,10,30,.95),rgba(10,5,20,.95));border:1px solid rgba(245,200,66,.2);border-radius:20px;padding:22px;margin-bottom:20px;box-shadow:0 15px 40px rgba(0,0,0,.4)}
@@ -2857,7 +2736,7 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
       <button class="tab-btn" onclick="switchTab('errors')"><i class="fas fa-exclamation-triangle"></i> Errors</button>
     </div>
     <div id="logsTab" class="tab-content active">
-      <div class="control-bar"><button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button><button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button><button onclick="toggleLogFullscreen()" class="fullscreen-btn" id="fsBtn"><i class="fas fa-expand"></i> Fullscreen</button><span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span></div>
+      <div class="control-bar"><button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button><button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button><span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span></div>
       <div id="logBox" class="log-box"><div class="log-line">Waiting...</div></div>
     </div>
     <div id="messagesTab" class="tab-content">
@@ -2990,28 +2869,9 @@ function updateUI(){
     ['cpuBar','ramBar','diskBar'].forEach(function(id,i){var bar=document.getElementById(id);if(bar)bar.style.width=[cpu,ram,disk][i]+'%';});
     if(data.logs){var h=data.logs.slice(-200).map(function(l){return '<div class="log-line">'+escapeHtml(l)+'</div>';}).join('');var box=document.getElementById('logBox');if(box){box.innerHTML=h;if(autoScroll&&currentTab==='logs')box.scrollTop=box.scrollHeight;}}
     if(data.error_logs){var e=data.error_logs.slice(-100).map(function(l){return '<div class="log-line error-line">'+escapeHtml(l)+'</div>';}).join('');var eb=document.getElementById('errorBox');if(eb)eb.innerHTML=e;}
-    if(data.message_history){var m=data.message_history.slice().reverse().map(function(msg){
-  var pfp = msg.data.pfp_url && msg.data.pfp_url !== 'N/A' ? '<img class="pfp-preview" src="'+escapeHtml(msg.data.pfp_url)+'" onerror="this.style.display=\'none\'" alt="pfp"/>' : '';
-  var pfpUrl = msg.data.pfp_url && msg.data.pfp_url !== 'N/A' ? '<span class="pfp-url"><i class="fas fa-image"></i> '+escapeHtml(msg.data.pfp_url)+'</span>' : '';
-  return '<div class="message-card"><div class="message-header">'+pfp+'<span class="message-sender">'+escapeHtml(msg.data.nickname)+'</span><span class="message-time">'+escapeHtml(msg.timestamp)+'</span></div><div class="message-meta"><span class="message-label">UID:</span><span class="message-value">'+escapeHtml(msg.data.sender_uid)+'</span><span class="message-label">Guild:</span><span class="message-value">'+escapeHtml(msg.data.guild_name||'')+'</span><span class="message-label">Message:</span><span class="message-value">'+escapeHtml(msg.data.message)+'</span>'+pfpUrl+'</div></div>';
-}).join('');var mb=document.getElementById('messageHistory');if(mb)mb.innerHTML=m;}
+    if(data.message_history){var m=data.message_history.slice().reverse().map(function(msg){return '<div class="message-card"><div class="message-header"><span class="message-sender">'+escapeHtml(msg.data.nickname)+'</span><span class="message-time">'+escapeHtml(msg.timestamp)+'</span></div><div class="message-meta"><span class="message-label">UID:</span><span class="message-value">'+escapeHtml(msg.data.sender_uid)+'</span><span class="message-label">Message:</span><span class="message-value">'+escapeHtml(msg.data.message)+'</span></div></div>';}).join('');var mb=document.getElementById('messageHistory');if(mb)mb.innerHTML=m;}
     if(performanceChart&&data.cpu_history){performanceChart.data.datasets[0].data=data.cpu_history;performanceChart.data.datasets[1].data=data.ram_history;performanceChart.update('none');}
   });}
-function toggleLogFullscreen(){
-  var box=document.getElementById('logBox');
-  var btn=document.getElementById('fsBtn');
-  if(!box)return;
-  box.classList.toggle('fullscreen');
-  if(box.classList.contains('fullscreen')){
-    btn.innerHTML='<i class="fas fa-compress"></i> Exit Fullscreen';
-    document.body.style.overflow='hidden';
-  }else{
-    btn.innerHTML='<i class="fas fa-expand"></i> Fullscreen';
-    document.body.style.overflow='';
-  }
-}
-document.addEventListener('keydown',function(e){if(e.key==='Escape'){var box=document.getElementById('logBox');if(box&&box.classList.contains('fullscreen'))toggleLogFullscreen();}});
-
 setInterval(updateUI,1500);updateUI();
 </script></body></html>'''
 
@@ -4596,14 +4456,6 @@ def api_update_bot_creds():
         c.execute('UPDATE users SET bot_uid=?, bot_pw=? WHERE id=?', (new_uid, new_pw, session['user_id']))
         conn.commit(); conn.close()
         m.restart_logic()
-        # Immediately update bio with new credentials
-        def _bg_bio():
-            time.sleep(2)
-            try:
-                update_bot_bio(new_uid, new_pw)
-            except Exception as e:
-                print(f"Bio update after creds change failed: {e}")
-        threading.Thread(target=_bg_bio, daemon=True).start()
         return jsonify({'status': 'success'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
