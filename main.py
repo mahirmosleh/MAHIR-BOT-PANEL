@@ -608,9 +608,7 @@ class ProcessMonitor:
         self.bot_dynamic_key = "N/A"
         self.bot_dynamic_iv = "N/A"
         self.bot_server = "N/A"
-        self.bot_chat_server = "N/A"
         self.bot_bd_time = "N/A"
-        self.bot_by = "N/A"
         self.last_sender_uid = "N/A"
         self.last_guild_name = "N/A"
         self.last_nickname = "N/A"
@@ -791,38 +789,6 @@ class ProcessMonitor:
     def process_line(self, line, timestamp):
         clean = self.clean_ansi(line)
         if not clean: return
-        # Parse MAHIR BOT ONLINE banner (STATUS / NAME / UID / REGION / ONLINE / CHAT / BY)
-        if 'MAHIR BOT ONLINE' in clean or 'READY & RUNNING' in clean:
-            with self.lock:
-                self.bot_status = "🟢 ACTIVE & ONLINE"
-                self.account_info_found = True
-        nm = re.search(r'NAME\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
-        if nm:
-            raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', nm.group(1).strip()))
-            if raw and len(raw) > 1 and raw not in ('N/A', '---'):
-                with self.lock: self.bot_name = raw[:100]
-        um = re.search(r'UID\s*[:：]\s*(\d+)', clean, re.IGNORECASE)
-        if um:
-            with self.lock: self.bot_uid = um.group(1)
-        rm = re.search(r'REGION\s*[:：]\s*(\w+)', clean, re.IGNORECASE)
-        if rm:
-            with self.lock: self.bot_region = rm.group(1).strip().upper()
-        om = re.search(r'ONLINE\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
-        if om:
-            with self.lock: self.bot_server = om.group(1)
-        cm = re.search(r'CHAT\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
-        if cm:
-            with self.lock: self.bot_chat_server = cm.group(1)
-        bym = re.search(r'BY\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
-        if bym:
-            raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', bym.group(1).strip()))
-            if raw:
-                with self.lock: self.bot_by = raw[:80]
-        sm = re.search(r'STATUS\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
-        if sm:
-            raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', sm.group(1).strip()))
-            if 'READY' in raw.upper() or 'RUNNING' in raw.upper() or 'ONLINE' in raw.upper():
-                with self.lock: self.bot_status = "🟢 ACTIVE & ONLINE"
         if 'USER INFO' in clean or '👤 USER INFO' in clean:
             self.in_user_info = True; self.user_info_buffer = [clean]; return
         if self.in_user_info:
@@ -1053,8 +1019,7 @@ class ProcessMonitor:
             'bot_name': self.bot_name, 'bot_status': self.bot_status, 'bot_region': self.bot_region,
             'bot_access_token': self.bot_access_token, 'bot_jwt_token': self.bot_jwt_token,
             'bot_dynamic_key': self.bot_dynamic_key, 'bot_dynamic_iv': self.bot_dynamic_iv,
-            'bot_server': self.bot_server, 'bot_chat_server': self.bot_chat_server,
-            'bot_bd_time': self.bot_bd_time, 'bot_by': self.bot_by,
+            'bot_server': self.bot_server, 'bot_bd_time': self.bot_bd_time,
             'last_sender_uid': self.last_sender_uid, 'last_guild_name': self.last_guild_name,
             'last_nickname': self.last_nickname, 'last_message': self.last_message,
             'last_pfp_url': self.last_pfp_url, 'cpu_history': self.cpu_history,
@@ -1080,8 +1045,7 @@ class ProcessMonitor:
             self.bot_uid = "N/A"; self.bot_name = "N/A"; self.bot_status = "🔴 OFFLINE"
             self.bot_region = "N/A"; self.bot_access_token = "N/A"; self.bot_jwt_token = "N/A"
             self.bot_dynamic_key = "N/A"; self.bot_dynamic_iv = "N/A"; self.bot_server = "N/A"
-            self.bot_chat_server = "N/A"; self.bot_bd_time = "N/A"; self.bot_by = "N/A"
-            self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
+            self.bot_bd_time = "N/A"; self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
             self.last_nickname = "N/A"; self.last_message = "N/A"; self.last_pfp_url = "N/A"
         # Force start without full can_start DB checks (user pressed Reset intentionally)
         return self._force_start_process()
@@ -2087,7 +2051,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             </td>
             <td>
               <div class="td-actions">
-                <a href="/owner/login_as/{{ agent.id }}" class="btn btn-warning btn-sm" title="Login as this user"><i class="fas fa-sign-in-alt"></i></a>
+                <a href="/owner/login_as/{{ agent.id }}" class="btn btn-warning btn-sm" title="User Panel Login"><i class="fas fa-sign-in-alt"></i> User Panel</a>
                 <a href="/owner/user_details/{{ agent.id }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i></a>
                 <form method="POST" action="/owner/delete_agent/{{ agent.id }}" onsubmit="return confirm('Delete?');" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form>
               </div>
@@ -2152,7 +2116,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
                 {% if not user.is_admin and not user.is_agent %}
                   <button type="button" class="btn btn-primary btn-sm notice-trigger" title="Send Notice" data-uid="{{ user.id }}" data-uname="{{ user.username }}" data-notice="{{ user.personal_notice or '' }}" data-enabled="{{ '1' if user.personal_notice_enabled else '0' }}"><i class="fas fa-bullhorn"></i></button>
                 {% endif %}
-                <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm" title="Login as user"><i class="fas fa-sign-in-alt"></i></a>
+                <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm" title="User Panel Login"><i class="fas fa-sign-in-alt"></i> User Panel</a>
                 <a href="/owner/user_details/{{ user.id }}" class="btn btn-info btn-sm" title="Details"><i class="fas fa-eye"></i></a>
                 {% if not user.is_admin and not user.is_agent %}
                   {% if user.bot_disabled_by_admin %}
@@ -2363,7 +2327,7 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
     <h1><i class="fas fa-user-circle"></i> {{ user.username }}</h1>
     <div class="flex">
       {% if not user.is_admin %}
-      <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm"><i class="fas fa-sign-in-alt"></i> Login as this user</a>
+      <a href="/owner/login_as/{{ user.id }}" class="btn btn-gold btn-sm" style="font-weight:700;"><i class="fas fa-sign-in-alt"></i> User Panel Login</a>
       {% endif %}
       <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
       <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
@@ -2706,6 +2670,9 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 </div>
 
 <div class="container">
+  {% if owner_mode %}
+  <a href="/owner/return" class="btn btn-gold btn-sm" style="position:absolute;top:16px;right:100px;z-index:50;font-weight:700;"><i class="fas fa-crown"></i> Return to Owner</a>
+  {% endif %}
   <button class="logout-btn btn btn-danger btn-sm" onclick="window.location.href='/logout'"><i class="fas fa-sign-out-alt"></i> Logout</button>
   <div class="cover-section">
     <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover"/>
@@ -2786,13 +2753,9 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
     <div class="card-title"><i class="fas fa-robot"></i> Bot Identity & Status</div>
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-label">UID</div><div class="stat-value" id="botUid">---</div></div>
-      <div class="stat-card"><div class="stat-label">Name / Nickname</div><div class="stat-value" id="botName">---</div></div>
+      <div class="stat-card"><div class="stat-label">Name</div><div class="stat-value" id="botName">---</div></div>
       <div class="stat-card"><div class="stat-label">Region</div><div class="stat-value" id="botRegion">---</div></div>
       <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" id="botStatus">---</div></div>
-      <div class="stat-card"><div class="stat-label">Online Server</div><div class="stat-value" id="botServer" style="font-size:.85rem;">---</div></div>
-      <div class="stat-card"><div class="stat-label">Chat Server</div><div class="stat-value" id="botChatServer" style="font-size:.85rem;">---</div></div>
-      <div class="stat-card"><div class="stat-label">BY</div><div class="stat-value" id="botBy">---</div></div>
-      <div class="stat-card"><div class="stat-label">BD Time</div><div class="stat-value" id="botBdTime">---</div></div>
     </div>
   </div>
   <div class="card">
@@ -2820,7 +2783,7 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
       <button class="tab-btn" onclick="switchTab('errors')"><i class="fas fa-exclamation-triangle"></i> Errors</button>
     </div>
     <div id="logsTab" class="tab-content active">
-      <div class="control-bar"><button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button><button onclick="toggleColorMode()" id="colorModeBtn" class="pause-btn"><i class="fas fa-palette"></i> Color ON</button><button onclick="toggleFullscreen('logBox')" class="fullscreen-btn" id="fsBtn"><i class="fas fa-expand"></i> Fullscreen</button><button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button><span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span></div>
+      <div class="control-bar"><button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button><button onclick="toggleFullscreen('logBox')" class="fullscreen-btn" id="fsBtn"><i class="fas fa-expand"></i> Fullscreen</button><button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button><span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span></div>
       <div id="logBox" class="log-box"><div class="log-line">Waiting...</div></div>
     </div>
     <div id="messagesTab" class="tab-content">
@@ -2842,31 +2805,62 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 </div>
 
 <div id="adminModal" class="modal-overlay">
-  <div class="modal-box">
+  <div class="modal-box" style="max-width:820px;">
     <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
-    <div class="modal-title"><i class="fas fa-cog"></i> Admin Control Panel</div>
-    <div class="modal-section">
-      <h3><i class="fas fa-user-shield"></i> Owner UIDs</h3>
-      <div class="modal-input-group"><label>UIDs:</label><input type="text" id="adminUidsInput" placeholder="1120167200, 3020431227"/></div>
-      <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
+    <div class="modal-title" style="margin-bottom:20px;"><i class="fas fa-cog"></i> Admin Control Panel</div>
+
+    <!-- Bot Live Identity (like user_details) -->
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-robot"></i> Bot Identity (Live)</div>
+      <div class="detail-grid">
+        <div class="detail-item"><div class="detail-label">Bot UID</div><div class="detail-value big" id="adminLiveUid">---</div></div>
+        <div class="detail-item"><div class="detail-label">Name</div><div class="detail-value" id="adminLiveName">---</div></div>
+        <div class="detail-item"><div class="detail-label">Region</div><div class="detail-value" id="adminLiveRegion">---</div></div>
+        <div class="detail-item"><div class="detail-label">Status</div><div class="detail-value" id="adminLiveStatus">---</div></div>
+        <div class="detail-item"><div class="detail-label">Online Server</div><div class="detail-value" id="adminLiveServer" style="font-size:.85rem;">---</div></div>
+        <div class="detail-item"><div class="detail-label">Chat Server</div><div class="detail-value" id="adminLiveChat" style="font-size:.85rem;">---</div></div>
+      </div>
     </div>
-    <div class="modal-section">
-      <h3><i class="fas fa-key"></i> Bot Credentials</h3>
-      <div class="modal-input-group"><label>Bot UID:</label><input type="text" id="botUidInput"/></div>
-      <div class="modal-input-group"><label>Password:</label><input type="text" id="botPwInput"/></div>
-      <button onclick="updateBotCreds()" id="botCredsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
+
+    <!-- Owner UIDs -->
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-user-shield"></i> Owner / Admin UIDs</div>
+      <p style="color:var(--muted);font-size:.8rem;margin-bottom:10px;">Comma separated. Master UID is always kept.</p>
+      <div class="modal-input-group"><label>UIDs:</label><input type="text" id="adminUidsInput" placeholder="1120167200, 3020431227" style="flex:1;"/></div>
+      <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save" style="margin-top:10px;"><i class="fas fa-save"></i> Save & Restart Bot</button>
     </div>
-    <div class="modal-section">
-      <h3><i class="fas fa-user-friends"></i> Friend Management</h3>
-      <div class="modal-input-group" style="margin-bottom:0;">
-        <input type="text" id="friendUidInput" placeholder="UID" style="flex:1;min-width:150px;"/>
+
+    <!-- Bot Credentials -->
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-key"></i> Bot Credentials</div>
+      <div class="detail-grid" style="margin-bottom:12px;">
+        <div class="detail-item">
+          <div class="detail-label">Bot UID</div>
+          <input type="text" id="botUidInput" style="width:100%;margin-top:6px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px;border-radius:10px;"/>
+        </div>
+        <div class="detail-item">
+          <div class="detail-label">Password</div>
+          <input type="text" id="botPwInput" style="width:100%;margin-top:6px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px;border-radius:10px;"/>
+        </div>
+      </div>
+      <button onclick="updateBotCreds()" id="botCredsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save Credentials & Restart</button>
+    </div>
+
+    <!-- Friend Management -->
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-user-friends"></i> Friend Management</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;">
+        <input type="text" id="friendUidInput" placeholder="Friend UID" style="flex:1;min-width:160px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px 12px;border-radius:10px;"/>
         <button onclick="friendAction('add')" id="friendAddBtn" class="modal-btn modal-btn-action"><i class="fas fa-user-plus"></i> Add</button>
         <button onclick="friendAction('remove')" id="friendRemoveBtn" class="modal-btn modal-btn-danger"><i class="fas fa-user-minus"></i> Remove</button>
-        <button onclick="friendAction('list')" id="friendListBtn" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List</button>
+        <button onclick="friendAction('list')" id="friendListBtn" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List Friends</button>
       </div>
-      <div id="friendResult" class="modal-result-box">Result...</div>
+      <div id="friendResult" class="modal-result-box" style="min-height:60px;max-height:180px;overflow-y:auto;">Result will appear here...</div>
     </div>
-    <div style="text-align:right;"><button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close</button></div>
+
+    <div style="text-align:right;margin-top:8px;">
+      <button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close Panel</button>
+    </div>
   </div>
 </div>
 
@@ -2924,29 +2918,7 @@ var performanceChart=null;
 function initChart(){var ctx=document.getElementById('performanceChart');if(!ctx)return;performanceChart=new Chart(ctx.getContext('2d'),{type:'line',data:{labels:Array(20).fill(''),datasets:[{label:'CPU %',data:Array(20).fill(0),borderColor:'#F5C842',tension:.4,fill:true,borderWidth:2,pointRadius:0},{label:'RAM %',data:Array(20).fill(0),borderColor:'#8540F5',tension:.4,fill:true,borderWidth:2,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:'#c5c5e5'}}},scales:{y:{beginAtZero:true,max:100,grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}},x:{grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}}}}});}
 if(typeof Chart!=='undefined')initChart();
 var currentTab='logs';
-var colorMode = localStorage.getItem('mahirColorMode') !== '0';
 function switchTab(tab){currentTab=tab;var btns=document.querySelectorAll('.tab-btn');btns.forEach(function(b){b.classList.remove('active');});document.querySelectorAll('.tab-content').forEach(function(c){c.classList.remove('active');});if(tab==='logs'){btns[0].classList.add('active');document.getElementById('logsTab').classList.add('active');}else if(tab==='messages'){btns[1].classList.add('active');document.getElementById('messagesTab').classList.add('active');}else{btns[2].classList.add('active');document.getElementById('errorsTab').classList.add('active');}}
-function toggleColorMode(){colorMode=!colorMode;localStorage.setItem('mahirColorMode',colorMode?'1':'0');var btn=document.getElementById('colorModeBtn');if(btn)btn.innerHTML=colorMode?'<i class="fas fa-palette"></i> Color ON':'<i class="fas fa-palette"></i> Color OFF';updateUI();}
-function ansiToHtml(str){
-  if(!str)return '';
-  var s=escapeHtml(str);
-  s=s.replace(/\x1b\[92m|\[92m/g,'<span style="color:#00e676">');
-  s=s.replace(/\x1b\[93m|\[93m/g,'<span style="color:#ffeb3b">');
-  s=s.replace(/\x1b\[95m|\[95m/g,'<span style="color:#e040fb">');
-  s=s.replace(/\x1b\[96m|\[96m/g,'<span style="color:#00e5ff">');
-  s=s.replace(/\x1b\[91m|\[91m/g,'<span style="color:#ff5252">');
-  s=s.replace(/\x1b\[94m|\[94m/g,'<span style="color:#448aff">');
-  s=s.replace(/\x1b\[90m|\[90m/g,'<span style="color:#9e9e9e">');
-  s=s.replace(/\x1b\[1m|\[1m/g,'<span style="font-weight:700">');
-  s=s.replace(/\x1b\[0m|\[0m|\[m/g,'</span>');
-  s=s.replace(/\x1b\[[0-9;]*m|\[[0-9;]*m/g,'');
-  return s;
-}
-function formatLogLine(l){
-  if(colorMode) return '<div class="log-line">'+ansiToHtml(l)+'</div>';
-  var plain=l.replace(/\x1b\[[0-9;]*[mK]/g,'').replace(/\[[0-9;]*m/g,'');
-  return '<div class="log-line">'+escapeHtml(plain)+'</div>';
-}
 var autoScroll=true;
 function togglePause(){autoScroll=!autoScroll;var btn=document.getElementById('pauseBtn');var status=document.getElementById('logStatus');if(autoScroll){btn.innerHTML='<i class="fas fa-pause"></i> Pause';status.innerHTML='Auto-scroll: ON';}else{btn.innerHTML='<i class="fas fa-play"></i> Resume';status.innerHTML='Auto-scroll: OFF';}}
 function toggleFullscreen(boxId){var box=document.getElementById(boxId);var btn=document.getElementById('fsBtn');if(!box)return;if(box.classList.contains('fullscreen')){box.classList.remove('fullscreen');if(btn)btn.innerHTML='<i class="fas fa-expand"></i> Fullscreen';document.body.style.overflow='';}else{box.classList.add('fullscreen');if(btn)btn.innerHTML='<i class="fas fa-compress"></i> Exit';document.body.style.overflow='hidden';}}
@@ -2959,7 +2931,22 @@ function exportErrors(){fetch('/api/export_errors').then(function(r){return r.js
 function exportMessages(){fetch('/api/export_messages').then(function(r){return r.json();}).then(function(d){if(d.messages&&d.messages.length){var t='';d.messages.forEach(function(m){t+='['+m.timestamp+'] '+m.data.nickname+' ('+m.data.sender_uid+'): '+m.data.message+'\\n';});downloadText(t,'messages.txt');showNotification('Exported!','success');}});}
 function sendAction(action){var btnMap={start:'btnStart',stop:'btnStop',reset:'btnReset'};var btn=getBtn(btnMap[action]);setLoading(btn,true);fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})}).then(function(r){return r.json();}).then(function(d){setLoading(btn,false);if(d.error){showNotification(d.error,'error');}else{showNotification(action.toUpperCase()+' done!','success');setTimeout(updateUI,500);}}).catch(function(){setLoading(btn,false);showNotification('Failed','error');});}
 
-function openAdminPanel(){document.getElementById('adminModal').classList.add('active');fetch('/api/admin_uids').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById('adminUidsInput').value=d.uids.join(', ');}).catch(function(){});fetch('/api/bot_creds').then(function(r){return r.json();}).then(function(d){document.getElementById('botUidInput').value=d.uid||'';document.getElementById('botPwInput').value=d.pw||'';}).catch(function(){});}
+function openAdminPanel(){
+  document.getElementById('adminModal').classList.add('active');
+  fetch('/api/admin_uids').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById('adminUidsInput').value=d.uids.join(', ');}).catch(function(){});
+  fetch('/api/bot_creds').then(function(r){return r.json();}).then(function(d){document.getElementById('botUidInput').value=d.uid||'';document.getElementById('botPwInput').value=d.pw||'';}).catch(function(){});
+  // Fill live identity from last /api/status data
+  fetch('/api/status').then(function(r){return r.json();}).then(function(data){
+    if(data.error)return;
+    var s=function(id,v){var el=document.getElementById(id);if(el)el.innerHTML=v||'---';};
+    s('adminLiveUid',escapeHtml(data.bot_uid));
+    s('adminLiveName',escapeHtml(data.bot_name));
+    s('adminLiveRegion',escapeHtml(data.bot_region));
+    s('adminLiveStatus',data.bot_status||'Offline');
+    s('adminLiveServer',escapeHtml(data.bot_server));
+    s('adminLiveChat',escapeHtml(data.bot_chat_server));
+  }).catch(function(){});
+}
 function closeAdminPanel(){document.getElementById('adminModal').classList.remove('active');}
 document.getElementById('adminModal') && document.getElementById('adminModal').addEventListener('click',function(e){if(e.target===this)closeAdminPanel();});
 function updateAdminUIDs(){var input=document.getElementById('adminUidsInput').value;var uids=input.split(',').map(function(s){return s.trim();}).filter(function(s){return s;});if(!uids.length){showNotification('Enter UIDs','error');return;}var btn=document.getElementById('adminUidsBtn');setLoading(btn,true);fetch('/api/admin_uids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uids:uids})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Updated!','success');setTimeout(updateUI,3000);}else showNotification('Failed','error');});}
@@ -2970,20 +2957,17 @@ function updateUI(){
   if(IS_BLOCKED) return;
   fetch('/api/status').then(function(r){return r.json();}).then(function(data){if(data.error)return;var s=function(id,v){var el=document.getElementById(id);if(el)el.innerHTML=v;};
     s('botUid',escapeHtml(data.bot_uid)||'---');s('botName',escapeHtml(data.bot_name)||'---');s('botRegion',escapeHtml(data.bot_region)||'---');s('botStatus',data.bot_status||'Offline');
-    s('botServer',escapeHtml(data.bot_server)||'---');s('botChatServer',escapeHtml(data.bot_chat_server)||'---');
-    s('botBy',escapeHtml(data.bot_by)||'---');s('botBdTime',escapeHtml(data.bot_bd_time)||'---');
     s('processStatus',data.is_running?'<span class="badge badge-active">RUNNING</span>':'<span class="badge badge-offline">STOPPED</span>');
     s('uptime',data.uptime||'00:00:00');s('restartCount',data.restart_count||0);s('errorCount',(data.error_logs||[]).length);
     var cpu=parseFloat(data.cpu)||0,ram=parseFloat(data.ram)||0,disk=parseFloat(data.disk)||0;
     s('cpuValue',Math.floor(cpu)+'%');s('ramValue',Math.floor(ram)+'%');s('diskValue',Math.floor(disk)+'%');
     ['cpuBar','ramBar','diskBar'].forEach(function(id,i){var bar=document.getElementById(id);if(bar)bar.style.width=[cpu,ram,disk][i]+'%';});
-    if(data.logs){var h=data.logs.slice(-200).map(function(l){return formatLogLine(l);}).join('');var box=document.getElementById('logBox');if(box){box.innerHTML=h;if(autoScroll&&currentTab==='logs')box.scrollTop=box.scrollHeight;}}
+    if(data.logs){var h=data.logs.slice(-200).map(function(l){return '<div class="log-line">'+escapeHtml(l)+'</div>';}).join('');var box=document.getElementById('logBox');if(box){box.innerHTML=h;if(autoScroll&&currentTab==='logs')box.scrollTop=box.scrollHeight;}}
     if(data.error_logs){var e=data.error_logs.slice(-100).map(function(l){return '<div class="log-line error-line">'+escapeHtml(l)+'</div>';}).join('');var eb=document.getElementById('errorBox');if(eb)eb.innerHTML=e;}
     if(data.message_history){var m=data.message_history.slice().reverse().map(function(msg){var pfp=msg.data.pfp_url&&msg.data.pfp_url!=='N/A'?msg.data.pfp_url:'';var pfpHtml=pfp?'<img class="message-pfp" src="'+escapeHtml(pfp)+'" alt="PFP" onerror="this.style.display=\\'none\\'"/>':'<div class="message-pfp" style="display:flex;align-items:center;justify-content:center;font-size:1.2rem;color:var(--gold);">👤</div>';return '<div class="message-card">'+pfpHtml+'<div class="message-body"><div class="message-header"><span class="message-sender">'+escapeHtml(msg.data.nickname)+'</span><span class="message-time">'+escapeHtml(msg.timestamp)+'</span></div><div class="message-meta"><span class="message-label">UID:</span><span class="message-value">'+escapeHtml(msg.data.sender_uid)+'</span><span class="message-label">Message:</span><span class="message-value">'+escapeHtml(msg.data.message)+'</span>'+(msg.data.guild_name&&msg.data.guild_name!=='N/A'?'<span class="message-label">Guild:</span><span class="message-value">'+escapeHtml(msg.data.guild_name)+'</span>':'')+'</div></div></div>';}).join('');var mb=document.getElementById('messageHistory');if(mb)mb.innerHTML=m;}
     if(performanceChart&&data.cpu_history){performanceChart.data.datasets[0].data=data.cpu_history;performanceChart.data.datasets[1].data=data.ram_history;performanceChart.update('none');}
   });}
 setInterval(updateUI,1500);updateUI();
-(function(){var btn=document.getElementById('colorModeBtn');if(btn)btn.innerHTML=colorMode?'<i class="fas fa-palette"></i> Color ON':'<i class="fas fa-palette"></i> Color OFF';})();
 </script></body></html>'''
 
 
@@ -4108,7 +4092,8 @@ def user_dashboard():
                                   login_notice_enabled=login_notice_enabled,
                                   login_notice_json=json.dumps(login_notice_text),
                                   personal_notice_enabled=personal_notice_enabled,
-                                  personal_notice_json=json.dumps(personal_notice_text))
+                                  personal_notice_json=json.dumps(personal_notice_text),
+                                  owner_mode=bool(session.get('owner_mode')))
 
 
 @app.route('/configure', methods=['POST'])
