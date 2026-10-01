@@ -608,7 +608,9 @@ class ProcessMonitor:
         self.bot_dynamic_key = "N/A"
         self.bot_dynamic_iv = "N/A"
         self.bot_server = "N/A"
+        self.bot_chat_server = "N/A"
         self.bot_bd_time = "N/A"
+        self.bot_by = "N/A"
         self.last_sender_uid = "N/A"
         self.last_guild_name = "N/A"
         self.last_nickname = "N/A"
@@ -789,6 +791,38 @@ class ProcessMonitor:
     def process_line(self, line, timestamp):
         clean = self.clean_ansi(line)
         if not clean: return
+        # Parse MAHIR BOT ONLINE banner (STATUS / NAME / UID / REGION / ONLINE / CHAT / BY)
+        if 'MAHIR BOT ONLINE' in clean or 'READY & RUNNING' in clean:
+            with self.lock:
+                self.bot_status = "🟢 ACTIVE & ONLINE"
+                self.account_info_found = True
+        nm = re.search(r'NAME\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
+        if nm:
+            raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', nm.group(1).strip()))
+            if raw and len(raw) > 1 and raw not in ('N/A', '---'):
+                with self.lock: self.bot_name = raw[:100]
+        um = re.search(r'UID\s*[:：]\s*(\d+)', clean, re.IGNORECASE)
+        if um:
+            with self.lock: self.bot_uid = um.group(1)
+        rm = re.search(r'REGION\s*[:：]\s*(\w+)', clean, re.IGNORECASE)
+        if rm:
+            with self.lock: self.bot_region = rm.group(1).strip().upper()
+        om = re.search(r'ONLINE\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
+        if om:
+            with self.lock: self.bot_server = om.group(1)
+        cm = re.search(r'CHAT\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
+        if cm:
+            with self.lock: self.bot_chat_server = cm.group(1)
+        bym = re.search(r'BY\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
+        if bym:
+            raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', bym.group(1).strip()))
+            if raw:
+                with self.lock: self.bot_by = raw[:80]
+        sm = re.search(r'STATUS\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
+        if sm:
+            raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', sm.group(1).strip()))
+            if 'READY' in raw.upper() or 'RUNNING' in raw.upper() or 'ONLINE' in raw.upper():
+                with self.lock: self.bot_status = "🟢 ACTIVE & ONLINE"
         if 'USER INFO' in clean or '👤 USER INFO' in clean:
             self.in_user_info = True; self.user_info_buffer = [clean]; return
         if self.in_user_info:
@@ -1019,7 +1053,8 @@ class ProcessMonitor:
             'bot_name': self.bot_name, 'bot_status': self.bot_status, 'bot_region': self.bot_region,
             'bot_access_token': self.bot_access_token, 'bot_jwt_token': self.bot_jwt_token,
             'bot_dynamic_key': self.bot_dynamic_key, 'bot_dynamic_iv': self.bot_dynamic_iv,
-            'bot_server': self.bot_server, 'bot_bd_time': self.bot_bd_time,
+            'bot_server': self.bot_server, 'bot_chat_server': self.bot_chat_server,
+            'bot_bd_time': self.bot_bd_time, 'bot_by': self.bot_by,
             'last_sender_uid': self.last_sender_uid, 'last_guild_name': self.last_guild_name,
             'last_nickname': self.last_nickname, 'last_message': self.last_message,
             'last_pfp_url': self.last_pfp_url, 'cpu_history': self.cpu_history,
@@ -1045,7 +1080,8 @@ class ProcessMonitor:
             self.bot_uid = "N/A"; self.bot_name = "N/A"; self.bot_status = "🔴 OFFLINE"
             self.bot_region = "N/A"; self.bot_access_token = "N/A"; self.bot_jwt_token = "N/A"
             self.bot_dynamic_key = "N/A"; self.bot_dynamic_iv = "N/A"; self.bot_server = "N/A"
-            self.bot_bd_time = "N/A"; self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
+            self.bot_chat_server = "N/A"; self.bot_bd_time = "N/A"; self.bot_by = "N/A"
+            self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
             self.last_nickname = "N/A"; self.last_message = "N/A"; self.last_pfp_url = "N/A"
         # Force start without full can_start DB checks (user pressed Reset intentionally)
         return self._force_start_process()
@@ -2750,9 +2786,13 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
     <div class="card-title"><i class="fas fa-robot"></i> Bot Identity & Status</div>
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-label">UID</div><div class="stat-value" id="botUid">---</div></div>
-      <div class="stat-card"><div class="stat-label">Name</div><div class="stat-value" id="botName">---</div></div>
+      <div class="stat-card"><div class="stat-label">Name / Nickname</div><div class="stat-value" id="botName">---</div></div>
       <div class="stat-card"><div class="stat-label">Region</div><div class="stat-value" id="botRegion">---</div></div>
       <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" id="botStatus">---</div></div>
+      <div class="stat-card"><div class="stat-label">Online Server</div><div class="stat-value" id="botServer" style="font-size:.85rem;">---</div></div>
+      <div class="stat-card"><div class="stat-label">Chat Server</div><div class="stat-value" id="botChatServer" style="font-size:.85rem;">---</div></div>
+      <div class="stat-card"><div class="stat-label">BY</div><div class="stat-value" id="botBy">---</div></div>
+      <div class="stat-card"><div class="stat-label">BD Time</div><div class="stat-value" id="botBdTime">---</div></div>
     </div>
   </div>
   <div class="card">
@@ -2780,7 +2820,7 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
       <button class="tab-btn" onclick="switchTab('errors')"><i class="fas fa-exclamation-triangle"></i> Errors</button>
     </div>
     <div id="logsTab" class="tab-content active">
-      <div class="control-bar"><button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button><button onclick="toggleFullscreen('logBox')" class="fullscreen-btn" id="fsBtn"><i class="fas fa-expand"></i> Fullscreen</button><button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button><span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span></div>
+      <div class="control-bar"><button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button><button onclick="toggleColorMode()" id="colorModeBtn" class="pause-btn"><i class="fas fa-palette"></i> Color ON</button><button onclick="toggleFullscreen('logBox')" class="fullscreen-btn" id="fsBtn"><i class="fas fa-expand"></i> Fullscreen</button><button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button><span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span></div>
       <div id="logBox" class="log-box"><div class="log-line">Waiting...</div></div>
     </div>
     <div id="messagesTab" class="tab-content">
@@ -2884,7 +2924,29 @@ var performanceChart=null;
 function initChart(){var ctx=document.getElementById('performanceChart');if(!ctx)return;performanceChart=new Chart(ctx.getContext('2d'),{type:'line',data:{labels:Array(20).fill(''),datasets:[{label:'CPU %',data:Array(20).fill(0),borderColor:'#F5C842',tension:.4,fill:true,borderWidth:2,pointRadius:0},{label:'RAM %',data:Array(20).fill(0),borderColor:'#8540F5',tension:.4,fill:true,borderWidth:2,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:'#c5c5e5'}}},scales:{y:{beginAtZero:true,max:100,grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}},x:{grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}}}}});}
 if(typeof Chart!=='undefined')initChart();
 var currentTab='logs';
+var colorMode = localStorage.getItem('mahirColorMode') !== '0';
 function switchTab(tab){currentTab=tab;var btns=document.querySelectorAll('.tab-btn');btns.forEach(function(b){b.classList.remove('active');});document.querySelectorAll('.tab-content').forEach(function(c){c.classList.remove('active');});if(tab==='logs'){btns[0].classList.add('active');document.getElementById('logsTab').classList.add('active');}else if(tab==='messages'){btns[1].classList.add('active');document.getElementById('messagesTab').classList.add('active');}else{btns[2].classList.add('active');document.getElementById('errorsTab').classList.add('active');}}
+function toggleColorMode(){colorMode=!colorMode;localStorage.setItem('mahirColorMode',colorMode?'1':'0');var btn=document.getElementById('colorModeBtn');if(btn)btn.innerHTML=colorMode?'<i class="fas fa-palette"></i> Color ON':'<i class="fas fa-palette"></i> Color OFF';updateUI();}
+function ansiToHtml(str){
+  if(!str)return '';
+  var s=escapeHtml(str);
+  s=s.replace(/\x1b\[92m|\[92m/g,'<span style="color:#00e676">');
+  s=s.replace(/\x1b\[93m|\[93m/g,'<span style="color:#ffeb3b">');
+  s=s.replace(/\x1b\[95m|\[95m/g,'<span style="color:#e040fb">');
+  s=s.replace(/\x1b\[96m|\[96m/g,'<span style="color:#00e5ff">');
+  s=s.replace(/\x1b\[91m|\[91m/g,'<span style="color:#ff5252">');
+  s=s.replace(/\x1b\[94m|\[94m/g,'<span style="color:#448aff">');
+  s=s.replace(/\x1b\[90m|\[90m/g,'<span style="color:#9e9e9e">');
+  s=s.replace(/\x1b\[1m|\[1m/g,'<span style="font-weight:700">');
+  s=s.replace(/\x1b\[0m|\[0m|\[m/g,'</span>');
+  s=s.replace(/\x1b\[[0-9;]*m|\[[0-9;]*m/g,'');
+  return s;
+}
+function formatLogLine(l){
+  if(colorMode) return '<div class="log-line">'+ansiToHtml(l)+'</div>';
+  var plain=l.replace(/\x1b\[[0-9;]*[mK]/g,'').replace(/\[[0-9;]*m/g,'');
+  return '<div class="log-line">'+escapeHtml(plain)+'</div>';
+}
 var autoScroll=true;
 function togglePause(){autoScroll=!autoScroll;var btn=document.getElementById('pauseBtn');var status=document.getElementById('logStatus');if(autoScroll){btn.innerHTML='<i class="fas fa-pause"></i> Pause';status.innerHTML='Auto-scroll: ON';}else{btn.innerHTML='<i class="fas fa-play"></i> Resume';status.innerHTML='Auto-scroll: OFF';}}
 function toggleFullscreen(boxId){var box=document.getElementById(boxId);var btn=document.getElementById('fsBtn');if(!box)return;if(box.classList.contains('fullscreen')){box.classList.remove('fullscreen');if(btn)btn.innerHTML='<i class="fas fa-expand"></i> Fullscreen';document.body.style.overflow='';}else{box.classList.add('fullscreen');if(btn)btn.innerHTML='<i class="fas fa-compress"></i> Exit';document.body.style.overflow='hidden';}}
@@ -2908,17 +2970,20 @@ function updateUI(){
   if(IS_BLOCKED) return;
   fetch('/api/status').then(function(r){return r.json();}).then(function(data){if(data.error)return;var s=function(id,v){var el=document.getElementById(id);if(el)el.innerHTML=v;};
     s('botUid',escapeHtml(data.bot_uid)||'---');s('botName',escapeHtml(data.bot_name)||'---');s('botRegion',escapeHtml(data.bot_region)||'---');s('botStatus',data.bot_status||'Offline');
+    s('botServer',escapeHtml(data.bot_server)||'---');s('botChatServer',escapeHtml(data.bot_chat_server)||'---');
+    s('botBy',escapeHtml(data.bot_by)||'---');s('botBdTime',escapeHtml(data.bot_bd_time)||'---');
     s('processStatus',data.is_running?'<span class="badge badge-active">RUNNING</span>':'<span class="badge badge-offline">STOPPED</span>');
     s('uptime',data.uptime||'00:00:00');s('restartCount',data.restart_count||0);s('errorCount',(data.error_logs||[]).length);
     var cpu=parseFloat(data.cpu)||0,ram=parseFloat(data.ram)||0,disk=parseFloat(data.disk)||0;
     s('cpuValue',Math.floor(cpu)+'%');s('ramValue',Math.floor(ram)+'%');s('diskValue',Math.floor(disk)+'%');
     ['cpuBar','ramBar','diskBar'].forEach(function(id,i){var bar=document.getElementById(id);if(bar)bar.style.width=[cpu,ram,disk][i]+'%';});
-    if(data.logs){var h=data.logs.slice(-200).map(function(l){return '<div class="log-line">'+escapeHtml(l)+'</div>';}).join('');var box=document.getElementById('logBox');if(box){box.innerHTML=h;if(autoScroll&&currentTab==='logs')box.scrollTop=box.scrollHeight;}}
+    if(data.logs){var h=data.logs.slice(-200).map(function(l){return formatLogLine(l);}).join('');var box=document.getElementById('logBox');if(box){box.innerHTML=h;if(autoScroll&&currentTab==='logs')box.scrollTop=box.scrollHeight;}}
     if(data.error_logs){var e=data.error_logs.slice(-100).map(function(l){return '<div class="log-line error-line">'+escapeHtml(l)+'</div>';}).join('');var eb=document.getElementById('errorBox');if(eb)eb.innerHTML=e;}
     if(data.message_history){var m=data.message_history.slice().reverse().map(function(msg){var pfp=msg.data.pfp_url&&msg.data.pfp_url!=='N/A'?msg.data.pfp_url:'';var pfpHtml=pfp?'<img class="message-pfp" src="'+escapeHtml(pfp)+'" alt="PFP" onerror="this.style.display=\\'none\\'"/>':'<div class="message-pfp" style="display:flex;align-items:center;justify-content:center;font-size:1.2rem;color:var(--gold);">👤</div>';return '<div class="message-card">'+pfpHtml+'<div class="message-body"><div class="message-header"><span class="message-sender">'+escapeHtml(msg.data.nickname)+'</span><span class="message-time">'+escapeHtml(msg.timestamp)+'</span></div><div class="message-meta"><span class="message-label">UID:</span><span class="message-value">'+escapeHtml(msg.data.sender_uid)+'</span><span class="message-label">Message:</span><span class="message-value">'+escapeHtml(msg.data.message)+'</span>'+(msg.data.guild_name&&msg.data.guild_name!=='N/A'?'<span class="message-label">Guild:</span><span class="message-value">'+escapeHtml(msg.data.guild_name)+'</span>':'')+'</div></div></div>';}).join('');var mb=document.getElementById('messageHistory');if(mb)mb.innerHTML=m;}
     if(performanceChart&&data.cpu_history){performanceChart.data.datasets[0].data=data.cpu_history;performanceChart.data.datasets[1].data=data.ram_history;performanceChart.update('none');}
   });}
 setInterval(updateUI,1500);updateUI();
+(function(){var btn=document.getElementById('colorModeBtn');if(btn)btn.innerHTML=colorMode?'<i class="fas fa-palette"></i> Color ON':'<i class="fas fa-palette"></i> Color OFF';})();
 </script></body></html>'''
 
 
