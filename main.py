@@ -609,7 +609,7 @@ class ProcessMonitor:
         self.bot_dynamic_iv = "N/A"
         self.bot_server = "N/A"
         self.bot_chat_server = "N/A"
-        self.bot_bd_time = "N/A"
+        self.bot_credit = "N/A"   # BD Time এর বদলে CREDIT / BY
         self.bot_by = "N/A"
         self.last_sender_uid = "N/A"
         self.last_guild_name = "N/A"
@@ -758,11 +758,10 @@ class ProcessMonitor:
         return s
 
     def parse_system(self, lines):
+        # BD TIME বাদ দেওয়া হয়েছে
         s = {}
         for line in lines:
             clean = self.clean_ansi(line)
-            tm = re.search(r'BD TIME\s*[:：]\s*(.+?)(?:\s*$)', clean, re.IGNORECASE)
-            if tm: s['bd_time'] = tm.group(1).strip()
             sm = re.search(r'ONLINE SRV\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
             if sm: s['server'] = sm.group(1)
         return s
@@ -791,38 +790,59 @@ class ProcessMonitor:
     def process_line(self, line, timestamp):
         clean = self.clean_ansi(line)
         if not clean: return
-        # Parse MAHIR BOT ONLINE banner (STATUS / NAME / UID / REGION / ONLINE / CHAT / BY)
+
+        # ============ MAHIR BOT ONLINE banner parsing ============
         if 'MAHIR BOT ONLINE' in clean or 'READY & RUNNING' in clean:
             with self.lock:
                 self.bot_status = "🟢 ACTIVE & ONLINE"
                 self.account_info_found = True
+
+        # NAME line
         nm = re.search(r'NAME\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
         if nm:
             raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', nm.group(1).strip()))
+            raw = raw.strip('║ ').strip()
             if raw and len(raw) > 1 and raw not in ('N/A', '---'):
                 with self.lock: self.bot_name = raw[:100]
+
+        # UID line
         um = re.search(r'UID\s*[:：]\s*(\d+)', clean, re.IGNORECASE)
         if um:
             with self.lock: self.bot_uid = um.group(1)
+
+        # REGION line
         rm = re.search(r'REGION\s*[:：]\s*(\w+)', clean, re.IGNORECASE)
         if rm:
             with self.lock: self.bot_region = rm.group(1).strip().upper()
+
+        # ONLINE line
         om = re.search(r'ONLINE\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
         if om:
             with self.lock: self.bot_server = om.group(1)
+
+        # CHAT line
         cm = re.search(r'CHAT\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
         if cm:
             with self.lock: self.bot_chat_server = cm.group(1)
+
+        # BY line → CREDIT (BD TIME এর পরিবর্তে)
         bym = re.search(r'BY\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
         if bym:
             raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', bym.group(1).strip()))
+            raw = raw.strip('║ ').strip()
             if raw:
-                with self.lock: self.bot_by = raw[:80]
+                with self.lock:
+                    self.bot_by = raw[:80]
+                    self.bot_credit = raw[:80]
+
+        # STATUS line
         sm = re.search(r'STATUS\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
         if sm:
             raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', sm.group(1).strip()))
             if 'READY' in raw.upper() or 'RUNNING' in raw.upper() or 'ONLINE' in raw.upper():
                 with self.lock: self.bot_status = "🟢 ACTIVE & ONLINE"
+
+        # ============ USER INFO section ============
         if 'USER INFO' in clean or '👤 USER INFO' in clean:
             self.in_user_info = True; self.user_info_buffer = [clean]; return
         if self.in_user_info:
@@ -838,6 +858,7 @@ class ProcessMonitor:
                         self.account_info_found = True
                 self.user_info_buffer = []
             return
+
         if 'TOKENS' in clean or '🌐 TOKENS' in clean:
             self.in_tokens = True; self.tokens_buffer = [clean]; return
         if self.in_tokens:
@@ -855,6 +876,7 @@ class ProcessMonitor:
                             self.bot_jwt_token = t[:30]+'...' if len(t)>30 else t
                 self.tokens_buffer = []
             return
+
         if 'SECURITY' in clean or '🔑 SECURITY' in clean:
             self.in_security = True; self.security_buffer = [clean]; return
         if self.in_security:
@@ -868,6 +890,7 @@ class ProcessMonitor:
                         if 'dynamic_iv' in d: self.bot_dynamic_iv = d['dynamic_iv']
                 self.security_buffer = []
             return
+
         if 'SYSTEM STATUS' in clean or '⏱ SYSTEM STATUS' in clean:
             self.in_system = True; self.system_buffer = [clean]; return
         if self.in_system:
@@ -877,10 +900,10 @@ class ProcessMonitor:
                 d = self.parse_system(self.system_buffer)
                 if d:
                     with self.lock:
-                        if 'bd_time' in d: self.bot_bd_time = d['bd_time']
                         if 'server' in d: self.bot_server = d['server']
                 self.system_buffer = []
             return
+
         if 'MESSAGE INFO' in clean or '╔══════════════ [ MESSAGE INFO ]' in clean:
             self.collecting_message = True; self.message_started = True; self.message_stored = False
             self.message_buffer = [clean]
@@ -920,6 +943,7 @@ class ProcessMonitor:
                         self.message_stored = True
                 self.message_buffer = []
             return
+
         if 'LOGIN SUCCESSFUL' in clean:
             with self.lock:
                 self.bot_status = "🟢 ACTIVE & ONLINE"
@@ -1054,7 +1078,7 @@ class ProcessMonitor:
             'bot_access_token': self.bot_access_token, 'bot_jwt_token': self.bot_jwt_token,
             'bot_dynamic_key': self.bot_dynamic_key, 'bot_dynamic_iv': self.bot_dynamic_iv,
             'bot_server': self.bot_server, 'bot_chat_server': self.bot_chat_server,
-            'bot_bd_time': self.bot_bd_time, 'bot_by': self.bot_by,
+            'bot_credit': self.bot_credit, 'bot_by': self.bot_by,
             'last_sender_uid': self.last_sender_uid, 'last_guild_name': self.last_guild_name,
             'last_nickname': self.last_nickname, 'last_message': self.last_message,
             'last_pfp_url': self.last_pfp_url, 'cpu_history': self.cpu_history,
@@ -1080,7 +1104,7 @@ class ProcessMonitor:
             self.bot_uid = "N/A"; self.bot_name = "N/A"; self.bot_status = "🔴 OFFLINE"
             self.bot_region = "N/A"; self.bot_access_token = "N/A"; self.bot_jwt_token = "N/A"
             self.bot_dynamic_key = "N/A"; self.bot_dynamic_iv = "N/A"; self.bot_server = "N/A"
-            self.bot_chat_server = "N/A"; self.bot_bd_time = "N/A"; self.bot_by = "N/A"
+            self.bot_chat_server = "N/A"; self.bot_credit = "N/A"; self.bot_by = "N/A"
             self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
             self.last_nickname = "N/A"; self.last_message = "N/A"; self.last_pfp_url = "N/A"
         # Force start without full can_start DB checks (user pressed Reset intentionally)
@@ -1868,7 +1892,16 @@ AGENT_CUSTOMER_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta char
       </div>
       <div class="detail-item"><div class="detail-label">Renew Count</div><div class="detail-value big">{{ user.renew_count }}x <small style="color:#4ade80;">(+{{ user.renew_days }}d)</small></div></div>
       <div class="detail-item"><div class="detail-label">Registration Key</div><div class="detail-value">{{ user.registration_key }}</div></div>
-      <div class="detail-item"><div class="detail-label">Created By</div><div class="detail-value">{{ user.created_by_agent or 'Owner' }}</div></div>
+      <div class="detail-item">
+        <div class="detail-label">Created By</div>
+        <div class="detail-value">
+          {% if user.created_by_agent and user.created_by_agent != 'Owner' %}
+            <span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT: {{ user.created_by_agent }}</span>
+          {% else %}
+            <span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+          {% endif %}
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1967,7 +2000,7 @@ AGENT_CUSTOMER_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta char
 
 
 # ============================================================
-#  OWNER DASHBOARD (✅ FIXED - notice button uses data-* attributes)
+#  OWNER DASHBOARD
 # ============================================================
 OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Owner Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 <div class="container">
@@ -2116,7 +2149,17 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
           {% for user in users %}
           <tr>
             <td>{{ user.id }}</td>
-            <td><strong>{{ user.username }}</strong>{% if user.created_by_agent %}<br><small style="color:var(--muted);font-size:.68rem;">by: {{ user.created_by_agent }}</small>{% endif %}</td>
+            <td>
+              <strong>{{ user.username }}</strong>
+              {% if user.created_by_agent %}
+                <br>
+                {% if user.created_by_agent == 'Owner' or user.created_by_agent == 'MAHIR TCP' %}
+                  <span class="creator-badge owner" style="font-size:.6rem;"><i class="fas fa-crown"></i> OWNER</span>
+                {% else %}
+                  <span class="creator-badge agent" style="font-size:.6rem;"><i class="fas fa-user-tie"></i> AGENT: {{ user.created_by_agent }}</span>
+                {% endif %}
+              {% endif %}
+            </td>
             <td>{{ user.email or '-' }}</td>
             <td>{% if user.is_agent %}<span class="badge badge-agent">AGENT</span>{% elif user.bot_status == 'running' %}<span class="badge badge-running">Running</span>{% elif user.bot_status == 'expired' %}<span class="badge badge-expired">Expired</span>{% elif user.bot_status == 'stopped' %}<span class="badge badge-stopped">Stopped</span>{% else %}<span class="badge badge-unused">{{ user.bot_status or 'Not Configured' }}</span>{% endif %}</td>
             <td>
@@ -2337,7 +2380,6 @@ document.getElementById('uploadMahirForm').addEventListener('submit',function(e)
 document.getElementById('uploadDbForm').addEventListener('submit',function(){var b=document.getElementById('uploadDbBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});
 document.getElementById('createAgentForm').addEventListener('submit',function(){var b=document.getElementById('createAgentBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Creating...';});
 
-// ✅ FIXED: Notice trigger using data-* attributes (no Jinja escaping issues)
 document.querySelectorAll('.notice-trigger').forEach(function(btn){
   btn.addEventListener('click', function(){
     openNoticeModal(
@@ -2353,7 +2395,7 @@ document.querySelectorAll('.notice-trigger').forEach(function(btn){
 
 
 # ============================================================
-#  USER DETAILS (Owner view)
+#  USER DETAILS (Owner view) - User Panel Login বাটন সহ
 # ============================================================
 USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>User Details - OWNER PANEL</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .copy-btn{background:rgba(245,200,66,.1);border:1px solid rgba(245,200,66,.25);color:var(--gold);padding:4px 10px;border-radius:8px;cursor:pointer;font-size:.7rem;margin-left:6px;font-weight:600}
@@ -2364,6 +2406,7 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
     <div class="flex">
       {% if not user.is_admin %}
       <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm"><i class="fas fa-sign-in-alt"></i> Login as this user</a>
+      <a href="/owner/login_as/{{ user.id }}?redirect=dashboard" class="btn btn-gold btn-sm"><i class="fas fa-external-link-alt"></i> User Panel Login</a>
       {% endif %}
       <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
       <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
@@ -2397,7 +2440,16 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
       </div>
       <div class="detail-item"><div class="detail-label">Renew Count</div><div class="detail-value big">{{ user.renew_count }}x <small style="color:#4ade80;">(+{{ user.renew_days }}d)</small></div></div>
       <div class="detail-item"><div class="detail-label">Registration Key</div><div class="detail-value">{{ user.registration_key }}</div></div>
-      <div class="detail-item"><div class="detail-label">Created By</div><div class="detail-value">{{ user.created_by_agent or 'Owner' }}</div></div>
+      <div class="detail-item">
+        <div class="detail-label">Created By</div>
+        <div class="detail-value">
+          {% if user.created_by_agent and user.created_by_agent != 'Owner' and user.created_by_agent != 'MAHIR TCP' %}
+            <span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT: {{ user.created_by_agent }}</span>
+          {% else %}
+            <span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+          {% endif %}
+        </div>
+      </div>
     </div>
   </div>
 
@@ -2613,7 +2665,7 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'){var box=doc
 
 
 # ============================================================
-#  USER PANEL
+#  USER PANEL — BD Time বাদ, CREDIT / BY যোগ
 # ============================================================
 USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>MAHIR PREMIUM | Bot Controller</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .logout-btn{position:fixed;top:20px;right:20px;z-index:999}
@@ -2792,7 +2844,7 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
       <div class="stat-card"><div class="stat-label">Online Server</div><div class="stat-value" id="botServer" style="font-size:.85rem;">---</div></div>
       <div class="stat-card"><div class="stat-label">Chat Server</div><div class="stat-value" id="botChatServer" style="font-size:.85rem;">---</div></div>
       <div class="stat-card"><div class="stat-label">BY</div><div class="stat-value" id="botBy">---</div></div>
-      <div class="stat-card"><div class="stat-label">BD Time</div><div class="stat-value" id="botBdTime">---</div></div>
+      <div class="stat-card"><div class="stat-label">CREDIT / BY</div><div class="stat-value" id="botCredit">---</div></div>
     </div>
   </div>
   <div class="card">
@@ -2971,7 +3023,7 @@ function updateUI(){
   fetch('/api/status').then(function(r){return r.json();}).then(function(data){if(data.error)return;var s=function(id,v){var el=document.getElementById(id);if(el)el.innerHTML=v;};
     s('botUid',escapeHtml(data.bot_uid)||'---');s('botName',escapeHtml(data.bot_name)||'---');s('botRegion',escapeHtml(data.bot_region)||'---');s('botStatus',data.bot_status||'Offline');
     s('botServer',escapeHtml(data.bot_server)||'---');s('botChatServer',escapeHtml(data.bot_chat_server)||'---');
-    s('botBy',escapeHtml(data.bot_by)||'---');s('botBdTime',escapeHtml(data.bot_bd_time)||'---');
+    s('botBy',escapeHtml(data.bot_by)||'---');s('botCredit',escapeHtml(data.bot_credit)||'---');
     s('processStatus',data.is_running?'<span class="badge badge-active">RUNNING</span>':'<span class="badge badge-offline">STOPPED</span>');
     s('uptime',data.uptime||'00:00:00');s('restartCount',data.restart_count||0);s('errorCount',(data.error_logs||[]).length);
     var cpu=parseFloat(data.cpu)||0,ram=parseFloat(data.ram)||0,disk=parseFloat(data.disk)||0;
