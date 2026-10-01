@@ -609,7 +609,7 @@ class ProcessMonitor:
         self.bot_dynamic_iv = "N/A"
         self.bot_server = "N/A"
         self.bot_chat_server = "N/A"
-        self.bot_credit = "N/A"   # BD Time এর বদলে CREDIT / BY
+        self.bot_bd_time = "N/A"
         self.bot_by = "N/A"
         self.last_sender_uid = "N/A"
         self.last_guild_name = "N/A"
@@ -758,10 +758,11 @@ class ProcessMonitor:
         return s
 
     def parse_system(self, lines):
-        # BD TIME বাদ দেওয়া হয়েছে
         s = {}
         for line in lines:
             clean = self.clean_ansi(line)
+            tm = re.search(r'BD TIME\s*[:：]\s*(.+?)(?:\s*$)', clean, re.IGNORECASE)
+            if tm: s['bd_time'] = tm.group(1).strip()
             sm = re.search(r'ONLINE SRV\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
             if sm: s['server'] = sm.group(1)
         return s
@@ -790,59 +791,43 @@ class ProcessMonitor:
     def process_line(self, line, timestamp):
         clean = self.clean_ansi(line)
         if not clean: return
-
-        # ============ MAHIR BOT ONLINE banner parsing ============
+        # === MAHIR BOT ONLINE banner (NAME comes ONLY from here) ===
         if 'MAHIR BOT ONLINE' in clean or 'READY & RUNNING' in clean:
             with self.lock:
                 self.bot_status = "🟢 ACTIVE & ONLINE"
                 self.account_info_found = True
-
-        # NAME line
+        # NAME — strict from banner only (do not overwrite with other sources)
         nm = re.search(r'NAME\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
-        if nm:
+        if nm and ('MAHIR BOT ONLINE' in clean or 'NAME' in clean.upper()):
             raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', nm.group(1).strip()))
-            raw = raw.strip('║ ').strip()
-            if raw and len(raw) > 1 and raw not in ('N/A', '---'):
-                with self.lock: self.bot_name = raw[:100]
-
-        # UID line
+            # strip trailing box chars / color leftovers
+            raw = re.sub(r'[║│┃]+.*$', '', raw).strip()
+            if raw and len(raw) > 1 and raw not in ('N/A', '---', 'Name'):
+                with self.lock:
+                    self.bot_name = raw[:100]
         um = re.search(r'UID\s*[:：]\s*(\d+)', clean, re.IGNORECASE)
         if um:
             with self.lock: self.bot_uid = um.group(1)
-
-        # REGION line
         rm = re.search(r'REGION\s*[:：]\s*(\w+)', clean, re.IGNORECASE)
         if rm:
             with self.lock: self.bot_region = rm.group(1).strip().upper()
-
-        # ONLINE line
         om = re.search(r'ONLINE\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
         if om:
             with self.lock: self.bot_server = om.group(1)
-
-        # CHAT line
         cm = re.search(r'CHAT\s*[:：]\s*([\d.]+:\d+)', clean, re.IGNORECASE)
         if cm:
             with self.lock: self.bot_chat_server = cm.group(1)
-
-        # BY line → CREDIT (BD TIME এর পরিবর্তে)
         bym = re.search(r'BY\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
         if bym:
             raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', bym.group(1).strip()))
-            raw = raw.strip('║ ').strip()
+            raw = re.sub(r'[║│┃]+.*$', '', raw).strip()
             if raw:
-                with self.lock:
-                    self.bot_by = raw[:80]
-                    self.bot_credit = raw[:80]
-
-        # STATUS line
+                with self.lock: self.bot_by = raw[:80]
         sm = re.search(r'STATUS\s*[:：]\s*(.+?)(?:\s*$|\s*\[|\s*║)', clean, re.IGNORECASE)
         if sm:
             raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', sm.group(1).strip()))
             if 'READY' in raw.upper() or 'RUNNING' in raw.upper() or 'ONLINE' in raw.upper():
                 with self.lock: self.bot_status = "🟢 ACTIVE & ONLINE"
-
-        # ============ USER INFO section ============
         if 'USER INFO' in clean or '👤 USER INFO' in clean:
             self.in_user_info = True; self.user_info_buffer = [clean]; return
         if self.in_user_info:
@@ -853,12 +838,13 @@ class ProcessMonitor:
                 if d:
                     with self.lock:
                         if 'uid' in d: self.bot_uid = d['uid']
-                        if 'name' in d: self.bot_name = d['name']
+                        # NAME only from MAHIR BOT ONLINE banner — do not overwrite
+                        if 'name' in d and (not self.bot_name or self.bot_name == 'N/A'):
+                            self.bot_name = d['name']
                         if 'region' in d: self.bot_region = d['region']
                         self.account_info_found = True
                 self.user_info_buffer = []
             return
-
         if 'TOKENS' in clean or '🌐 TOKENS' in clean:
             self.in_tokens = True; self.tokens_buffer = [clean]; return
         if self.in_tokens:
@@ -876,7 +862,6 @@ class ProcessMonitor:
                             self.bot_jwt_token = t[:30]+'...' if len(t)>30 else t
                 self.tokens_buffer = []
             return
-
         if 'SECURITY' in clean or '🔑 SECURITY' in clean:
             self.in_security = True; self.security_buffer = [clean]; return
         if self.in_security:
@@ -890,7 +875,6 @@ class ProcessMonitor:
                         if 'dynamic_iv' in d: self.bot_dynamic_iv = d['dynamic_iv']
                 self.security_buffer = []
             return
-
         if 'SYSTEM STATUS' in clean or '⏱ SYSTEM STATUS' in clean:
             self.in_system = True; self.system_buffer = [clean]; return
         if self.in_system:
@@ -900,10 +884,10 @@ class ProcessMonitor:
                 d = self.parse_system(self.system_buffer)
                 if d:
                     with self.lock:
+                        if 'bd_time' in d: self.bot_bd_time = d['bd_time']
                         if 'server' in d: self.bot_server = d['server']
                 self.system_buffer = []
             return
-
         if 'MESSAGE INFO' in clean or '╔══════════════ [ MESSAGE INFO ]' in clean:
             self.collecting_message = True; self.message_started = True; self.message_stored = False
             self.message_buffer = [clean]
@@ -943,7 +927,6 @@ class ProcessMonitor:
                         self.message_stored = True
                 self.message_buffer = []
             return
-
         if 'LOGIN SUCCESSFUL' in clean:
             with self.lock:
                 self.bot_status = "🟢 ACTIVE & ONLINE"
@@ -1077,8 +1060,7 @@ class ProcessMonitor:
             'bot_name': self.bot_name, 'bot_status': self.bot_status, 'bot_region': self.bot_region,
             'bot_access_token': self.bot_access_token, 'bot_jwt_token': self.bot_jwt_token,
             'bot_dynamic_key': self.bot_dynamic_key, 'bot_dynamic_iv': self.bot_dynamic_iv,
-            'bot_server': self.bot_server, 'bot_chat_server': self.bot_chat_server,
-            'bot_credit': self.bot_credit, 'bot_by': self.bot_by,
+            'bot_server': self.bot_server, 'bot_chat_server': self.bot_chat_server, 'bot_bd_time': self.bot_bd_time, 'bot_by': self.bot_by,
             'last_sender_uid': self.last_sender_uid, 'last_guild_name': self.last_guild_name,
             'last_nickname': self.last_nickname, 'last_message': self.last_message,
             'last_pfp_url': self.last_pfp_url, 'cpu_history': self.cpu_history,
@@ -1104,7 +1086,7 @@ class ProcessMonitor:
             self.bot_uid = "N/A"; self.bot_name = "N/A"; self.bot_status = "🔴 OFFLINE"
             self.bot_region = "N/A"; self.bot_access_token = "N/A"; self.bot_jwt_token = "N/A"
             self.bot_dynamic_key = "N/A"; self.bot_dynamic_iv = "N/A"; self.bot_server = "N/A"
-            self.bot_chat_server = "N/A"; self.bot_credit = "N/A"; self.bot_by = "N/A"
+            self.bot_chat_server = "N/A"; self.bot_bd_time = "N/A"; self.bot_by = "N/A"
             self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
             self.last_nickname = "N/A"; self.last_message = "N/A"; self.last_pfp_url = "N/A"
         # Force start without full can_start DB checks (user pressed Reset intentionally)
@@ -1892,16 +1874,7 @@ AGENT_CUSTOMER_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta char
       </div>
       <div class="detail-item"><div class="detail-label">Renew Count</div><div class="detail-value big">{{ user.renew_count }}x <small style="color:#4ade80;">(+{{ user.renew_days }}d)</small></div></div>
       <div class="detail-item"><div class="detail-label">Registration Key</div><div class="detail-value">{{ user.registration_key }}</div></div>
-      <div class="detail-item">
-        <div class="detail-label">Created By</div>
-        <div class="detail-value">
-          {% if user.created_by_agent and user.created_by_agent != 'Owner' %}
-            <span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT: {{ user.created_by_agent }}</span>
-          {% else %}
-            <span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
-          {% endif %}
-        </div>
-      </div>
+      <div class="detail-item"><div class="detail-label">Created By</div><div class="detail-value">{% if not user.created_by_agent or user.created_by_agent in ['Owner','OWNER','admin','system','MAHIR TCP'] %}<span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER MAHIR</span>{% else %}<span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT {{ user.created_by_agent }}</span>{% endif %}</div></div>
     </div>
   </div>
 
@@ -2000,7 +1973,7 @@ AGENT_CUSTOMER_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta char
 
 
 # ============================================================
-#  OWNER DASHBOARD
+#  OWNER DASHBOARD (✅ FIXED - notice button uses data-* attributes)
 # ============================================================
 OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Owner Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 <div class="container">
@@ -2120,7 +2093,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
             </td>
             <td>
               <div class="td-actions">
-                <a href="/owner/login_as/{{ agent.id }}" class="btn btn-warning btn-sm" title="Login as this user"><i class="fas fa-sign-in-alt"></i></a>
+                <a href="/owner/login_as/{{ agent.id }}" class="btn btn-warning btn-sm" title="User Panel Login"><i class="fas fa-sign-in-alt"></i> User Panel</a>
                 <a href="/owner/user_details/{{ agent.id }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i></a>
                 <form method="POST" action="/owner/delete_agent/{{ agent.id }}" onsubmit="return confirm('Delete?');" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form>
               </div>
@@ -2149,17 +2122,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
           {% for user in users %}
           <tr>
             <td>{{ user.id }}</td>
-            <td>
-              <strong>{{ user.username }}</strong>
-              {% if user.created_by_agent %}
-                <br>
-                {% if user.created_by_agent == 'Owner' or user.created_by_agent == 'MAHIR TCP' %}
-                  <span class="creator-badge owner" style="font-size:.6rem;"><i class="fas fa-crown"></i> OWNER</span>
-                {% else %}
-                  <span class="creator-badge agent" style="font-size:.6rem;"><i class="fas fa-user-tie"></i> AGENT: {{ user.created_by_agent }}</span>
-                {% endif %}
-              {% endif %}
-            </td>
+            <td><strong>{{ user.username }}</strong>{% if user.created_by_agent and user.created_by_agent not in ['Owner','OWNER','admin','system','MAHIR TCP'] %}<br><small style="color:#7dd3fc;font-size:.68rem;"><i class="fas fa-user-tie"></i> AGENT {{ user.created_by_agent }}</small>{% else %}<br><small style="color:#F5C842;font-size:.68rem;"><i class="fas fa-crown"></i> OWNER</small>{% endif %}</td>
             <td>{{ user.email or '-' }}</td>
             <td>{% if user.is_agent %}<span class="badge badge-agent">AGENT</span>{% elif user.bot_status == 'running' %}<span class="badge badge-running">Running</span>{% elif user.bot_status == 'expired' %}<span class="badge badge-expired">Expired</span>{% elif user.bot_status == 'stopped' %}<span class="badge badge-stopped">Stopped</span>{% else %}<span class="badge badge-unused">{{ user.bot_status or 'Not Configured' }}</span>{% endif %}</td>
             <td>
@@ -2195,7 +2158,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
                 {% if not user.is_admin and not user.is_agent %}
                   <button type="button" class="btn btn-primary btn-sm notice-trigger" title="Send Notice" data-uid="{{ user.id }}" data-uname="{{ user.username }}" data-notice="{{ user.personal_notice or '' }}" data-enabled="{{ '1' if user.personal_notice_enabled else '0' }}"><i class="fas fa-bullhorn"></i></button>
                 {% endif %}
-                <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm" title="Login as user"><i class="fas fa-sign-in-alt"></i></a>
+                <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm" title="User Panel Login"><i class="fas fa-sign-in-alt"></i> User Panel</a>
                 <a href="/owner/user_details/{{ user.id }}" class="btn btn-info btn-sm" title="Details"><i class="fas fa-eye"></i></a>
                 {% if not user.is_admin and not user.is_agent %}
                   {% if user.bot_disabled_by_admin %}
@@ -2380,6 +2343,7 @@ document.getElementById('uploadMahirForm').addEventListener('submit',function(e)
 document.getElementById('uploadDbForm').addEventListener('submit',function(){var b=document.getElementById('uploadDbBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});
 document.getElementById('createAgentForm').addEventListener('submit',function(){var b=document.getElementById('createAgentBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Creating...';});
 
+// ✅ FIXED: Notice trigger using data-* attributes (no Jinja escaping issues)
 document.querySelectorAll('.notice-trigger').forEach(function(btn){
   btn.addEventListener('click', function(){
     openNoticeModal(
@@ -2395,7 +2359,7 @@ document.querySelectorAll('.notice-trigger').forEach(function(btn){
 
 
 # ============================================================
-#  USER DETAILS (Owner view) - User Panel Login বাটন সহ
+#  USER DETAILS (Owner view)
 # ============================================================
 USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>User Details - OWNER PANEL</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .copy-btn{background:rgba(245,200,66,.1);border:1px solid rgba(245,200,66,.25);color:var(--gold);padding:4px 10px;border-radius:8px;cursor:pointer;font-size:.7rem;margin-left:6px;font-weight:600}
@@ -2405,8 +2369,7 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
     <h1><i class="fas fa-user-circle"></i> {{ user.username }}</h1>
     <div class="flex">
       {% if not user.is_admin %}
-      <a href="/owner/login_as/{{ user.id }}" class="btn btn-warning btn-sm"><i class="fas fa-sign-in-alt"></i> Login as this user</a>
-      <a href="/owner/login_as/{{ user.id }}?redirect=dashboard" class="btn btn-gold btn-sm"><i class="fas fa-external-link-alt"></i> User Panel Login</a>
+      <a href="/owner/login_as/{{ user.id }}" class="btn btn-gold btn-sm" style="font-weight:700;"><i class="fas fa-sign-in-alt"></i> User Panel Login</a>
       {% endif %}
       <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
       <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
@@ -2440,16 +2403,7 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
       </div>
       <div class="detail-item"><div class="detail-label">Renew Count</div><div class="detail-value big">{{ user.renew_count }}x <small style="color:#4ade80;">(+{{ user.renew_days }}d)</small></div></div>
       <div class="detail-item"><div class="detail-label">Registration Key</div><div class="detail-value">{{ user.registration_key }}</div></div>
-      <div class="detail-item">
-        <div class="detail-label">Created By</div>
-        <div class="detail-value">
-          {% if user.created_by_agent and user.created_by_agent != 'Owner' and user.created_by_agent != 'MAHIR TCP' %}
-            <span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT: {{ user.created_by_agent }}</span>
-          {% else %}
-            <span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
-          {% endif %}
-        </div>
-      </div>
+      <div class="detail-item"><div class="detail-label">Created By</div><div class="detail-value">{% if not user.created_by_agent or user.created_by_agent in ['Owner','OWNER','admin','system','MAHIR TCP'] %}<span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER MAHIR</span>{% else %}<span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT {{ user.created_by_agent }}</span>{% endif %}</div></div>
     </div>
   </div>
 
@@ -2665,7 +2619,7 @@ document.addEventListener('keydown',function(e){if(e.key==='Escape'){var box=doc
 
 
 # ============================================================
-#  USER PANEL — BD Time বাদ, CREDIT / BY যোগ
+#  USER PANEL
 # ============================================================
 USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>MAHIR PREMIUM | Bot Controller</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
 .logout-btn{position:fixed;top:20px;right:20px;z-index:999}
@@ -2758,6 +2712,9 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 </div>
 
 <div class="container">
+  {% if owner_mode %}
+  <a href="/owner/return" class="btn btn-gold btn-sm" style="position:absolute;top:16px;right:100px;z-index:50;font-weight:700;"><i class="fas fa-crown"></i> Return to Owner</a>
+  {% endif %}
   <button class="logout-btn btn btn-danger btn-sm" onclick="window.location.href='/logout'"><i class="fas fa-sign-out-alt"></i> Logout</button>
   <div class="cover-section">
     <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover"/>
@@ -2838,13 +2795,13 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
     <div class="card-title"><i class="fas fa-robot"></i> Bot Identity & Status</div>
     <div class="stats-grid">
       <div class="stat-card"><div class="stat-label">UID</div><div class="stat-value" id="botUid">---</div></div>
-      <div class="stat-card"><div class="stat-label">Name / Nickname</div><div class="stat-value" id="botName">---</div></div>
+      <div class="stat-card"><div class="stat-label">Name</div><div class="stat-value" id="botName">---</div></div>
       <div class="stat-card"><div class="stat-label">Region</div><div class="stat-value" id="botRegion">---</div></div>
       <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" id="botStatus">---</div></div>
-      <div class="stat-card"><div class="stat-label">Online Server</div><div class="stat-value" id="botServer" style="font-size:.85rem;">---</div></div>
-      <div class="stat-card"><div class="stat-label">Chat Server</div><div class="stat-value" id="botChatServer" style="font-size:.85rem;">---</div></div>
+      <div class="stat-card"><div class="stat-label">Online Server</div><div class="stat-value" id="botServer" style="font-size:.82rem;">---</div></div>
+      <div class="stat-card"><div class="stat-label">Chat Server</div><div class="stat-value" id="botChatServer" style="font-size:.82rem;">---</div></div>
       <div class="stat-card"><div class="stat-label">BY</div><div class="stat-value" id="botBy">---</div></div>
-      <div class="stat-card"><div class="stat-label">CREDIT / BY</div><div class="stat-value" id="botCredit">---</div></div>
+      <div class="stat-card"><div class="stat-label">Created By</div><div class="stat-value" id="botCreatedBy">{{ creator_display|safe }}</div></div>
     </div>
   </div>
   <div class="card">
@@ -2894,31 +2851,62 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
 </div>
 
 <div id="adminModal" class="modal-overlay">
-  <div class="modal-box">
+  <div class="modal-box" style="max-width:820px;">
     <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
-    <div class="modal-title"><i class="fas fa-cog"></i> Admin Control Panel</div>
-    <div class="modal-section">
-      <h3><i class="fas fa-user-shield"></i> Owner UIDs</h3>
-      <div class="modal-input-group"><label>UIDs:</label><input type="text" id="adminUidsInput" placeholder="1120167200, 3020431227"/></div>
-      <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
+    <div class="modal-title" style="margin-bottom:20px;"><i class="fas fa-cog"></i> Admin Control Panel</div>
+
+    <!-- Bot Live Identity (like user_details) -->
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-robot"></i> Bot Identity (Live)</div>
+      <div class="detail-grid">
+        <div class="detail-item"><div class="detail-label">Bot UID</div><div class="detail-value big" id="adminLiveUid">---</div></div>
+        <div class="detail-item"><div class="detail-label">Name</div><div class="detail-value" id="adminLiveName">---</div></div>
+        <div class="detail-item"><div class="detail-label">Region</div><div class="detail-value" id="adminLiveRegion">---</div></div>
+        <div class="detail-item"><div class="detail-label">Status</div><div class="detail-value" id="adminLiveStatus">---</div></div>
+        <div class="detail-item"><div class="detail-label">Online Server</div><div class="detail-value" id="adminLiveServer" style="font-size:.85rem;">---</div></div>
+        <div class="detail-item"><div class="detail-label">Chat Server</div><div class="detail-value" id="adminLiveChat" style="font-size:.85rem;">---</div></div>
+      </div>
     </div>
-    <div class="modal-section">
-      <h3><i class="fas fa-key"></i> Bot Credentials</h3>
-      <div class="modal-input-group"><label>Bot UID:</label><input type="text" id="botUidInput"/></div>
-      <div class="modal-input-group"><label>Password:</label><input type="text" id="botPwInput"/></div>
-      <button onclick="updateBotCreds()" id="botCredsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save & Restart</button>
+
+    <!-- Owner UIDs -->
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-user-shield"></i> Owner / Admin UIDs</div>
+      <p style="color:var(--muted);font-size:.8rem;margin-bottom:10px;">Comma separated. Master UID is always kept.</p>
+      <div class="modal-input-group"><label>UIDs:</label><input type="text" id="adminUidsInput" placeholder="1120167200, 3020431227" style="flex:1;"/></div>
+      <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save" style="margin-top:10px;"><i class="fas fa-save"></i> Save & Restart Bot</button>
     </div>
-    <div class="modal-section">
-      <h3><i class="fas fa-user-friends"></i> Friend Management</h3>
-      <div class="modal-input-group" style="margin-bottom:0;">
-        <input type="text" id="friendUidInput" placeholder="UID" style="flex:1;min-width:150px;"/>
+
+    <!-- Bot Credentials -->
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-key"></i> Bot Credentials</div>
+      <div class="detail-grid" style="margin-bottom:12px;">
+        <div class="detail-item">
+          <div class="detail-label">Bot UID</div>
+          <input type="text" id="botUidInput" style="width:100%;margin-top:6px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px;border-radius:10px;"/>
+        </div>
+        <div class="detail-item">
+          <div class="detail-label">Password</div>
+          <input type="text" id="botPwInput" style="width:100%;margin-top:6px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px;border-radius:10px;"/>
+        </div>
+      </div>
+      <button onclick="updateBotCreds()" id="botCredsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save Credentials & Restart</button>
+    </div>
+
+    <!-- Friend Management -->
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-user-friends"></i> Friend Management</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;">
+        <input type="text" id="friendUidInput" placeholder="Friend UID" style="flex:1;min-width:160px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px 12px;border-radius:10px;"/>
         <button onclick="friendAction('add')" id="friendAddBtn" class="modal-btn modal-btn-action"><i class="fas fa-user-plus"></i> Add</button>
         <button onclick="friendAction('remove')" id="friendRemoveBtn" class="modal-btn modal-btn-danger"><i class="fas fa-user-minus"></i> Remove</button>
-        <button onclick="friendAction('list')" id="friendListBtn" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List</button>
+        <button onclick="friendAction('list')" id="friendListBtn" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List Friends</button>
       </div>
-      <div id="friendResult" class="modal-result-box">Result...</div>
+      <div id="friendResult" class="modal-result-box" style="min-height:60px;max-height:180px;overflow-y:auto;">Result will appear here...</div>
     </div>
-    <div style="text-align:right;"><button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close</button></div>
+
+    <div style="text-align:right;margin-top:8px;">
+      <button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close Panel</button>
+    </div>
   </div>
 </div>
 
@@ -2982,21 +2970,21 @@ function toggleColorMode(){colorMode=!colorMode;localStorage.setItem('mahirColor
 function ansiToHtml(str){
   if(!str)return '';
   var s=escapeHtml(str);
-  s=s.replace(/\x1b\[92m|\[92m/g,'<span style="color:#00e676">');
-  s=s.replace(/\x1b\[93m|\[93m/g,'<span style="color:#ffeb3b">');
-  s=s.replace(/\x1b\[95m|\[95m/g,'<span style="color:#e040fb">');
-  s=s.replace(/\x1b\[96m|\[96m/g,'<span style="color:#00e5ff">');
-  s=s.replace(/\x1b\[91m|\[91m/g,'<span style="color:#ff5252">');
-  s=s.replace(/\x1b\[94m|\[94m/g,'<span style="color:#448aff">');
-  s=s.replace(/\x1b\[90m|\[90m/g,'<span style="color:#9e9e9e">');
-  s=s.replace(/\x1b\[1m|\[1m/g,'<span style="font-weight:700">');
-  s=s.replace(/\x1b\[0m|\[0m|\[m/g,'</span>');
-  s=s.replace(/\x1b\[[0-9;]*m|\[[0-9;]*m/g,'');
+  s=s.replace(/\\[92m/g,'<span style="color:#00e676">');
+  s=s.replace(/\\[93m/g,'<span style="color:#ffeb3b">');
+  s=s.replace(/\\[95m/g,'<span style="color:#e040fb">');
+  s=s.replace(/\\[96m/g,'<span style="color:#00e5ff">');
+  s=s.replace(/\\[91m/g,'<span style="color:#ff5252">');
+  s=s.replace(/\\[94m/g,'<span style="color:#448aff">');
+  s=s.replace(/\\[90m/g,'<span style="color:#9e9e9e">');
+  s=s.replace(/\\[1m/g,'<span style="font-weight:700">');
+  s=s.replace(/\\[0m|\\[m/g,'</span>');
+  s=s.replace(/\\[[0-9;]*m/g,'');
   return s;
 }
 function formatLogLine(l){
   if(colorMode) return '<div class="log-line">'+ansiToHtml(l)+'</div>';
-  var plain=l.replace(/\x1b\[[0-9;]*[mK]/g,'').replace(/\[[0-9;]*m/g,'');
+  var plain=l.replace(/\\[[0-9;]*[mK]/g,'');
   return '<div class="log-line">'+escapeHtml(plain)+'</div>';
 }
 var autoScroll=true;
@@ -3011,7 +2999,22 @@ function exportErrors(){fetch('/api/export_errors').then(function(r){return r.js
 function exportMessages(){fetch('/api/export_messages').then(function(r){return r.json();}).then(function(d){if(d.messages&&d.messages.length){var t='';d.messages.forEach(function(m){t+='['+m.timestamp+'] '+m.data.nickname+' ('+m.data.sender_uid+'): '+m.data.message+'\\n';});downloadText(t,'messages.txt');showNotification('Exported!','success');}});}
 function sendAction(action){var btnMap={start:'btnStart',stop:'btnStop',reset:'btnReset'};var btn=getBtn(btnMap[action]);setLoading(btn,true);fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})}).then(function(r){return r.json();}).then(function(d){setLoading(btn,false);if(d.error){showNotification(d.error,'error');}else{showNotification(action.toUpperCase()+' done!','success');setTimeout(updateUI,500);}}).catch(function(){setLoading(btn,false);showNotification('Failed','error');});}
 
-function openAdminPanel(){document.getElementById('adminModal').classList.add('active');fetch('/api/admin_uids').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById('adminUidsInput').value=d.uids.join(', ');}).catch(function(){});fetch('/api/bot_creds').then(function(r){return r.json();}).then(function(d){document.getElementById('botUidInput').value=d.uid||'';document.getElementById('botPwInput').value=d.pw||'';}).catch(function(){});}
+function openAdminPanel(){
+  document.getElementById('adminModal').classList.add('active');
+  fetch('/api/admin_uids').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById('adminUidsInput').value=d.uids.join(', ');}).catch(function(){});
+  fetch('/api/bot_creds').then(function(r){return r.json();}).then(function(d){document.getElementById('botUidInput').value=d.uid||'';document.getElementById('botPwInput').value=d.pw||'';}).catch(function(){});
+  // Fill live identity from last /api/status data
+  fetch('/api/status').then(function(r){return r.json();}).then(function(data){
+    if(data.error)return;
+    var s=function(id,v){var el=document.getElementById(id);if(el)el.innerHTML=v||'---';};
+    s('adminLiveUid',escapeHtml(data.bot_uid));
+    s('adminLiveName',escapeHtml(data.bot_name));
+    s('adminLiveRegion',escapeHtml(data.bot_region));
+    s('adminLiveStatus',data.bot_status||'Offline');
+    s('adminLiveServer',escapeHtml(data.bot_server));
+    s('adminLiveChat',escapeHtml(data.bot_chat_server));
+  }).catch(function(){});
+}
 function closeAdminPanel(){document.getElementById('adminModal').classList.remove('active');}
 document.getElementById('adminModal') && document.getElementById('adminModal').addEventListener('click',function(e){if(e.target===this)closeAdminPanel();});
 function updateAdminUIDs(){var input=document.getElementById('adminUidsInput').value;var uids=input.split(',').map(function(s){return s.trim();}).filter(function(s){return s;});if(!uids.length){showNotification('Enter UIDs','error');return;}var btn=document.getElementById('adminUidsBtn');setLoading(btn,true);fetch('/api/admin_uids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uids:uids})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Updated!','success');setTimeout(updateUI,3000);}else showNotification('Failed','error');});}
@@ -3023,7 +3026,7 @@ function updateUI(){
   fetch('/api/status').then(function(r){return r.json();}).then(function(data){if(data.error)return;var s=function(id,v){var el=document.getElementById(id);if(el)el.innerHTML=v;};
     s('botUid',escapeHtml(data.bot_uid)||'---');s('botName',escapeHtml(data.bot_name)||'---');s('botRegion',escapeHtml(data.bot_region)||'---');s('botStatus',data.bot_status||'Offline');
     s('botServer',escapeHtml(data.bot_server)||'---');s('botChatServer',escapeHtml(data.bot_chat_server)||'---');
-    s('botBy',escapeHtml(data.bot_by)||'---');s('botCredit',escapeHtml(data.bot_credit)||'---');
+    s('botBy',escapeHtml(data.bot_by)||'---');
     s('processStatus',data.is_running?'<span class="badge badge-active">RUNNING</span>':'<span class="badge badge-offline">STOPPED</span>');
     s('uptime',data.uptime||'00:00:00');s('restartCount',data.restart_count||0);s('errorCount',(data.error_logs||[]).length);
     var cpu=parseFloat(data.cpu)||0,ram=parseFloat(data.ram)||0,disk=parseFloat(data.disk)||0;
@@ -4110,7 +4113,7 @@ def user_dashboard():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT admin_uid, bot_uid, bot_pw, bot_status, bot_disabled_by_admin, 
-                 disable_reason, personal_notice, personal_notice_enabled 
+                 disable_reason, personal_notice, personal_notice_enabled, created_by_agent
                  FROM users WHERE id=?''', (user_id,))
     row = c.fetchone()
     c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (user_id,))
@@ -4148,6 +4151,13 @@ def user_dashboard():
     login_notice_enabled = is_user_login_notice_enabled() and not blocked and not personal_notice_enabled
     login_notice_text = get_user_login_notice() if login_notice_enabled else ''
 
+    # Created By role display for Bot Identity
+    created_by_raw = (row[8] if row and len(row) > 8 else None) or ''
+    if not created_by_raw or created_by_raw in ('Owner', 'OWNER', 'admin', 'system', 'MAHIR TCP', ''):
+        creator_display = '<span style="color:#F5C842;font-weight:700;"><i class="fas fa-crown"></i> OWNER MAHIR</span>'
+    else:
+        creator_display = f'<span style="color:#7dd3fc;font-weight:700;"><i class="fas fa-user-tie"></i> AGENT {created_by_raw}</span>'
+
     return render_template_string(USER_PANEL_HTML,
                                   config_done=config_done, blocked=blocked,
                                   block_type=block_type, block_message=block_message,
@@ -4160,7 +4170,9 @@ def user_dashboard():
                                   login_notice_enabled=login_notice_enabled,
                                   login_notice_json=json.dumps(login_notice_text),
                                   personal_notice_enabled=personal_notice_enabled,
-                                  personal_notice_json=json.dumps(personal_notice_text))
+                                  personal_notice_json=json.dumps(personal_notice_text),
+                                  creator_display=creator_display,
+                                  owner_mode=bool(session.get('owner_mode')))
 
 
 @app.route('/configure', methods=['POST'])
