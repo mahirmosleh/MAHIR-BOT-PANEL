@@ -538,7 +538,7 @@ def check_all_expired_bots():
                     except: pass
         except Exception as e:
             print(f"BG check error: {e}")
-        time.sleep(15)
+        time.sleep(1800)
 
 
 threading.Thread(target=check_all_expired_bots, daemon=True).start()
@@ -949,29 +949,20 @@ class ProcessMonitor:
                 self.is_running = False
                 self.bot_status = "🔴 BLOCKED"
             print(f"⛔ Cannot start user {self.user_id}: {reason}")
-            return False   # ← False return করে
-    
+            return False
         with self.lock:
-            if self.process and self.process.poll() is None:
-                return True
-            if self.process:
-                self._stop_process_internal()
+            if self.process and self.process.poll() is None: return True
+            if self.process: self._stop_process_internal()
             if not os.path.exists(self.process_name):
-                print(f"Error: {self.process_name} not found")
-                return False
-        
+                print(f"Error: {self.process_name} not found"); return False
             try:
                 self.process = subprocess.Popen(
                     [sys.executable, "-u", self.process_name],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, universal_newlines=True, errors='replace',
-                    cwd=USER_BOTS_DIR,   # ← working directory সেট করা (relative import কাজ করবে)
-                )
+                    text=True, bufsize=1, universal_newlines=True, errors='replace')
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
-            
-                # DB update
                 try:
                     conn = sqlite3.connect(DB_FILE)
                     c = conn.cursor()
@@ -979,8 +970,6 @@ class ProcessMonitor:
                               (self.process.pid, self.user_id))
                     conn.commit(); conn.close()
                 except: pass
-            
-                # Output reader thread
                 def enqueue():
                     try:
                         for line in iter(self.process.stdout.readline, ''):
@@ -991,21 +980,9 @@ class ProcessMonitor:
                     except: pass
                 self.output_thread = threading.Thread(target=enqueue, daemon=True)
                 self.output_thread.start()
-            
-                # Quick syntax/crash check (0.5s wait)
-                time.sleep(0.5)
-                if self.process.poll() is not None:
-                    # Process সাথে সাথে মরে গেছে → syntax error বা import error
-                    exit_code = self.process.returncode
-                    print(f"⚠️ Bot process died immediately (exit={exit_code}) for user {self.user_id}")
-                    self.is_running = False
-                    self.bot_status = "🔴 CRASHED"
-                    return False
-            
                 return True
             except Exception as e:
                 self.output_lines.append(f"Error: {str(e)}")
-                self.is_running = False
                 return False
 
     def _stop_process_internal(self):
@@ -4203,142 +4180,53 @@ def configure_bot():
     if not session.get('user_id'):
         flash('Login required', 'error')
         return redirect(url_for('login'))
-    
     user_id = session['user_id']
     sub = check_subscription_status(user_id)
     if sub['status'] == 'expired':
         flash('❌ মেয়াদ শেষ!', 'error')
         return redirect(url_for('user_dashboard'))
-    
-    admin_uid = request.form['admin_uid'].strip()
-    bot_uid = request.form['bot_uid'].strip()
-    bot_pw = request.form['bot_pw'].strip()
+    admin_uid = request.form['admin_uid']
+    bot_uid = request.form['bot_uid']
+    bot_pw = request.form['bot_pw']
     username = session['username']
-    
     if not all([admin_uid, bot_uid, bot_pw]):
         flash('All fields required', 'error')
         return redirect(url_for('user_dashboard'))
-    
-    # ============================================================
-    # STEP 1: File path তৈরি
-    # ============================================================
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
-    
     if not os.path.exists(MAHIR_SOURCE):
         with open(MAHIR_SOURCE, 'w') as f:
             f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
-    
-    # ============================================================
-    # STEP 2: mahir.py copy করে user file বানানো
-    # ============================================================
-    try:
-        shutil.copy2(MAHIR_SOURCE, bot_file_path)
-    except Exception as e:
-        flash(f'❌ File copy failed: {e}', 'error')
-        return redirect(url_for('user_dashboard'))
-    
-    # ============================================================
-    # STEP 3: UID + Password + Admin UIDs inject করা
-    # ============================================================
+    shutil.copy2(MAHIR_SOURCE, bot_file_path)
     admin_uids_list = parse_admin_uids(admin_uid)
-    ok, msg = inject_credentials_into_bot_file(
-        bot_file_path, bot_uid, bot_pw, admin_uids_list
-    )
+    ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, admin_uids_list)
     if not ok:
-        try: os.remove(bot_file_path)
-        except: pass
-        flash(f'❌ Credential injection failed: {msg}', 'error')
+        flash(f'Error: {msg}', 'error')
         return redirect(url_for('user_dashboard'))
-    
-    # ============================================================
-    # STEP 4: File verify — credentials সত্যিই বসেছে কিনা
-    # ============================================================
-    try:
-        with open(bot_file_path, 'r', encoding='utf-8') as f:
-            verify_content = f.read()
-        
-        # Check Uid, Pw line
-        cred_match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", verify_content)
-        if not cred_match or cred_match.group(1) != bot_uid or cred_match.group(2) != bot_pw:
-            flash('❌ Credential verification failed — file এ UID/PW সঠিকভাবে বসেনি!', 'error')
-            return redirect(url_for('user_dashboard'))
-        
-        # Check ADMIN_UIDS line
-        admin_match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]*)\]", verify_content)
-        if not admin_match:
-            flash('❌ ADMIN_UIDS line missing in file!', 'error')
-            return redirect(url_for('user_dashboard'))
-        
-        print(f"✅ File verified: {bot_filename} | UID={bot_uid} | Admins={admin_uids_list}")
-    except Exception as e:
-        flash(f'❌ Verify error: {e}', 'error')
-        return redirect(url_for('user_dashboard'))
-    
-    # ============================================================
-    # STEP 5: পুরনো monitor kill করা
-    # ============================================================
+    admin_uid_db = ', '.join(admin_uids_list)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status='configured', bot_disabled_by_admin=0 
+                 WHERE id=?''', (admin_uid_db, bot_uid, bot_pw, bot_filename, user_id))
+    conn.commit(); conn.close()
     with monitors_lock:
         if user_id in monitors:
             try:
                 monitors[user_id].watchdog_running = False
-                monitors[user_id].auto_restart_running = False
                 monitors[user_id].stop_process()
-            except Exception as e:
-                print(f"Old monitor stop error: {e}")
-            try: del monitors[user_id]
             except: pass
-    
-    # ============================================================
-    # STEP 6: DB update
-    # ============================================================
-    admin_uid_db = ', '.join(admin_uids_list)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, 
-                 bot_file=?, bot_status='configured', bot_disabled_by_admin=0 
-                 WHERE id=?''', (admin_uid_db, bot_uid, bot_pw, bot_filename, user_id))
-    conn.commit(); conn.close()
-    
-    # ============================================================
-    # STEP 7: সাথে সাথে ProcessMonitor তৈরি + Start (Synchronous)
-    # ============================================================
+            del monitors[user_id]
     m = ProcessMonitor(user_id, bot_file_path)
     with monitors_lock:
         monitors[user_id] = m
-    
-    started = m.start_process()   # ← এখানে TRUE/FALSE return করে
-    
-    # ============================================================
-    # STEP 8: Verification — process সত্যিই চলছে কিনা
-    # ============================================================
-    if not started:
-        flash('⚠️ File তৈরি হয়েছে কিন্তু bot start হয়নি (expired/admin-disabled/global-stop)', 'error')
-        return redirect(url_for('user_dashboard'))
-    
-    # 2 সেকেন্ড wait করে দেখি process alive আছে কিনা
-    time.sleep(2)
-    if m.process and m.process.poll() is None:
-        flash(f'✅ Bot deployed & running! PID: {m.process.pid}', 'success')
-        print(f"🚀 Bot started for user {user_id} | UID={bot_uid} | PID={m.process.pid}")
-    else:
-        # Process সাথে সাথে মরে গেছে → file এ error আছে
-        exit_code = m.process.returncode if m.process else '?'
-        flash(f'⚠️ Bot start হয়েছে কিন্তু সাথে সাথে বন্ধ হয়ে গেছে (exit code: {exit_code})। Log দেখুন।', 'error')
-        print(f"⚠️ Bot died immediately for user {user_id}, exit={exit_code}")
-    
-    # ============================================================
-    # STEP 9: BIO update (background এ, non-blocking)
-    # ============================================================
-    def bg_bio():
-        time.sleep(3)
-        try:
-            update_bot_bio(bot_uid, bot_pw, username)
-        except Exception as e:
-            print(f"[BIO] {e}")
-    threading.Thread(target=bg_bio, daemon=True).start()
-    
+    m.start_process()
+    def bg():
+        time.sleep(0.1)
+        try: update_bot_bio(bot_uid, bot_pw, username)
+        except: pass
+    threading.Thread(target=bg, daemon=True).start()
+    flash('✅ Bot deployed!', 'success')
     return redirect(url_for('user_dashboard'))
 
 
