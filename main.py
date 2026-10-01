@@ -16,7 +16,7 @@ import signal
 import zipfile
 from datetime import datetime, timedelta
 from queue import Queue, Empty
-from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, flash, send_file, Response
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, flash, send_file
 from functools import wraps
 import psutil
 import requests
@@ -949,20 +949,29 @@ class ProcessMonitor:
                 self.is_running = False
                 self.bot_status = "🔴 BLOCKED"
             print(f"⛔ Cannot start user {self.user_id}: {reason}")
-            return False
+            return False   # ← False return করে
+    
         with self.lock:
-            if self.process and self.process.poll() is None: return True
-            if self.process: self._stop_process_internal()
+            if self.process and self.process.poll() is None:
+                return True
+            if self.process:
+                self._stop_process_internal()
             if not os.path.exists(self.process_name):
-                print(f"Error: {self.process_name} not found"); return False
+                print(f"Error: {self.process_name} not found")
+                return False
+        
             try:
                 self.process = subprocess.Popen(
                     [sys.executable, "-u", self.process_name],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, universal_newlines=True, errors='replace')
+                    text=True, bufsize=1, universal_newlines=True, errors='replace',
+                    cwd=USER_BOTS_DIR,   # ← working directory সেট করা (relative import কাজ করবে)
+                )
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
+            
+                # DB update
                 try:
                     conn = sqlite3.connect(DB_FILE)
                     c = conn.cursor()
@@ -970,6 +979,8 @@ class ProcessMonitor:
                               (self.process.pid, self.user_id))
                     conn.commit(); conn.close()
                 except: pass
+            
+                # Output reader thread
                 def enqueue():
                     try:
                         for line in iter(self.process.stdout.readline, ''):
@@ -980,9 +991,21 @@ class ProcessMonitor:
                     except: pass
                 self.output_thread = threading.Thread(target=enqueue, daemon=True)
                 self.output_thread.start()
+            
+                # Quick syntax/crash check (0.5s wait)
+                time.sleep(0.5)
+                if self.process.poll() is not None:
+                    # Process সাথে সাথে মরে গেছে → syntax error বা import error
+                    exit_code = self.process.returncode
+                    print(f"⚠️ Bot process died immediately (exit={exit_code}) for user {self.user_id}")
+                    self.is_running = False
+                    self.bot_status = "🔴 CRASHED"
+                    return False
+            
                 return True
             except Exception as e:
                 self.output_lines.append(f"Error: {str(e)}")
+                self.is_running = False
                 return False
 
     def _stop_process_internal(self):
@@ -1134,20 +1157,6 @@ class ProcessMonitor:
 #  MONITORS
 # ============================================================
 monitors = {}
-deploy_tasks = {}  # task_id -> {'queue': Queue, 'user_id': int, 'created': float}
-deploy_tasks_lock = threading.Lock()
-
-
-def _cleanup_old_deploy_tasks():
-    """Remove deploy tasks older than 10 minutes."""
-    try:
-        now = time.time()
-        with deploy_tasks_lock:
-            stale = [tid for tid, t in deploy_tasks.items() if now - t.get('created', 0) > 600]
-            for tid in stale:
-                deploy_tasks.pop(tid, None)
-    except Exception:
-        pass
 
 
 def get_monitor(user_id):
@@ -2786,19 +2795,12 @@ USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/
     <div class="card-title"><i class="fas fa-cog"></i> Bot Configuration</div>
     {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
     <div class="config-status"><i class="fas fa-info-circle"></i> Free Fire bot credentials দিন।</div>
-    <form method="POST" action="/configure" class="config-form" id="configForm" onsubmit="return startDeploy(event)">
+    <form method="POST" action="/configure" class="config-form" id="configForm">
       <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Owner UID</label><input type="text" name="admin_uid" placeholder="e.g., 1120167200" required/></div>
       <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Bot UID</label><input type="text" name="bot_uid" placeholder="Bot UID" required/></div>
       <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Bot Password</label><input type="text" name="bot_pw" placeholder="Password hash" required/></div>
       <button type="submit" class="btn btn-gold btn-block" id="deployBtn"><i class="fas fa-play"></i> Deploy Bot</button>
     </form>
-    <div id="deployProgressBox" style="display:none;margin-top:16px;background:rgba(0,0,0,.45);border:1px solid rgba(245,200,66,.25);border-radius:14px;padding:16px;">
-      <div style="font-weight:800;color:var(--gold);margin-bottom:10px;font-size:.95rem;"><i class="fas fa-rocket"></i> Deploying Bot — Live Progress</div>
-      <div id="deployProgressLines" style="font-family:JetBrains Mono,monospace;font-size:.78rem;line-height:1.7;color:#c5c5e5;max-height:220px;overflow-y:auto;"></div>
-      <div id="deployProgressBarWrap" style="margin-top:12px;height:6px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden;">
-        <div id="deployProgressBar" style="height:100%;width:0%;background:linear-gradient(90deg,#F5C842,#00e676);transition:width .3s ease;"></div>
-      </div>
-    </div>
   </div>
   {% else %}
   <div class="card download-card">
@@ -2980,93 +2982,7 @@ document.addEventListener('DOMContentLoaded', function(){
 function getBtn(id){return document.getElementById(id);}
 function setLoading(btn,loading){if(!btn)return;if(loading){btn._origHtml=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Loading...';}else{btn.disabled=false;btn.innerHTML=btn._origHtml||btn.innerHTML;}}
 function showNotification(message,type){var el=document.createElement('div');el.className='notification notification-'+type;var icon=type==='success'?'check-circle':(type==='error'?'exclamation-circle':'info-circle');el.innerHTML='<i class="fas fa-'+icon+'"></i> '+message;document.body.appendChild(el);setTimeout(function(){el.remove();},3000);}
-
 function escapeHtml(text){if(!text)return '';var d=document.createElement('div');d.textContent=text;return d.innerHTML;}
-function appendDeployLine(html, isError){
-  var box=document.getElementById('deployProgressLines');
-  if(!box)return;
-  var div=document.createElement('div');
-  div.style.color=isError?'#ff5252':'#b8f5c0';
-  div.innerHTML=html;
-  box.appendChild(div);
-  box.scrollTop=box.scrollHeight;
-}
-function setDeployBar(pct){
-  var bar=document.getElementById('deployProgressBar');
-  if(bar)bar.style.width=Math.min(100,Math.max(0,pct))+'%';
-}
-function startDeploy(e){
-  if(e)e.preventDefault();
-  var form=document.getElementById('configForm');
-  var btn=document.getElementById('deployBtn');
-  if(!form)return false;
-  var fd=new FormData(form);
-  fd.append('sse','1');
-  var progressBox=document.getElementById('deployProgressBox');
-  var lines=document.getElementById('deployProgressLines');
-  if(progressBox){progressBox.style.display='block';}
-  if(lines){lines.innerHTML='';}
-  setDeployBar(5);
-  if(btn){btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Deploying...';}
-  appendDeployLine('🚀 Starting deploy...', false);
-
-  fetch('/configure', {
-    method:'POST',
-    body:fd,
-    headers:{'X-Requested-With':'XMLHttpRequest','Accept':'application/json'}
-  }).then(function(r){return r.json().then(function(d){return {ok:r.ok, status:r.status, data:d};});})
-  .then(function(res){
-    if(!res.ok || res.data.error){
-      appendDeployLine('❌ '+(res.data.error||'Deploy failed'), true);
-      setDeployBar(0);
-      if(btn){btn.disabled=false;btn.innerHTML='<i class="fas fa-play"></i> Deploy Bot';}
-      return;
-    }
-    var taskId=res.data.task_id;
-    if(!taskId){
-      appendDeployLine('❌ No task_id from server', true);
-      if(btn){btn.disabled=false;btn.innerHTML='<i class="fas fa-play"></i> Deploy Bot';}
-      return;
-    }
-    appendDeployLine('📡 Connected to live stream...', false);
-    setDeployBar(10);
-    var step=0;
-    var es=new EventSource('/api/deploy_stream/'+taskId);
-    es.onmessage=function(ev){
-      try{
-        var data=JSON.parse(ev.data);
-        if(data.type==='progress'){
-          step++;
-          appendDeployLine('✅ '+data.msg, false);
-          setDeployBar(10+step*14);
-        } else if(data.type==='error'){
-          appendDeployLine('❌ '+(data.msg||'Error'), true);
-          setDeployBar(0);
-          es.close();
-          if(btn){btn.disabled=false;btn.innerHTML='<i class="fas fa-play"></i> Deploy Bot';}
-        } else if(data.type==='done'){
-          appendDeployLine('🎉 '+(data.msg||'Done!'), false);
-          setDeployBar(100);
-          es.close();
-          if(btn){btn.innerHTML='<i class="fas fa-check"></i> Deployed';}
-          setTimeout(function(){location.reload();}, 1600);
-        } else if(data.type==='end'){
-          es.close();
-        }
-      }catch(err){console.error(err);}
-    };
-    es.onerror=function(){
-      appendDeployLine('⚠️ Stream closed', false);
-      es.close();
-      if(btn){btn.disabled=false;btn.innerHTML='<i class="fas fa-play"></i> Deploy Bot';}
-    };
-  }).catch(function(err){
-    appendDeployLine('❌ Network error: '+err, true);
-    if(btn){btn.disabled=false;btn.innerHTML='<i class="fas fa-play"></i> Deploy Bot';}
-  });
-  return false;
-}
-
 var performanceChart=null;
 function initChart(){var ctx=document.getElementById('performanceChart');if(!ctx)return;performanceChart=new Chart(ctx.getContext('2d'),{type:'line',data:{labels:Array(20).fill(''),datasets:[{label:'CPU %',data:Array(20).fill(0),borderColor:'#F5C842',tension:.4,fill:true,borderWidth:2,pointRadius:0},{label:'RAM %',data:Array(20).fill(0),borderColor:'#8540F5',tension:.4,fill:true,borderWidth:2,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:'#c5c5e5'}}},scales:{y:{beginAtZero:true,max:100,grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}},x:{grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}}}}});}
 if(typeof Chart!=='undefined')initChart();
@@ -4284,244 +4200,146 @@ def user_dashboard():
 
 @app.route('/configure', methods=['POST'])
 def configure_bot():
-    """Deploy bot. Supports classic form POST and AJAX (SSE progress)."""
-    wants_json = (
-        request.headers.get('X-Requested-With') == 'XMLHttpRequest'
-        or request.accept_mimetypes.best == 'application/json'
-        or request.args.get('sse') == '1'
-        or request.form.get('sse') == '1'
-    )
     if not session.get('user_id'):
-        if wants_json:
-            return jsonify({'error': 'Login required'}), 401
         flash('Login required', 'error')
         return redirect(url_for('login'))
+    
     user_id = session['user_id']
     sub = check_subscription_status(user_id)
     if sub['status'] == 'expired':
-        if wants_json:
-            return jsonify({'error': 'মেয়াদ শেষ!'}), 403
         flash('❌ মেয়াদ শেষ!', 'error')
         return redirect(url_for('user_dashboard'))
-    admin_uid = request.form.get('admin_uid', '').strip()
-    bot_uid = request.form.get('bot_uid', '').strip()
-    bot_pw = request.form.get('bot_pw', '').strip()
-    username = session.get('username', 'user')
+    
+    admin_uid = request.form['admin_uid'].strip()
+    bot_uid = request.form['bot_uid'].strip()
+    bot_pw = request.form['bot_pw'].strip()
+    username = session['username']
+    
     if not all([admin_uid, bot_uid, bot_pw]):
-        if wants_json:
-            return jsonify({'error': 'All fields required'}), 400
         flash('All fields required', 'error')
         return redirect(url_for('user_dashboard'))
-
-    # ---- AJAX / SSE path ----
-    if wants_json:
-        _cleanup_old_deploy_tasks()
-        task_id = secrets.token_hex(12)
-        q = Queue()
-        with deploy_tasks_lock:
-            deploy_tasks[task_id] = {
-                'queue': q,
-                'user_id': user_id,
-                'created': time.time(),
-            }
-
-        def deploy_worker():
-            try:
-                q.put(('progress', 'Step 1/6: Copying mahir.py source...'))
-                safe_name = sanitize_filename(username)
-                bot_filename = f"{safe_name}_mahir.py"
-                bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
-                if not os.path.exists(MAHIR_SOURCE):
-                    with open(MAHIR_SOURCE, 'w') as f:
-                        f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
-                shutil.copy2(MAHIR_SOURCE, bot_file_path)
-                time.sleep(0.15)
-
-                q.put(('progress', 'Step 2/6: Injecting credentials (UID/PW/Admin)...'))
-                admin_uids_list = parse_admin_uids(admin_uid)
-                ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, admin_uids_list)
-                if not ok:
-                    q.put(('error', f'Injection failed: {msg}'))
-                    q.put(('end', None))
-                    return
-                time.sleep(0.15)
-
-                q.put(('progress', 'Step 3/6: Verifying bot file...'))
-                if not os.path.exists(bot_file_path) or os.path.getsize(bot_file_path) < 100:
-                    q.put(('error', 'Bot file verification failed (missing or empty)'))
-                    q.put(('end', None))
-                    return
-                try:
-                    with open(bot_file_path, 'r', encoding='utf-8', errors='ignore') as vf:
-                        vcontent = vf.read()
-                    if bot_uid not in vcontent:
-                        q.put(('error', 'UID not found in bot file after inject'))
-                        q.put(('end', None))
-                        return
-                except Exception as ve:
-                    q.put(('error', f'Verify read error: {ve}'))
-                    q.put(('end', None))
-                    return
-                time.sleep(0.1)
-
-                q.put(('progress', 'Step 4/6: Updating database...'))
-                admin_uid_db = ', '.join(admin_uids_list)
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute(
-                    'UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status=?, bot_disabled_by_admin=0 WHERE id=?',
-                    (admin_uid_db, bot_uid, bot_pw, bot_filename, 'configured', user_id)
-                )
-                conn.commit()
-                conn.close()
-                time.sleep(0.1)
-
-                q.put(('progress', 'Step 5/6: Stopping old process & starting new...'))
-                with monitors_lock:
-                    if user_id in monitors:
-                        try:
-                            monitors[user_id].watchdog_running = False
-                            monitors[user_id].stop_process()
-                        except Exception:
-                            pass
-                        try:
-                            del monitors[user_id]
-                        except Exception:
-                            pass
-                m = ProcessMonitor(user_id, bot_file_path)
-                with monitors_lock:
-                    monitors[user_id] = m
-                started = m.start_process()
-                time.sleep(0.4)
-
-                pid = None
-                try:
-                    if m.process:
-                        pid = m.process.pid
-                except Exception:
-                    pass
-
-                if started and pid:
-                    q.put(('progress', f'Step 6/6: Bot RUNNING (PID: {pid})'))
-                    q.put(('done', f'Success — PID {pid}'))
-                elif started:
-                    q.put(('progress', 'Step 6/6: Bot process started'))
-                    q.put(('done', 'Success'))
-                else:
-                    q.put(('error', 'Process start failed (blocked or file missing)'))
-                    q.put(('end', None))
-                    return
-
-                def bg_bio():
-                    time.sleep(3)
-                    try:
-                        update_bot_bio(bot_uid, bot_pw, username)
-                    except Exception:
-                        pass
-                threading.Thread(target=bg_bio, daemon=True).start()
-            except Exception as e:
-                try:
-                    q.put(('error', str(e)[:200]))
-                except Exception:
-                    pass
-            finally:
-                try:
-                    q.put(('end', None))
-                except Exception:
-                    pass
-
-        threading.Thread(target=deploy_worker, daemon=True).start()
-        return jsonify({'task_id': task_id, 'status': 'started'})
-
-    # ---- Classic form POST (fallback) ----
+    
+    # ============================================================
+    # STEP 1: File path তৈরি
+    # ============================================================
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
+    
     if not os.path.exists(MAHIR_SOURCE):
         with open(MAHIR_SOURCE, 'w') as f:
             f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
-    shutil.copy2(MAHIR_SOURCE, bot_file_path)
-    admin_uids_list = parse_admin_uids(admin_uid)
-    ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, admin_uids_list)
-    if not ok:
-        flash(f'Error: {msg}', 'error')
+    
+    # ============================================================
+    # STEP 2: mahir.py copy করে user file বানানো
+    # ============================================================
+    try:
+        shutil.copy2(MAHIR_SOURCE, bot_file_path)
+    except Exception as e:
+        flash(f'❌ File copy failed: {e}', 'error')
         return redirect(url_for('user_dashboard'))
-    admin_uid_db = ', '.join(admin_uids_list)
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        'UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, bot_file=?, bot_status=?, bot_disabled_by_admin=0 WHERE id=?',
-        (admin_uid_db, bot_uid, bot_pw, bot_filename, 'configured', user_id)
+    
+    # ============================================================
+    # STEP 3: UID + Password + Admin UIDs inject করা
+    # ============================================================
+    admin_uids_list = parse_admin_uids(admin_uid)
+    ok, msg = inject_credentials_into_bot_file(
+        bot_file_path, bot_uid, bot_pw, admin_uids_list
     )
-    conn.commit()
-    conn.close()
+    if not ok:
+        try: os.remove(bot_file_path)
+        except: pass
+        flash(f'❌ Credential injection failed: {msg}', 'error')
+        return redirect(url_for('user_dashboard'))
+    
+    # ============================================================
+    # STEP 4: File verify — credentials সত্যিই বসেছে কিনা
+    # ============================================================
+    try:
+        with open(bot_file_path, 'r', encoding='utf-8') as f:
+            verify_content = f.read()
+        
+        # Check Uid, Pw line
+        cred_match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", verify_content)
+        if not cred_match or cred_match.group(1) != bot_uid or cred_match.group(2) != bot_pw:
+            flash('❌ Credential verification failed — file এ UID/PW সঠিকভাবে বসেনি!', 'error')
+            return redirect(url_for('user_dashboard'))
+        
+        # Check ADMIN_UIDS line
+        admin_match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]*)\]", verify_content)
+        if not admin_match:
+            flash('❌ ADMIN_UIDS line missing in file!', 'error')
+            return redirect(url_for('user_dashboard'))
+        
+        print(f"✅ File verified: {bot_filename} | UID={bot_uid} | Admins={admin_uids_list}")
+    except Exception as e:
+        flash(f'❌ Verify error: {e}', 'error')
+        return redirect(url_for('user_dashboard'))
+    
+    # ============================================================
+    # STEP 5: পুরনো monitor kill করা
+    # ============================================================
     with monitors_lock:
         if user_id in monitors:
             try:
                 monitors[user_id].watchdog_running = False
+                monitors[user_id].auto_restart_running = False
                 monitors[user_id].stop_process()
-            except Exception:
-                pass
-            try:
-                del monitors[user_id]
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Old monitor stop error: {e}")
+            try: del monitors[user_id]
+            except: pass
+    
+    # ============================================================
+    # STEP 6: DB update
+    # ============================================================
+    admin_uid_db = ', '.join(admin_uids_list)
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, 
+                 bot_file=?, bot_status='configured', bot_disabled_by_admin=0 
+                 WHERE id=?''', (admin_uid_db, bot_uid, bot_pw, bot_filename, user_id))
+    conn.commit(); conn.close()
+    
+    # ============================================================
+    # STEP 7: সাথে সাথে ProcessMonitor তৈরি + Start (Synchronous)
+    # ============================================================
     m = ProcessMonitor(user_id, bot_file_path)
     with monitors_lock:
         monitors[user_id] = m
-    m.start_process()
-    def bg():
+    
+    started = m.start_process()   # ← এখানে TRUE/FALSE return করে
+    
+    # ============================================================
+    # STEP 8: Verification — process সত্যিই চলছে কিনা
+    # ============================================================
+    if not started:
+        flash('⚠️ File তৈরি হয়েছে কিন্তু bot start হয়নি (expired/admin-disabled/global-stop)', 'error')
+        return redirect(url_for('user_dashboard'))
+    
+    # 2 সেকেন্ড wait করে দেখি process alive আছে কিনা
+    time.sleep(2)
+    if m.process and m.process.poll() is None:
+        flash(f'✅ Bot deployed & running! PID: {m.process.pid}', 'success')
+        print(f"🚀 Bot started for user {user_id} | UID={bot_uid} | PID={m.process.pid}")
+    else:
+        # Process সাথে সাথে মরে গেছে → file এ error আছে
+        exit_code = m.process.returncode if m.process else '?'
+        flash(f'⚠️ Bot start হয়েছে কিন্তু সাথে সাথে বন্ধ হয়ে গেছে (exit code: {exit_code})। Log দেখুন।', 'error')
+        print(f"⚠️ Bot died immediately for user {user_id}, exit={exit_code}")
+    
+    # ============================================================
+    # STEP 9: BIO update (background এ, non-blocking)
+    # ============================================================
+    def bg_bio():
         time.sleep(3)
         try:
             update_bot_bio(bot_uid, bot_pw, username)
-        except Exception:
-            pass
-    threading.Thread(target=bg, daemon=True).start()
-    flash('✅ Bot deployed!', 'success')
+        except Exception as e:
+            print(f"[BIO] {e}")
+    threading.Thread(target=bg_bio, daemon=True).start()
+    
     return redirect(url_for('user_dashboard'))
-
-
-@app.route('/api/deploy_stream/<task_id>')
-def deploy_stream(task_id):
-    """SSE: push each deploy step to the browser in real-time."""
-    if not session.get('user_id'):
-        return jsonify({'error': 'Login required'}), 401
-
-    def event_stream():
-        with deploy_tasks_lock:
-            task = deploy_tasks.get(task_id)
-        if not task:
-            yield f"data: {json.dumps({'type': 'error', 'msg': 'Task not found or expired'})}\n\n"
-            yield f"data: {json.dumps({'type': 'end', 'msg': None})}\n\n"
-            return
-        if task.get('user_id') != session.get('user_id') and not session.get('is_admin'):
-            yield f"data: {json.dumps({'type': 'error', 'msg': 'Unauthorized'})}\n\n"
-            yield f"data: {json.dumps({'type': 'end', 'msg': None})}\n\n"
-            return
-        q = task['queue']
-        while True:
-            try:
-                event_type, msg = q.get(timeout=45)
-                payload = {'type': event_type, 'msg': msg}
-                yield f"data: {json.dumps(payload)}\n\n"
-                if event_type == 'end':
-                    break
-            except Empty:
-                yield f": keepalive\n\n"
-        with deploy_tasks_lock:
-            deploy_tasks.pop(task_id, None)
-
-    return Response(
-        event_stream(),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no',
-            'Connection': 'keep-alive',
-        },
-    )
-
-
 
 
 # ========== FILE MANAGER (owner only) ==========
