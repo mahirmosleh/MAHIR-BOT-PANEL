@@ -1140,32 +1140,103 @@ def get_monitor(user_id):
 
 
 def startup_launch_all_bots():
-    try:
-        print("\n🚀 Startup: Launching all valid bots...")
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('''SELECT id, bot_file FROM users 
-                     WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
-                     AND is_admin=0 AND is_agent=0''')
-        rows = c.fetchall()
-        conn.close()
-        count = 0
-        for user_id, bot_file in rows:
-            sub = check_subscription_status(user_id)
-            if sub['status'] == 'expired':
-                expire_user_bot(user_id)
-                continue
-            path = os.path.join(USER_BOTS_DIR, bot_file)
-            if os.path.exists(path):
+    """
+    Startup এ সব valid bot launch করে এবং monitors dict এ রাখে
+    যাতে auto_restart thread গুলো কাজ করে। Fails হলেও periodically retry করে।
+    """
+    def _launch_once():
+        try:
+            print("\n🚀 Startup: Launching all valid bots...")
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('''SELECT id, bot_file FROM users 
+                         WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
+                         AND is_admin=0 AND is_agent=0''')
+            rows = c.fetchall()
+            conn.close()
+            count = 0
+            for user_id, bot_file in rows:
+                sub = check_subscription_status(user_id)
+                if sub['status'] == 'expired':
+                    expire_user_bot(user_id)
+                    continue
+                path = os.path.join(USER_BOTS_DIR, bot_file)
+                if not os.path.exists(path):
+                    continue
+                # Already monitored হলে skip
+                with monitors_lock:
+                    if user_id in monitors:
+                        existing = monitors[user_id]
+                        if existing.is_running and existing.process and existing.process.poll() is None:
+                            continue
                 m = ProcessMonitor(user_id, path)
                 with monitors_lock:
                     monitors[user_id] = m
                 m.start_process()
                 count += 1
                 print(f"  ✅ Bot launched: user_id={user_id} ({bot_file})")
-        print(f"🚀 Startup complete: {count} bots launched\n")
-    except Exception as e:
-        print(f"Startup error: {e}")
+            print(f"🚀 Startup complete: {count} bots launched\n")
+            return count
+        except Exception as e:
+            print(f"Startup error: {e}")
+            return 0
+
+    # Initial launch
+    _launch_once()
+
+    # Continuous watchdog: every 20s, ensure all bots are still alive/launched
+    while True:
+        try:
+            time.sleep(20)
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('''SELECT id, bot_file FROM users 
+                         WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
+                         AND is_admin=0 AND is_agent=0''')
+            rows = c.fetchall()
+            conn.close()
+            for user_id, bot_file in rows:
+                sub = check_subscription_status(user_id)
+                if sub['status'] == 'expired':
+                    continue
+                # Global stop / admin disabled থাকলে চালাবে না
+                if get_global_stop():
+                    try:
+                        conn2 = sqlite3.connect(DB_FILE)
+                        cc = conn2.cursor()
+                        cc.execute('SELECT bot_force_active, bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
+                        rr = cc.fetchone()
+                        conn2.close()
+                        if not rr or not rr[0] or rr[1]:
+                            continue
+                    except:
+                        continue
+                path = os.path.join(USER_BOTS_DIR, bot_file)
+                if not os.path.exists(path):
+                    continue
+
+                need_start = False
+                with monitors_lock:
+                    if user_id not in monitors:
+                        need_start = True
+                    else:
+                        m = monitors[user_id]
+                        # Process dead কিনা চেক
+                        if not m.is_running or not m.process or m.process.poll() is not None:
+                            need_start = True
+
+                if need_start:
+                    try:
+                        m_new = ProcessMonitor(user_id, path)
+                        with monitors_lock:
+                            monitors[user_id] = m_new
+                        ok = m_new.start_process()
+                        if ok:
+                            print(f"🔄 Auto-relaunch: user {user_id} bot restarted by watchdog")
+                    except Exception as e:
+                        print(f"Watchdog relaunch error for {user_id}: {e}")
+        except Exception as e:
+            print(f"Watchdog loop error: {e}")
 
 
 # ============================================================
@@ -5127,6 +5198,186 @@ def api_status():
         return jsonify(sd)
     return jsonify({'error': 'Not configured'}), 400
 
+@app.route('/api/owner_force_all_login', methods=['GET'])
+def api_owner_force_all_login():
+    """
+    Owner credentials দিয়ে call করলে সব user-এর bot force-start হবে।
+    
+    Query params:
+      - owner_user : Owner username (OWNER_USERNAME)
+      - owner_pass : Owner password (OWNER_PASSWORD)
+    
+    Example:
+      GET /api/owner_force_all_login?owner_user=MAHIR%20TCP&owner_pass=MAHIR0208@
+    
+    Response JSON:
+      {
+        "status": "success",
+        "total_users": N,
+        "launched": X,
+        "failed": Y,
+        "skipped_expired": Z,
+        "skipped_disabled": W,
+        "details": [ {user_id, username, status, message}, ... ]
+      }
+    """
+    owner_user = request.args.get('owner_user', '').strip()
+    owner_pass = request.args.get('owner_pass', '').strip()
+
+    if not owner_user or not owner_pass:
+        return jsonify({
+            'status': 'error',
+            'message': 'Missing params: owner_user and owner_pass required'
+        }), 400
+
+    if owner_user != OWNER_USERNAME or owner_pass != OWNER_PASSWORD:
+        return jsonify({
+            'status': 'error',
+            'message': 'Invalid owner credentials'
+        }), 401
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT id, username, bot_file, bot_uid, bot_pw, bot_disabled_by_admin, bot_force_active
+                 FROM users WHERE is_admin=0 AND is_agent=0
+                 AND bot_uid IS NOT NULL AND bot_pw IS NOT NULL''')
+    rows = c.fetchall()
+    conn.close()
+
+    total = len(rows)
+    launched = 0
+    failed = 0
+    skipped_expired = 0
+    skipped_disabled = 0
+    skipped_nofile = 0
+    details = []
+
+    for user_id, username, bot_file, bot_uid, bot_pw, disabled, force_active in rows:
+        # Check subscription
+        sub = check_subscription_status(user_id)
+        if sub['status'] == 'expired':
+            skipped_expired += 1
+            details.append({
+                'user_id': user_id, 'username': username,
+                'status': 'skipped_expired',
+                'message': 'Subscription expired'
+            })
+            continue
+
+        # admin disabled? Force start by owner API will override? 
+        # Owner explicitly triggering -> we'll clear the disabled flag & force_active=1
+        if disabled:
+            try:
+                conn2 = sqlite3.connect(DB_FILE)
+                cc = conn2.cursor()
+                cc.execute('UPDATE users SET bot_disabled_by_admin=0, disable_reason=NULL, bot_force_active=1 WHERE id=?', (user_id,))
+                conn2.commit(); conn2.close()
+            except:
+                pass
+
+        if not bot_file:
+            # No bot file — try to create one from MAHIR_SOURCE
+            try:
+                if not os.path.exists(MAHIR_SOURCE):
+                    with open(MAHIR_SOURCE, 'w') as f:
+                        f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+                safe_name = sanitize_filename(username)
+                bot_filename = f"{safe_name}_mahir.py"
+                bot_path = os.path.join(USER_BOTS_DIR, bot_filename)
+                shutil.copy2(MAHIR_SOURCE, bot_path)
+                # Get admin_uid from DB
+                conn3 = sqlite3.connect(DB_FILE)
+                c3 = conn3.cursor()
+                c3.execute('SELECT admin_uid FROM users WHERE id=?', (user_id,))
+                au_row = c3.fetchone()
+                conn3.close()
+                admin_uid_val = au_row[0] if au_row and au_row[0] else MASTER_ADMIN_UID
+                admin_list = parse_admin_uids(admin_uid_val)
+                ok, msg = inject_credentials_into_bot_file(bot_path, bot_uid, bot_pw, admin_list)
+                if not ok:
+                    failed += 1
+                    details.append({
+                        'user_id': user_id, 'username': username,
+                        'status': 'failed',
+                        'message': f'Inject failed: {msg}'
+                    })
+                    continue
+                conn4 = sqlite3.connect(DB_FILE)
+                c4 = conn4.cursor()
+                c4.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?', (bot_filename, user_id))
+                conn4.commit(); conn4.close()
+                bot_file = bot_filename
+            except Exception as e:
+                failed += 1
+                details.append({
+                    'user_id': user_id, 'username': username,
+                    'status': 'failed',
+                    'message': f'File create error: {e}'
+                })
+                continue
+
+        path = os.path.join(USER_BOTS_DIR, bot_file)
+        if not os.path.exists(path):
+            skipped_nofile += 1
+            details.append({
+                'user_id': user_id, 'username': username,
+                'status': 'skipped_no_file',
+                'message': f'Bot file missing: {bot_file}'
+            })
+            continue
+
+        # Kill existing monitor if any (to force restart cleanly)
+        with monitors_lock:
+            if user_id in monitors:
+                try:
+                    monitors[user_id].watchdog_running = False
+                    monitors[user_id].auto_restart_running = False
+                    monitors[user_id].stop_process()
+                except:
+                    pass
+                try:
+                    del monitors[user_id]
+                except:
+                    pass
+
+        # Create fresh monitor & start
+        try:
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            ok = m.start_process()
+            if ok:
+                launched += 1
+                details.append({
+                    'user_id': user_id, 'username': username,
+                    'status': 'launched',
+                    'message': f'PID: {m.process.pid if m.process else "?"}'
+                })
+            else:
+                failed += 1
+                details.append({
+                    'user_id': user_id, 'username': username,
+                    'status': 'failed',
+                    'message': 'start_process returned False'
+                })
+        except Exception as e:
+            failed += 1
+            details.append({
+                'user_id': user_id, 'username': username,
+                'status': 'failed',
+                'message': str(e)
+            })
+
+    return jsonify({
+        'status': 'success',
+        'total_users': total,
+        'launched': launched,
+        'failed': failed,
+        'skipped_expired': skipped_expired,
+        'skipped_no_file': skipped_nofile,
+        'skipped_disabled': skipped_disabled,
+        'details': details
+    })
 
 @app.route('/api/control', methods=['POST'])
 def api_control():
