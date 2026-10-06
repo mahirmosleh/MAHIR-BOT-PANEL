@@ -916,7 +916,7 @@ class ProcessMonitor:
                 self.bot_status = "🔴 BLOCKED"
             print(f"⛔ Cannot start user {self.user_id}: {reason}")
             return False
-    
+
         with self.lock:
             if self.process and self.process.poll() is None:
                 return True
@@ -925,18 +925,32 @@ class ProcessMonitor:
             if not os.path.exists(self.process_name):
                 print(f"Error: {self.process_name} not found")
                 return False
-        
+
             try:
+                # ✅ FIX #1: env তৈরি করা — TERM, encoding, unbuffered
+                env_copy = os.environ.copy()
+                env_copy['TERM'] = 'xterm'
+                env_copy['PYTHONUNBUFFERED'] = '1'
+                env_copy['PYTHONIOENCODING'] = 'utf-8'
+                env_copy['LANG'] = 'en_US.UTF-8'
+                env_copy['LC_ALL'] = 'en_US.UTF-8'
+
+                # ✅ FIX #2: stdin=DEVNULL → bot এর ভেতরে input() না থাকলেও hang হবে না
                 self.process = subprocess.Popen(
                     [sys.executable, "-u", self.process_name],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, universal_newlines=True, errors='replace',
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    text=True, bufsize=1,
+                    universal_newlines=True, errors='replace',
                     cwd=USER_BOTS_DIR,
+                    env=env_copy,
+                    start_new_session=True,   # ✅ FIX #3: process group তৈরি
                 )
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
-            
+
                 try:
                     conn = sqlite3.connect(DB_FILE)
                     c = conn.cursor()
@@ -944,26 +958,33 @@ class ProcessMonitor:
                               (self.process.pid, self.user_id))
                     conn.commit(); conn.close()
                 except: pass
-            
+
                 def enqueue():
                     try:
                         for line in iter(self.process.stdout.readline, ''):
                             if line:
                                 ts = datetime.now().strftime('%H:%M:%S')
                                 self.output_queue.put(f"[{ts}] {line.rstrip()}")
-                                self.process_line(line, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                    except: pass
+                                try:
+                                    self.process_line(line, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                                except Exception as pe:
+                                    # process_line এ কোনো error হলে যেন main loop না ভাঙে
+                                    print(f"[process_line error] {pe}")
+                    except Exception as e:
+                        print(f"[enqueue error user={self.user_id}] {e}")
+
                 self.output_thread = threading.Thread(target=enqueue, daemon=True)
                 self.output_thread.start()
-            
-                time.sleep(0.5)
+
+                # ⚠️ wait কমিয়ে 0.3s করা হলো (আগে 0.5s)
+                time.sleep(0.3)
                 if self.process.poll() is not None:
                     exit_code = self.process.returncode
                     print(f"⚠️ Bot process died immediately (exit={exit_code}) for user {self.user_id}")
                     self.is_running = False
                     self.bot_status = "🔴 CRASHED"
                     return False
-            
+
                 return True
             except Exception as e:
                 self.output_lines.append(f"Error: {str(e)}")
@@ -973,11 +994,24 @@ class ProcessMonitor:
     def _stop_process_internal(self):
         if self.process:
             try:
+                # ✅ FIX: পুরো process group kill করা (children সহ)
+                try:
+                    pgid = os.getpgid(self.process.pid)
+                    os.killpg(pgid, signal.SIGTERM)
+                    time.sleep(0.3)
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except: pass
+                except:
+                    pass
+
                 p = psutil.Process(self.process.pid)
                 for child in p.children(recursive=True):
                     try: child.kill()
                     except: pass
-                p.kill(); p.wait(timeout=5)
+                try:
+                    p.kill(); p.wait(timeout=3)
+                except: pass
             except:
                 try: self.process.kill()
                 except: pass
@@ -1077,16 +1111,32 @@ class ProcessMonitor:
 
     def _force_start_process(self):
         with self.lock:
-            if self.process and self.process.poll() is None: return True
-            if self.process: self._stop_process_internal()
+            if self.process and self.process.poll() is None:
+                return True
+            if self.process:
+                self._stop_process_internal()
             if not os.path.exists(self.process_name):
-                print(f"Error: {self.process_name} not found"); return False
+                print(f"Error: {self.process_name} not found")
+                return False
             try:
+                env_copy = os.environ.copy()
+                env_copy['TERM'] = 'xterm'
+                env_copy['PYTHONUNBUFFERED'] = '1'
+                env_copy['PYTHONIOENCODING'] = 'utf-8'
+                env_copy['LANG'] = 'en_US.UTF-8'
+                env_copy['LC_ALL'] = 'en_US.UTF-8'
+
                 self.process = subprocess.Popen(
                     [sys.executable, "-u", self.process_name],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, universal_newlines=True, errors='replace',
-                    cwd=USER_BOTS_DIR)
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    text=True, bufsize=1,
+                    universal_newlines=True, errors='replace',
+                    cwd=USER_BOTS_DIR,
+                    env=env_copy,
+                    start_new_session=True,
+                )
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
@@ -1097,14 +1147,20 @@ class ProcessMonitor:
                               (self.process.pid, self.user_id))
                     conn.commit(); conn.close()
                 except: pass
+
                 def enqueue():
                     try:
                         for line in iter(self.process.stdout.readline, ''):
                             if line:
                                 ts = datetime.now().strftime('%H:%M:%S')
                                 self.output_queue.put(f"[{ts}] {line.rstrip()}")
-                                self.process_line(line, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-                    except: pass
+                                try:
+                                    self.process_line(line, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                                except Exception as pe:
+                                    print(f"[process_line error] {pe}")
+                    except Exception as e:
+                        print(f"[enqueue error user={self.user_id}] {e}")
+
                 self.output_thread = threading.Thread(target=enqueue, daemon=True)
                 self.output_thread.start()
                 return True
@@ -1141,8 +1197,8 @@ def get_monitor(user_id):
 
 def startup_launch_all_bots():
     """
-    Startup এ সব valid bot launch করে এবং monitors dict এ রাখে
-    যাতে auto_restart thread গুলো কাজ করে। Fails হলেও periodically retry করে।
+    Startup এ সব valid bot launch করে এবং monitors dict এ রাখে।
+    এরপর প্রতি ১৫ সেকেন্ডে watchdog চেক করে — কেউ মরে গেলে auto restart।
     """
     def _launch_once():
         try:
@@ -1163,7 +1219,6 @@ def startup_launch_all_bots():
                 path = os.path.join(USER_BOTS_DIR, bot_file)
                 if not os.path.exists(path):
                     continue
-                # Already monitored হলে skip
                 with monitors_lock:
                     if user_id in monitors:
                         existing = monitors[user_id]
@@ -1181,13 +1236,14 @@ def startup_launch_all_bots():
             print(f"Startup error: {e}")
             return 0
 
-    # Initial launch
+    # ─── Initial launch ───
     _launch_once()
 
-    # Continuous watchdog: every 20s, ensure all bots are still alive/launched
+    # ─── Continuous watchdog (প্রতি 15 সেকেন্ড) ───
     while True:
         try:
-            time.sleep(20)
+            time.sleep(15)
+
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute('''SELECT id, bot_file FROM users 
@@ -1195,11 +1251,14 @@ def startup_launch_all_bots():
                          AND is_admin=0 AND is_agent=0''')
             rows = c.fetchall()
             conn.close()
+
             for user_id, bot_file in rows:
+                # Subscription expired check
                 sub = check_subscription_status(user_id)
                 if sub['status'] == 'expired':
                     continue
-                # Global stop / admin disabled থাকলে চালাবে না
+
+                # Global stop / admin disabled check
                 if get_global_stop():
                     try:
                         conn2 = sqlite3.connect(DB_FILE)
@@ -1211,32 +1270,60 @@ def startup_launch_all_bots():
                             continue
                     except:
                         continue
+
+                # Admin disabled check (global stop ছাড়াও)
+                try:
+                    conn3 = sqlite3.connect(DB_FILE)
+                    cc3 = conn3.cursor()
+                    cc3.execute('SELECT bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
+                    dis = cc3.fetchone()
+                    conn3.close()
+                    if dis and dis[0]:
+                        continue
+                except:
+                    pass
+
                 path = os.path.join(USER_BOTS_DIR, bot_file)
                 if not os.path.exists(path):
                     continue
 
+                # Process alive কিনা চেক
                 need_start = False
                 with monitors_lock:
                     if user_id not in monitors:
                         need_start = True
                     else:
                         m = monitors[user_id]
-                        # Process dead কিনা চেক
                         if not m.is_running or not m.process or m.process.poll() is not None:
                             need_start = True
 
                 if need_start:
                     try:
+                        # পুরনো monitor থাকলে clean
+                        with monitors_lock:
+                            if user_id in monitors:
+                                old = monitors[user_id]
+                                try:
+                                    old.watchdog_running = False
+                                    old.auto_restart_running = False
+                                except: pass
+                                try: del monitors[user_id]
+                                except: pass
+
                         m_new = ProcessMonitor(user_id, path)
                         with monitors_lock:
                             monitors[user_id] = m_new
                         ok = m_new.start_process()
                         if ok:
-                            print(f"🔄 Auto-relaunch: user {user_id} bot restarted by watchdog")
+                            print(f"🔄 Auto-relaunch: user {user_id} ({bot_file}) restarted by watchdog")
+                        else:
+                            print(f"⚠️ Watchdog: user {user_id} start_process returned False")
                     except Exception as e:
                         print(f"Watchdog relaunch error for {user_id}: {e}")
+
         except Exception as e:
             print(f"Watchdog loop error: {e}")
+            time.sleep(5)
 
 
 # ============================================================
@@ -5585,7 +5672,8 @@ if __name__ == '__main__':
         with open(MAHIR_SOURCE, 'w') as f:
             f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
 
-    threading.Thread(target=lambda: (time.sleep(2), startup_launch_all_bots()), daemon=True).start()
+    # ✅ Startup + Watchdog — একটাই daemon thread
+    threading.Thread(target=startup_launch_all_bots, daemon=True).start()
 
     print("""
     ╔══════════════════════════════════════════════════════════╗
