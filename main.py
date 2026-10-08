@@ -55,6 +55,9 @@ else:
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
+# Keep owner/agent sessions alive so random "kicked out" does not happen
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+app.config['SESSION_COOKIE_MAX_AGE'] = 30 * 24 * 60 * 60  # 30 days
 
 DB_FILE = "users.db"
 MAHIR_SOURCE = "mahir.py"
@@ -155,6 +158,8 @@ def migrate_db():
             c.execute('ALTER TABLE users ADD COLUMN personal_notice TEXT')
         if 'personal_notice_enabled' not in cols:
             c.execute('ALTER TABLE users ADD COLUMN personal_notice_enabled INTEGER DEFAULT 0')
+        if 'desired_bot_state' not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN desired_bot_state TEXT DEFAULT 'running'")
 
         c.execute("PRAGMA table_info(keys)")
         kcols = {row[1] for row in c.fetchall()}
@@ -474,7 +479,9 @@ def expire_user_bot(user_id):
             if user_id in monitors:
                 try:
                     monitors[user_id].watchdog_running = False
-                    monitors[user_id].stop_process()
+                    monitors[user_id].auto_restart_running = False
+                    monitors[user_id]._save_desired_state('stopped')
+                    monitors[user_id].stop_process(manual=False)
                     print(f"🛑 IMMEDIATE STOP: User {user_id} bot killed (expired)")
                 except Exception as e:
                     print(f"Stop error: {e}")
@@ -502,7 +509,7 @@ def expire_user_bot(user_id):
 
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('UPDATE users SET bot_file=NULL, bot_status="expired", bot_pid=NULL WHERE id=?', (user_id,))
+        c.execute('UPDATE users SET bot_file=NULL, bot_status="expired", bot_pid=NULL, desired_bot_state="stopped" WHERE id=?', (user_id,))
         conn.commit(); conn.close()
         print(f"✅ User {user_id}: Expired → Stopped & Deleted")
     except Exception as e:
@@ -624,6 +631,10 @@ class ProcessMonitor:
         self.temp_guild_name = "N/A"
         self.temp_pfp_url = "N/A"
 
+        # Desired lifecycle state: 'running' or 'stopped'. Manual stop must be respected.
+        self.desired_state = self._load_desired_state()
+        self.last_restart_reason = None
+
         self.auto_restart_running = True
         self.auto_restart_thread = threading.Thread(target=self._auto_restart_loop, daemon=True)
         self.auto_restart_thread.start()
@@ -632,15 +643,43 @@ class ProcessMonitor:
         self.watchdog_thread = threading.Thread(target=self._expiry_watchdog, daemon=True)
         self.watchdog_thread.start()
 
+    def _load_desired_state(self):
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('SELECT desired_bot_state FROM users WHERE id=?', (self.user_id,))
+            row = c.fetchone()
+            conn.close()
+            if row and row[0] in ('running', 'stopped'):
+                return row[0]
+        except Exception:
+            pass
+        return 'running'
+
+    def _save_desired_state(self, state):
+        self.desired_state = state
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            c.execute('UPDATE users SET desired_bot_state=? WHERE id=?', (state, self.user_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[desired_state] save error user={self.user_id}: {e}")
+
     def _auto_restart_loop(self):
         while self.auto_restart_running:
             try:
                 time.sleep(8)
                 if not self.auto_restart_running:
                     break
+                # Only auto-restart on crash if desired_state is still 'running'
+                if self.desired_state != 'running':
+                    continue
                 if self.is_running and self.process and self.process.poll() is not None:
-                    print(f"🔄 Auto-restart: user {self.user_id} bot died, restarting...")
+                    print(f"🔄 Auto-restart (CRASH_RECOVERY): user {self.user_id} bot died, restarting...")
                     self.restart_count += 1
+                    self.last_restart_reason = 'CRASH_RECOVERY'
                     self.start_process()
             except Exception as e:
                 print(f"Auto-restart error: {e}")
@@ -712,72 +751,103 @@ class ProcessMonitor:
         return text.strip()
 
     # ==========================================================
-    #  BANNER PARSER — only source of bot identity
+    #  BANNER PARSER — "MAHIR TCP BOT DASHBOARD"
+    #  Supported lines (║ prefix optional):
+    #    ║ 🔐 STATUS   : LOGIN SUCCESSFUL
+    #    ║   NAME        : MAHIR⁵³₂³
+    #    ║   UID         : 18471970782
+    #    ║   REGION      : BD
+    #    ║   CLAN ID     : 0
+    #    ║   ACCESS TOKEN: 0707032aac13a47c7c9f65df6a664ada1ed
+    #    ║   JWT TOKEN   : eyJhbGciOiJIUzI1NiIsInN2ciI6IjEiLCJ
+    #    ║   DYNAMIC KEY : 68c74d1bccdb6f7f4218052002304110
+    #    ║   DYNAMIC IV  : 59ff3e15fcfc7f7a6031050014314110
+    #    ║   BD TIME     : Friday, October 09, 2026 | 01:45 AM
+    #    ║   ONLINE SRV  : 202.81.106.94:39699
+    #    ║   CHAT SRV    : 202.81.106.81:39801
     # ==========================================================
     def parse_banner(self, clean):
-        """
-        Parse the STEP 7 banner block. Returns dict with any found values.
-        Banner lines look like:
-          ║  STATUS   : 🟢 READY & RUNNING
-          ║  NAME     : <acc_name>
-          ║  UID      : <BOT_OWN_ID>
-          ║  REGION   : <REGION>
-          ║  CLAN_ID  : <clan_id>
-          ║  ONLINE   : <ip>:<port>
-          ║  CHAT     : <ip>:<port>
-          ║  BY       : MAHIR TCP ! (:
-        """
         d = {}
         # Remove box chars & ANSI remains for easier parsing
-        s = re.sub(r'[║│┃]+', ' ', clean)
-        s = s.strip()
+        s = re.sub(r'[║│┃]+', ' ', clean).strip()
 
-        # STATUS
-        m = re.search(r'STATUS\s*:\s*(.+?)(?:\s{2,}|$)', s)
+        # STATUS (accept LOGIN SUCCESSFUL / READY / RUNNING / ONLINE / ACTIVE)
+        m = re.search(r'STATUS\s*:\s*(.+?)(?:\s{2,}|$)', s, re.IGNORECASE)
         if m:
             val = m.group(1).strip()
-            if 'READY' in val.upper() or 'RUNNING' in val.upper() or 'ONLINE' in val.upper():
+            up = val.upper()
+            if any(k in up for k in ('LOGIN SUCCESSFUL', 'READY', 'RUNNING', 'ONLINE', 'ACTIVE')):
                 d['status'] = "🟢 ACTIVE & ONLINE"
+            elif 'OFFLINE' in up or 'STOPPED' in up:
+                d['status'] = "🔴 OFFLINE"
             else:
                 d['status'] = val
 
-        # NAME  (only from this banner!)
-        m = re.search(r'\bNAME\s*:\s*(.+?)(?:\s{2,}|$)', s)
+        # NAME  (supports unicode/emoji names like MAHIR⁵³₂³)
+        m = re.search(r'\bNAME\s*:\s*(.+?)(?:\s{2,}|$)', s, re.IGNORECASE)
         if m:
             v = m.group(1).strip()
             v = re.sub(r'[║│┃].*$', '', v).strip()
-            if v and v not in ('N/A', '---', 'Name', '—'):
+            if v and v not in ('N/A', '---', 'Name', '—', 'None'):
                 d['name'] = v
 
         # UID
-        m = re.search(r'\bUID\s*:\s*(\d+)', s)
+        m = re.search(r'\bUID\s*:\s*(\d+)', s, re.IGNORECASE)
         if m:
             d['uid'] = m.group(1)
 
         # REGION
-        m = re.search(r'\bREGION\s*:\s*([A-Za-z]+)', s)
+        m = re.search(r'\bREGION\s*:\s*([A-Za-z]+)', s, re.IGNORECASE)
         if m:
             d['region'] = m.group(1).strip().upper()
 
-        # CLAN_ID
-        m = re.search(r'CLAN_ID\s*:\s*(\S+)', s)
+        # CLAN ID (0 is a valid value)
+        m = re.search(r'CLAN\s*[_ ]?ID\s*:\s*(\S+)', s, re.IGNORECASE)
         if m:
             v = m.group(1).strip()
-            if v and v not in ('—', '-', 'None'):
+            if v and v not in ('—', '-', 'None', 'N/A'):
                 d['clan_id'] = v
 
-        # ONLINE (IP:PORT)
-        m = re.search(r'\bONLINE\s*:\s*([\d.]+:\d+)', s)
+        # ACCESS TOKEN
+        m = re.search(r'ACCESS\s+TOKEN\s*:\s*([A-Za-z0-9_\-]+)', s, re.IGNORECASE)
+        if m:
+            d['access_token'] = m.group(1)
+
+        # JWT TOKEN
+        m = re.search(r'JWT\s+TOKEN\s*:\s*([A-Za-z0-9_\-\.]+)', s, re.IGNORECASE)
+        if m:
+            d['jwt_token'] = m.group(1)
+
+        # DYNAMIC KEY
+        m = re.search(r'DYNAMIC\s+KEY\s*:\s*([A-Fa-f0-9]+)', s, re.IGNORECASE)
+        if m:
+            d['dynamic_key'] = m.group(1)
+
+        # DYNAMIC IV
+        m = re.search(r'DYNAMIC\s+IV\s*:\s*([A-Fa-f0-9]+)', s, re.IGNORECASE)
+        if m:
+            d['dynamic_iv'] = m.group(1)
+
+        # BD TIME
+        m = re.search(r'BD\s+TIME\s*:\s*(.+?)(?:\s{2,}|$)', s, re.IGNORECASE)
+        if m:
+            v = m.group(1).strip()
+            v = re.sub(r'[║│┃].*$', '', v).strip()
+            if v:
+                d['bd_time'] = v
+
+        # ONLINE SRV
+        m = re.search(r'ONLINE\s+SRV\s*:\s*([\d.]+:\d+)', s, re.IGNORECASE)
         if m:
             d['server'] = m.group(1)
 
-        # CHAT (IP:PORT)
-        m = re.search(r'\bCHAT\s*:\s*([\d.]+:\d+)', s)
+        # CHAT SRV
+        m = re.search(r'CHAT\s+SRV\s*:\s*([\d.]+:\d+)', s, re.IGNORECASE)
         if m:
             d['chat_server'] = m.group(1)
 
-        # BY
-        m = re.search(r'\bBY\s*:\s*(.+?)(?:\s{2,}|$)', s)
+        # BY (optional)
+        m = re.search(r'\bBY\s*:\s*(.+?)(?:\s{2,}|$)', s, re.IGNORECASE)
         if m:
             v = m.group(1).strip()
             v = re.sub(r'[║│┃].*$', '', v).strip()
@@ -809,52 +879,67 @@ class ProcessMonitor:
 
     def process_line(self, line, timestamp):
         clean = self.clean_ansi(line)
-        if not clean: return
+        if not clean:
+            return
 
         # ==========================================================
-        #  BANNER DETECTION — "MAHIR BOT ONLINE"
+        #  BANNER DETECTION — multiple markers
         # ==========================================================
-        if 'MAHIR BOT ONLINE' in clean or 'MAHIR BOT' in clean.upper():
+        markers = (
+            'MAHIR TCP BOT DASHBOARD',
+            'MAHIR TCP BOT ONLINE',
+            'MAHIR BOT DASHBOARD',
+            'MAHIR BOT ONLINE',
+            'LOGIN SUCCESSFUL',
+            'MAHIR TCP BOT',
+        )
+        up = clean.upper()
+
+        if any(m in up for m in markers):
             self.banner_received = True
-            # Parse this line (might be the box top line)
             d = self.parse_banner(clean)
             if d:
                 with self.lock:
-                    if 'status' in d: self.bot_status = d['status']
-                    if 'name' in d: self.bot_name = d['name']
-                    if 'uid' in d: self.bot_uid = d['uid']
-                    if 'region' in d: self.bot_region = d['region']
-                    if 'clan_id' in d: self.bot_clan_id = d['clan_id']
-                    if 'server' in d: self.bot_server = d['server']
-                    if 'chat_server' in d: self.bot_chat_server = d['chat_server']
-                    if 'by' in d: self.bot_by = d['by']
+                    if d.get('status'):       self.bot_status      = d['status']
+                    if d.get('name'):         self.bot_name        = d['name']
+                    if d.get('uid'):          self.bot_uid         = d['uid']
+                    if d.get('region'):       self.bot_region      = d['region']
+                    if d.get('clan_id'):      self.bot_clan_id     = d['clan_id']
+                    if d.get('server'):       self.bot_server      = d['server']
+                    if d.get('chat_server'):  self.bot_chat_server = d['chat_server']
+                    if d.get('by'):           self.bot_by          = d['by']
                     self.account_info_found = True
-            return
 
-        # Try to parse any line as banner part while banner_received is True and we still need fields
+        # Once banner is seen, try to parse any following line too
         if self.banner_received:
             d = self.parse_banner(clean)
             if d:
                 with self.lock:
-                    if 'status' in d: self.bot_status = d['status']
-                    if 'name' in d and self.bot_name in ('N/A', '', None): self.bot_name = d['name']
-                    if 'uid' in d and self.bot_uid in ('N/A', '', None): self.bot_uid = d['uid']
-                    if 'region' in d: self.bot_region = d['region']
-                    if 'clan_id' in d: self.bot_clan_id = d['clan_id']
-                    if 'server' in d: self.bot_server = d['server']
-                    if 'chat_server' in d: self.bot_chat_server = d['chat_server']
-                    if 'by' in d: self.bot_by = d['by']
+                    if d.get('status'):       self.bot_status      = d['status']
+                    if d.get('name') and self.bot_name in ('N/A', '', None):
+                        self.bot_name = d['name']
+                    if d.get('uid') and self.bot_uid in ('N/A', '', None):
+                        self.bot_uid = d['uid']
+                    if d.get('region'):       self.bot_region      = d['region']
+                    if d.get('clan_id'):      self.bot_clan_id     = d['clan_id']
+                    if d.get('server'):       self.bot_server      = d['server']
+                    if d.get('chat_server'):  self.bot_chat_server = d['chat_server']
+                    if d.get('by'):           self.bot_by          = d['by']
                     self.account_info_found = True
-                # Do not return here — allow message/other handling below
 
         # ==========================================================
         #  MESSAGE INFO block
         # ==========================================================
         if 'MESSAGE INFO' in clean or '[ MESSAGE INFO ]' in clean:
-            self.collecting_message = True; self.message_started = True; self.message_stored = False
+            self.collecting_message = True
+            self.message_started = True
+            self.message_stored = False
             self.message_buffer = [clean]
-            self.temp_sender_uid = "N/A"; self.temp_nickname = "N/A"; self.temp_message = "N/A"
-            self.temp_guild_name = "N/A"; self.temp_pfp_url = "N/A"
+            self.temp_sender_uid = "N/A"
+            self.temp_nickname = "N/A"
+            self.temp_message = "N/A"
+            self.temp_guild_name = "N/A"
+            self.temp_pfp_url = "N/A"
             return
 
         if self.collecting_message and self.message_started:
@@ -862,28 +947,31 @@ class ProcessMonitor:
             parsed = self.parse_message_info(clean)
             if parsed:
                 t = parsed['type']
-                if t == 'sender_uid': self.temp_sender_uid = parsed['value']
-                elif t == 'nickname': self.temp_nickname = parsed['value']
-                elif t == 'message': self.temp_message = parsed['value']
-                elif t == 'guild_name': self.temp_guild_name = parsed['value']
-                elif t == 'pfp_url': self.temp_pfp_url = parsed['value']
-            # End of message block: ╚...╝
+                if t == 'sender_uid':    self.temp_sender_uid = parsed['value']
+                elif t == 'nickname':    self.temp_nickname   = parsed['value']
+                elif t == 'message':     self.temp_message    = parsed['value']
+                elif t == 'guild_name':  self.temp_guild_name = parsed['value']
+                elif t == 'pfp_url':     self.temp_pfp_url    = parsed['value']
+
             if '╚' in clean and '╝' in clean:
-                self.collecting_message = False; self.message_started = False
+                self.collecting_message = False
+                self.message_started = False
                 if not self.message_stored and self.temp_sender_uid != 'N/A':
                     with self.lock:
                         self.last_sender_uid = self.temp_sender_uid
-                        self.last_nickname = self.temp_nickname
-                        self.last_message = self.temp_message
+                        self.last_nickname   = self.temp_nickname
+                        self.last_message    = self.temp_message
                         self.last_guild_name = self.temp_guild_name
-                        self.last_pfp_url = self.temp_pfp_url
+                        self.last_pfp_url    = self.temp_pfp_url
                         self.bot_status = "🟢 ACTIVE & ONLINE"
                         self.message_info_lines.append({
                             'timestamp': timestamp,
                             'data': {
-                                'sender_uid': self.temp_sender_uid, 'nickname': self.temp_nickname,
-                                'message': self.temp_message, 'guild_name': self.temp_guild_name,
-                                'pfp_url': self.temp_pfp_url
+                                'sender_uid': self.temp_sender_uid,
+                                'nickname':   self.temp_nickname,
+                                'message':    self.temp_message,
+                                'guild_name': self.temp_guild_name,
+                                'pfp_url':    self.temp_pfp_url
                             }
                         })
                         if len(self.message_info_lines) > self.max_message_lines:
@@ -919,6 +1007,8 @@ class ProcessMonitor:
 
         with self.lock:
             if self.process and self.process.poll() is None:
+                # Already running — ensure desired is running
+                self._save_desired_state('running')
                 return True
             if self.process:
                 self._stop_process_internal()
@@ -927,7 +1017,6 @@ class ProcessMonitor:
                 return False
 
             try:
-                # ✅ FIX #1: env তৈরি করা — TERM, encoding, unbuffered
                 env_copy = os.environ.copy()
                 env_copy['TERM'] = 'xterm'
                 env_copy['PYTHONUNBUFFERED'] = '1'
@@ -935,7 +1024,6 @@ class ProcessMonitor:
                 env_copy['LANG'] = 'en_US.UTF-8'
                 env_copy['LC_ALL'] = 'en_US.UTF-8'
 
-                # ✅ FIX #2: stdin=DEVNULL → bot এর ভেতরে input() না থাকলেও hang হবে না
                 self.process = subprocess.Popen(
                     [sys.executable, "-u", self.process_name],
                     stdout=subprocess.PIPE,
@@ -945,11 +1033,12 @@ class ProcessMonitor:
                     universal_newlines=True, errors='replace',
                     cwd=USER_BOTS_DIR,
                     env=env_copy,
-                    start_new_session=True,   # ✅ FIX #3: process group তৈরি
+                    start_new_session=True,
                 )
                 self.is_running = True
                 self.start_time = datetime.now()
                 self.bot_status = "🟢 ACTIVE & ONLINE"
+                self._save_desired_state('running')
 
                 try:
                     conn = sqlite3.connect(DB_FILE)
@@ -968,7 +1057,6 @@ class ProcessMonitor:
                                 try:
                                     self.process_line(line, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                                 except Exception as pe:
-                                    # process_line এ কোনো error হলে যেন main loop না ভাঙে
                                     print(f"[process_line error] {pe}")
                     except Exception as e:
                         print(f"[enqueue error user={self.user_id}] {e}")
@@ -976,7 +1064,6 @@ class ProcessMonitor:
                 self.output_thread = threading.Thread(target=enqueue, daemon=True)
                 self.output_thread.start()
 
-                # ⚠️ wait কমিয়ে 0.3s করা হলো (আগে 0.5s)
                 time.sleep(0.3)
                 if self.process.poll() is not None:
                     exit_code = self.process.returncode
@@ -994,7 +1081,6 @@ class ProcessMonitor:
     def _stop_process_internal(self):
         if self.process:
             try:
-                # ✅ FIX: পুরো process group kill করা (children সহ)
                 try:
                     pgid = os.getpgid(self.process.pid)
                     os.killpg(pgid, signal.SIGTERM)
@@ -1025,11 +1111,20 @@ class ProcessMonitor:
             conn.commit(); conn.close()
         except: pass
 
-    def stop_process(self):
-        with self.lock: self._stop_process_internal()
+    def stop_process(self, manual=True):
+        """Stop the bot. If manual=True (default), mark desired_state=stopped so watchdog will not restart it."""
+        with self.lock:
+            if manual:
+                self._save_desired_state('stopped')
+                print(f"🛑 MANUAL STOP: user {self.user_id} → desired_state=stopped")
+            self._stop_process_internal()
 
     def restart_logic(self):
-        self.stop_process(); time.sleep(2)
+        # Explicit restart → desired becomes running
+        self._save_desired_state('running')
+        self.last_restart_reason = 'MANUAL_RESTART'
+        self.stop_process(manual=False)
+        time.sleep(2)
         s = self.start_process()
         if s:
             with self.lock: self.restart_count += 1
@@ -1107,6 +1202,8 @@ class ProcessMonitor:
             self.bot_server = "N/A"; self.bot_chat_server = "N/A"; self.bot_by = "N/A"
             self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
             self.last_nickname = "N/A"; self.last_message = "N/A"; self.last_pfp_url = "N/A"
+        self._save_desired_state('running')
+        self.last_restart_reason = 'HARD_RESET'
         return self._force_start_process()
 
     def _force_start_process(self):
@@ -1175,23 +1272,40 @@ class ProcessMonitor:
 monitors = {}
 
 
-def get_monitor(user_id):
+def get_monitor(user_id, create_only=True):
+    """
+    Return existing ProcessMonitor for user_id, or create one WITHOUT starting the bot.
+    Status / dashboard / login must NEVER start a bot as a side-effect.
+    Only explicit start / restart / force / watchdog (when desired_state=running) may start.
+    """
     with monitors_lock:
-        if user_id in monitors: return monitors[user_id]
+        if user_id in monitors:
+            return monitors[user_id]
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
     conn.close()
-    if not row or not row[0]: return None
+    if not row or not row[0]:
+        return None
     bot_file = row[0]
-    if not os.path.dirname(bot_file): bot_file = os.path.join(USER_BOTS_DIR, bot_file)
-    if not os.path.exists(bot_file): return None
+    if not os.path.dirname(bot_file):
+        bot_file = os.path.join(USER_BOTS_DIR, bot_file)
+    if not os.path.exists(bot_file):
+        return None
     monitor = ProcessMonitor(user_id, bot_file)
     with monitors_lock:
-        if user_id in monitors: return monitors[user_id]
+        if user_id in monitors:
+            # Another thread won the race — discard the one we just created
+            try:
+                monitor.auto_restart_running = False
+                monitor.watchdog_running = False
+            except Exception:
+                pass
+            return monitors[user_id]
         monitors[user_id] = monitor
-    monitor.start_process()
+    # IMPORTANT: do NOT call start_process() here.
+    # Bot start is only allowed via explicit control or eligible watchdog recovery.
     return monitor
 
 
@@ -1216,6 +1330,22 @@ def startup_launch_all_bots():
                 if sub['status'] == 'expired':
                     expire_user_bot(user_id)
                     continue
+                # Respect desired_bot_state — do not auto-start bots that were manually stopped
+                try:
+                    conn_ds = sqlite3.connect(DB_FILE)
+                    cds = conn_ds.cursor()
+                    cds.execute('SELECT desired_bot_state, bot_disabled_by_admin, bot_force_active FROM users WHERE id=?', (user_id,))
+                    dsrow = cds.fetchone()
+                    conn_ds.close()
+                    desired = (dsrow[0] if dsrow and dsrow[0] else 'running')
+                    if desired != 'running':
+                        continue
+                    if dsrow and dsrow[1]:  # admin disabled
+                        continue
+                    if get_global_stop() and not (dsrow and dsrow[2]):
+                        continue
+                except Exception:
+                    pass
                 path = os.path.join(USER_BOTS_DIR, bot_file)
                 if not os.path.exists(path):
                     continue
@@ -1227,9 +1357,10 @@ def startup_launch_all_bots():
                 m = ProcessMonitor(user_id, path)
                 with monitors_lock:
                     monitors[user_id] = m
+                m.last_restart_reason = 'SERVER_STARTUP'
                 m.start_process()
                 count += 1
-                print(f"  ✅ Bot launched: user_id={user_id} ({bot_file})")
+                print(f"  ✅ Bot launched (SERVER_STARTUP): user_id={user_id} ({bot_file})")
             print(f"🚀 Startup complete: {count} bots launched\n")
             return count
         except Exception as e:
@@ -1240,54 +1371,47 @@ def startup_launch_all_bots():
     _launch_once()
 
     # ─── Continuous watchdog (প্রতি 15 সেকেন্ড) ───
+    # Only recovers crashed bots whose desired_state is still 'running'.
+    # NEVER restarts a manually stopped bot.
     while True:
         try:
             time.sleep(15)
 
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
-            c.execute('''SELECT id, bot_file FROM users 
+            c.execute('''SELECT id, bot_file, desired_bot_state, bot_disabled_by_admin, bot_force_active
+                         FROM users 
                          WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
                          AND is_admin=0 AND is_agent=0''')
             rows = c.fetchall()
             conn.close()
 
-            for user_id, bot_file in rows:
+            for row in rows:
+                user_id, bot_file, desired_state, disabled, force_active = row
+                desired_state = desired_state or 'running'
+
+                # Manual stop must be respected
+                if desired_state != 'running':
+                    continue
+
                 # Subscription expired check
                 sub = check_subscription_status(user_id)
                 if sub['status'] == 'expired':
                     continue
 
-                # Global stop / admin disabled check
-                if get_global_stop():
-                    try:
-                        conn2 = sqlite3.connect(DB_FILE)
-                        cc = conn2.cursor()
-                        cc.execute('SELECT bot_force_active, bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
-                        rr = cc.fetchone()
-                        conn2.close()
-                        if not rr or not rr[0] or rr[1]:
-                            continue
-                    except:
-                        continue
+                # Admin disabled
+                if disabled:
+                    continue
 
-                # Admin disabled check (global stop ছাড়াও)
-                try:
-                    conn3 = sqlite3.connect(DB_FILE)
-                    cc3 = conn3.cursor()
-                    cc3.execute('SELECT bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
-                    dis = cc3.fetchone()
-                    conn3.close()
-                    if dis and dis[0]:
-                        continue
-                except:
-                    pass
+                # Global stop (unless force_active)
+                if get_global_stop() and not force_active:
+                    continue
 
                 path = os.path.join(USER_BOTS_DIR, bot_file)
                 if not os.path.exists(path):
                     continue
 
-                # Process alive কিনা চেক
+                # Process alive check
                 need_start = False
                 with monitors_lock:
                     if user_id not in monitors:
@@ -1299,23 +1423,27 @@ def startup_launch_all_bots():
 
                 if need_start:
                     try:
-                        # পুরনো monitor থাকলে clean
+                        # Clean old monitor if any
                         with monitors_lock:
                             if user_id in monitors:
                                 old = monitors[user_id]
                                 try:
                                     old.watchdog_running = False
                                     old.auto_restart_running = False
-                                except: pass
-                                try: del monitors[user_id]
-                                except: pass
+                                except Exception:
+                                    pass
+                                try:
+                                    del monitors[user_id]
+                                except Exception:
+                                    pass
 
                         m_new = ProcessMonitor(user_id, path)
                         with monitors_lock:
                             monitors[user_id] = m_new
+                        m_new.last_restart_reason = 'WATCHDOG_RECOVERY'
                         ok = m_new.start_process()
                         if ok:
-                            print(f"🔄 Auto-relaunch: user {user_id} ({bot_file}) restarted by watchdog")
+                            print(f"🔄 Auto-relaunch (WATCHDOG_RECOVERY): user {user_id} ({bot_file})")
                         else:
                             print(f"⚠️ Watchdog: user {user_id} start_process returned False")
                     except Exception as e:
@@ -3494,9 +3622,25 @@ def index():
 @app.errorhandler(500)
 @app.errorhandler(sqlite3.OperationalError)
 def handle_db_error(e):
+    """
+    SQLite lock / transient errors must NOT log the user out.
+    Previously this redirected everyone to /login → owner panel randomly kicked out.
+    """
     try:
         init_db(); migrate_db()
-    except: pass
+    except Exception:
+        pass
+    print(f"[ERROR HANDLER] {type(e).__name__}: {e}")
+    # Keep the current session — send the user back to a safe place for their role
+    if session.get('owner_mode') or session.get('is_admin'):
+        flash('Temporary server issue — please try again.', 'error')
+        return redirect(url_for('owner_dashboard'))
+    if session.get('is_agent'):
+        flash('Temporary server issue — please try again.', 'error')
+        return redirect(url_for('agent_dashboard'))
+    if session.get('user_id'):
+        flash('Temporary server issue — please try again.', 'error')
+        return redirect(url_for('user_dashboard'))
     return redirect(url_for('login'))
 
 
@@ -3511,6 +3655,7 @@ def login():
         user = c.fetchone()
         conn.close()
         if user and check_password(user[2], password):
+            session.permanent = True
             session['user_id'] = user[0]; session['username'] = user[1]
             session['is_admin'] = bool(user[3]); session['is_agent'] = bool(user[4])
             if session['is_admin']: return redirect(url_for('owner_dashboard'))
@@ -3600,6 +3745,7 @@ def agent_login():
         user = c.fetchone()
         conn.close()
         if user and user[3] == 1 and check_password(user[2], password):
+            session.permanent = True
             session['user_id'] = user[0]; session['username'] = user[1]
             session['is_agent'] = True; session['is_admin'] = False
             return redirect(url_for('agent_dashboard'))
@@ -3993,6 +4139,7 @@ def owner_login():
         password = request.form['password']
         if username == OWNER_USERNAME and password == OWNER_PASSWORD:
             session.clear()
+            session.permanent = True  # long-lived session (30 days)
             session['user_id'] = 0
             session['username'] = 'OWNER'
             session['is_admin'] = True
@@ -4022,10 +4169,13 @@ def owner_login_as(user_id):
     if not u:
         flash('User not found', 'error')
         return redirect(url_for('owner_dashboard'))
+    # Keep owner_mode + permanent so "Return to Owner" always works and session does not expire
+    session.permanent = True
     session['user_id'] = u[0]
     session['username'] = u[1]
     session['is_admin'] = bool(u[2])
     session['is_agent'] = bool(u[3])
+    # owner_mode stays True
     if session['is_admin']:
         return redirect(url_for('owner_dashboard'))
     elif session['is_agent']:
@@ -4038,6 +4188,7 @@ def owner_login_as(user_id):
 def owner_return():
     if not session.get('owner_mode'):
         return redirect(url_for('login'))
+    session.permanent = True
     session['user_id'] = 0
     session['username'] = 'OWNER'
     session['is_admin'] = True
@@ -5271,19 +5422,31 @@ def owner_reset_all_bots():
 # ========== APIs ==========
 @app.route('/api/status')
 def api_status():
+    """Read-only status. NEVER starts / stops / restarts a bot as a side-effect."""
     if not session.get('user_id'):
         return jsonify({'error': 'Login required'}), 401
-    monitor = get_monitor(session['user_id'])
+    user_id = session['user_id']
+    monitor = get_monitor(user_id)  # does NOT start the process
     if monitor:
         sd = monitor.get_status()
-        sub = check_subscription_status(session['user_id'])
-        if sub['status'] == 'unlimited': sd['script_remaining'] = 'Lifetime'
-        elif sub['status'] == 'expired': sd['script_remaining'] = 'Expired'
+        sd['desired_state'] = getattr(monitor, 'desired_state', 'running')
+        sd['last_restart_reason'] = getattr(monitor, 'last_restart_reason', None)
+        sub = check_subscription_status(user_id)
+        if sub['status'] == 'unlimited':
+            sd['script_remaining'] = 'Unlimited'
+        elif sub['status'] == 'expired':
+            sd['script_remaining'] = 'Expired'
         else:
             exp = sub['expiry']
             sd['script_remaining'] = f"{exp.strftime('%d %b, %Y')} ({sub['days_left']}d)"
         return jsonify(sd)
-    return jsonify({'error': 'Not configured'}), 400
+    return jsonify({
+        'error': 'Not configured',
+        'is_running': False,
+        'bot_status': '🔴 NOT CONFIGURED',
+        'desired_state': 'stopped',
+    }), 400
+
 
 @app.route('/api/owner_force_all_login', methods=['GET'])
 def api_owner_force_all_login():
