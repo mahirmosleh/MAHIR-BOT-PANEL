@@ -55,9 +55,6 @@ else:
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-# Keep owner/agent sessions alive so random "kicked out" does not happen
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
-app.config['SESSION_COOKIE_MAX_AGE'] = 30 * 24 * 60 * 60  # 30 days
 
 DB_FILE = "users.db"
 MAHIR_SOURCE = "mahir.py"
@@ -468,13 +465,13 @@ def format_time_left(expiry_dt):
 
 
 def expire_user_bot(user_id):
+    """
+    ✅ Expired হলে শুধু bot process STOP করবে এবং DB-তে expired মার্ক করবে।
+    ❌ Bot file (.py) কখনো DELETE/REMOVE করবে না — সবসময় অক্ষত থাকবে।
+    ✅ Renew করলে owner "Force Start" চাপলেই একই file আবার চলবে।
+    """
     try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
-        row = c.fetchone()
-        conn.close()
-
+        # 1) Running process থাকলে সেটা stop করো (file delete নয়)
         with monitors_lock:
             if user_id in monitors:
                 try:
@@ -482,41 +479,32 @@ def expire_user_bot(user_id):
                     monitors[user_id].auto_restart_running = False
                     monitors[user_id]._save_desired_state('stopped')
                     monitors[user_id].stop_process(manual=False)
-                    print(f"🛑 IMMEDIATE STOP: User {user_id} bot killed (expired)")
+                    print(f"🛑 IMMEDIATE STOP: User {user_id} bot killed (expired) — file preserved")
                 except Exception as e:
                     print(f"Stop error: {e}")
                 try: del monitors[user_id]
                 except: pass
 
-        if row and row[0]:
-            bot_file = row[0]
-            path = os.path.join(USER_BOTS_DIR, bot_file)
-            if os.path.exists(path):
-                try: os.remove(path)
-                except: pass
-            login_file = bot_file.replace('.py', '_login.py')
-            login_path = os.path.join(USER_BOTS_DIR, login_file)
-            if os.path.exists(login_path):
-                try: os.remove(login_path)
-                except: pass
-            base_name = bot_file.replace('.py', '')
-            try:
-                for f in os.listdir(USER_BOTS_DIR):
-                    if f.startswith(base_name) and f.endswith('.py'):
-                        try: os.remove(os.path.join(USER_BOTS_DIR, f))
-                        except: pass
-            except: pass
-
+        # 2) ✅ কোনো file deletion নেই
+        # ✅ bot_file DB-তে অক্ষত থাকবে, শুধু status expired, PID NULL
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        c.execute('UPDATE users SET bot_file=NULL, bot_status="expired", bot_pid=NULL, desired_bot_state="stopped" WHERE id=?', (user_id,))
+        c.execute('''UPDATE users 
+                     SET bot_status="expired", 
+                         bot_pid=NULL, 
+                         desired_bot_state="stopped" 
+                     WHERE id=?''', (user_id,))
         conn.commit(); conn.close()
-        print(f"✅ User {user_id}: Expired → Stopped & Deleted")
+        print(f"✅ User {user_id}: Expired → Stopped (bot file PRESERVED, never deleted)")
     except Exception as e:
         print(f"expire_user_bot error: {e}")
 
 
 def check_all_expired_bots():
+    """
+    ✅ Background expiry checker — শুধু expired bot STOP করে।
+    ❌ কখনো file delete করে না, কখনো restart করে না।
+    """
     while True:
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -538,7 +526,7 @@ def check_all_expired_bots():
                     try:
                         expiry_dt = datetime.fromisoformat(expiry_val)
                         if datetime.now() > expiry_dt:
-                            if bot_status == 'expired' and not bot_file:
+                            if bot_status == 'expired':
                                 continue
                             print(f"\n⏰ EXPIRY DETECTED → User {user_id}")
                             expire_user_bot(user_id)
@@ -635,10 +623,14 @@ class ProcessMonitor:
         self.desired_state = self._load_desired_state()
         self.last_restart_reason = None
 
-        self.auto_restart_running = True
-        self.auto_restart_thread = threading.Thread(target=self._auto_restart_loop, daemon=True)
-        self.auto_restart_thread.start()
+        # ❌ AUTO-RESTART ON CRASH — REMOVED
+        # Bot only starts when user clicks "Start" or owner clicks "Force Start".
+        # No auto-restart thread is started here.
+        self.auto_restart_running = False
+        self.auto_restart_thread = None
 
+        # ✅ Expiry watchdog kept — it kills the bot when subscription expires.
+        # ❌ But it NEVER deletes the bot file.
         self.watchdog_running = True
         self.watchdog_thread = threading.Thread(target=self._expiry_watchdog, daemon=True)
         self.watchdog_thread.start()
@@ -668,23 +660,18 @@ class ProcessMonitor:
             print(f"[desired_state] save error user={self.user_id}: {e}")
 
     def _auto_restart_loop(self):
-        while self.auto_restart_running:
-            try:
-                time.sleep(8)
-                if not self.auto_restart_running:
-                    break
-                # Only auto-restart on crash if desired_state is still 'running'
-                if self.desired_state != 'running':
-                    continue
-                if self.is_running and self.process and self.process.poll() is not None:
-                    print(f"🔄 Auto-restart (CRASH_RECOVERY): user {self.user_id} bot died, restarting...")
-                    self.restart_count += 1
-                    self.last_restart_reason = 'CRASH_RECOVERY'
-                    self.start_process()
-            except Exception as e:
-                print(f"Auto-restart error: {e}")
+        """
+        ❌ DISABLED — this loop never runs anymore.
+        Kept as dead code for backward compatibility, but auto_restart_running is False.
+        """
+        return
 
     def _expiry_watchdog(self):
+        """
+        ✅ Only job: kill the bot when subscription expires.
+        ❌ Never restarts the bot for any other reason.
+        ❌ Never deletes the bot file.
+        """
         while self.watchdog_running:
             try:
                 time.sleep(10)
@@ -708,7 +695,7 @@ class ProcessMonitor:
                     try:
                         expiry_dt = datetime.fromisoformat(expiry_val)
                         if datetime.now() > expiry_dt:
-                            print(f"\n⏰ WATCHDOG: User {self.user_id} EXPIRED → Killing bot NOW")
+                            print(f"\n⏰ WATCHDOG: User {self.user_id} EXPIRED → Killing process (file preserved)")
                             self.watchdog_running = False
                             self.auto_restart_running = False
                             self.stop_process()
@@ -750,104 +737,49 @@ class ProcessMonitor:
             text = ''.join(c for c in text if c.isprintable() or c in '\n\r\t')
         return text.strip()
 
-    # ==========================================================
-    #  BANNER PARSER — "MAHIR TCP BOT DASHBOARD"
-    #  Supported lines (║ prefix optional):
-    #    ║ 🔐 STATUS   : LOGIN SUCCESSFUL
-    #    ║   NAME        : MAHIR⁵³₂³
-    #    ║   UID         : 18471970782
-    #    ║   REGION      : BD
-    #    ║   CLAN ID     : 0
-    #    ║   ACCESS TOKEN: 0707032aac13a47c7c9f65df6a664ada1ed
-    #    ║   JWT TOKEN   : eyJhbGciOiJIUzI1NiIsInN2ciI6IjEiLCJ
-    #    ║   DYNAMIC KEY : 68c74d1bccdb6f7f4218052002304110
-    #    ║   DYNAMIC IV  : 59ff3e15fcfc7f7a6031050014314110
-    #    ║   BD TIME     : Friday, October 09, 2026 | 01:45 AM
-    #    ║   ONLINE SRV  : 202.81.106.94:39699
-    #    ║   CHAT SRV    : 202.81.106.81:39801
-    # ==========================================================
     def parse_banner(self, clean):
         d = {}
-        # Remove box chars & ANSI remains for easier parsing
-        s = re.sub(r'[║│┃]+', ' ', clean).strip()
+        s = re.sub(r'[║│┃]+', ' ', clean)
+        s = s.strip()
 
-        # STATUS (accept LOGIN SUCCESSFUL / READY / RUNNING / ONLINE / ACTIVE)
-        m = re.search(r'STATUS\s*:\s*(.+?)(?:\s{2,}|$)', s, re.IGNORECASE)
+        m = re.search(r'STATUS\s*:\s*(.+?)(?:\s{2,}|$)', s)
         if m:
             val = m.group(1).strip()
-            up = val.upper()
-            if any(k in up for k in ('LOGIN SUCCESSFUL', 'READY', 'RUNNING', 'ONLINE', 'ACTIVE')):
+            if 'READY' in val.upper() or 'RUNNING' in val.upper() or 'ONLINE' in val.upper():
                 d['status'] = "🟢 ACTIVE & ONLINE"
-            elif 'OFFLINE' in up or 'STOPPED' in up:
-                d['status'] = "🔴 OFFLINE"
             else:
                 d['status'] = val
 
-        # NAME  (supports unicode/emoji names like MAHIR⁵³₂³)
-        m = re.search(r'\bNAME\s*:\s*(.+?)(?:\s{2,}|$)', s, re.IGNORECASE)
+        m = re.search(r'\bNAME\s*:\s*(.+?)(?:\s{2,}|$)', s)
         if m:
             v = m.group(1).strip()
             v = re.sub(r'[║│┃].*$', '', v).strip()
-            if v and v not in ('N/A', '---', 'Name', '—', 'None'):
+            if v and v not in ('N/A', '---', 'Name', '—'):
                 d['name'] = v
 
-        # UID
-        m = re.search(r'\bUID\s*:\s*(\d+)', s, re.IGNORECASE)
+        m = re.search(r'\bUID\s*:\s*(\d+)', s)
         if m:
             d['uid'] = m.group(1)
 
-        # REGION
-        m = re.search(r'\bREGION\s*:\s*([A-Za-z]+)', s, re.IGNORECASE)
+        m = re.search(r'\bREGION\s*:\s*([A-Za-z]+)', s)
         if m:
             d['region'] = m.group(1).strip().upper()
 
-        # CLAN ID (0 is a valid value)
-        m = re.search(r'CLAN\s*[_ ]?ID\s*:\s*(\S+)', s, re.IGNORECASE)
+        m = re.search(r'CLAN_ID\s*:\s*(\S+)', s)
         if m:
             v = m.group(1).strip()
-            if v and v not in ('—', '-', 'None', 'N/A'):
+            if v and v not in ('—', '-', 'None'):
                 d['clan_id'] = v
 
-        # ACCESS TOKEN
-        m = re.search(r'ACCESS\s+TOKEN\s*:\s*([A-Za-z0-9_\-]+)', s, re.IGNORECASE)
-        if m:
-            d['access_token'] = m.group(1)
-
-        # JWT TOKEN
-        m = re.search(r'JWT\s+TOKEN\s*:\s*([A-Za-z0-9_\-\.]+)', s, re.IGNORECASE)
-        if m:
-            d['jwt_token'] = m.group(1)
-
-        # DYNAMIC KEY
-        m = re.search(r'DYNAMIC\s+KEY\s*:\s*([A-Fa-f0-9]+)', s, re.IGNORECASE)
-        if m:
-            d['dynamic_key'] = m.group(1)
-
-        # DYNAMIC IV
-        m = re.search(r'DYNAMIC\s+IV\s*:\s*([A-Fa-f0-9]+)', s, re.IGNORECASE)
-        if m:
-            d['dynamic_iv'] = m.group(1)
-
-        # BD TIME
-        m = re.search(r'BD\s+TIME\s*:\s*(.+?)(?:\s{2,}|$)', s, re.IGNORECASE)
-        if m:
-            v = m.group(1).strip()
-            v = re.sub(r'[║│┃].*$', '', v).strip()
-            if v:
-                d['bd_time'] = v
-
-        # ONLINE SRV
-        m = re.search(r'ONLINE\s+SRV\s*:\s*([\d.]+:\d+)', s, re.IGNORECASE)
+        m = re.search(r'\bONLINE\s*:\s*([\d.]+:\d+)', s)
         if m:
             d['server'] = m.group(1)
 
-        # CHAT SRV
-        m = re.search(r'CHAT\s+SRV\s*:\s*([\d.]+:\d+)', s, re.IGNORECASE)
+        m = re.search(r'\bCHAT\s*:\s*([\d.]+:\d+)', s)
         if m:
             d['chat_server'] = m.group(1)
 
-        # BY (optional)
-        m = re.search(r'\bBY\s*:\s*(.+?)(?:\s{2,}|$)', s, re.IGNORECASE)
+        m = re.search(r'\bBY\s*:\s*(.+?)(?:\s{2,}|$)', s)
         if m:
             v = m.group(1).strip()
             v = re.sub(r'[║│┃].*$', '', v).strip()
@@ -879,67 +811,43 @@ class ProcessMonitor:
 
     def process_line(self, line, timestamp):
         clean = self.clean_ansi(line)
-        if not clean:
-            return
+        if not clean: return
 
-        # ==========================================================
-        #  BANNER DETECTION — multiple markers
-        # ==========================================================
-        markers = (
-            'MAHIR TCP BOT DASHBOARD',
-            'MAHIR TCP BOT ONLINE',
-            'MAHIR BOT DASHBOARD',
-            'MAHIR BOT ONLINE',
-            'LOGIN SUCCESSFUL',
-            'MAHIR TCP BOT',
-        )
-        up = clean.upper()
-
-        if any(m in up for m in markers):
+        if 'MAHIR BOT ONLINE' in clean or 'MAHIR BOT' in clean.upper():
             self.banner_received = True
             d = self.parse_banner(clean)
             if d:
                 with self.lock:
-                    if d.get('status'):       self.bot_status      = d['status']
-                    if d.get('name'):         self.bot_name        = d['name']
-                    if d.get('uid'):          self.bot_uid         = d['uid']
-                    if d.get('region'):       self.bot_region      = d['region']
-                    if d.get('clan_id'):      self.bot_clan_id     = d['clan_id']
-                    if d.get('server'):       self.bot_server      = d['server']
-                    if d.get('chat_server'):  self.bot_chat_server = d['chat_server']
-                    if d.get('by'):           self.bot_by          = d['by']
+                    if 'status' in d: self.bot_status = d['status']
+                    if 'name' in d: self.bot_name = d['name']
+                    if 'uid' in d: self.bot_uid = d['uid']
+                    if 'region' in d: self.bot_region = d['region']
+                    if 'clan_id' in d: self.bot_clan_id = d['clan_id']
+                    if 'server' in d: self.bot_server = d['server']
+                    if 'chat_server' in d: self.bot_chat_server = d['chat_server']
+                    if 'by' in d: self.bot_by = d['by']
                     self.account_info_found = True
+            return
 
-        # Once banner is seen, try to parse any following line too
         if self.banner_received:
             d = self.parse_banner(clean)
             if d:
                 with self.lock:
-                    if d.get('status'):       self.bot_status      = d['status']
-                    if d.get('name') and self.bot_name in ('N/A', '', None):
-                        self.bot_name = d['name']
-                    if d.get('uid') and self.bot_uid in ('N/A', '', None):
-                        self.bot_uid = d['uid']
-                    if d.get('region'):       self.bot_region      = d['region']
-                    if d.get('clan_id'):      self.bot_clan_id     = d['clan_id']
-                    if d.get('server'):       self.bot_server      = d['server']
-                    if d.get('chat_server'):  self.bot_chat_server = d['chat_server']
-                    if d.get('by'):           self.bot_by          = d['by']
+                    if 'status' in d: self.bot_status = d['status']
+                    if 'name' in d and self.bot_name in ('N/A', '', None): self.bot_name = d['name']
+                    if 'uid' in d and self.bot_uid in ('N/A', '', None): self.bot_uid = d['uid']
+                    if 'region' in d: self.bot_region = d['region']
+                    if 'clan_id' in d: self.bot_clan_id = d['clan_id']
+                    if 'server' in d: self.bot_server = d['server']
+                    if 'chat_server' in d: self.bot_chat_server = d['chat_server']
+                    if 'by' in d: self.bot_by = d['by']
                     self.account_info_found = True
 
-        # ==========================================================
-        #  MESSAGE INFO block
-        # ==========================================================
         if 'MESSAGE INFO' in clean or '[ MESSAGE INFO ]' in clean:
-            self.collecting_message = True
-            self.message_started = True
-            self.message_stored = False
+            self.collecting_message = True; self.message_started = True; self.message_stored = False
             self.message_buffer = [clean]
-            self.temp_sender_uid = "N/A"
-            self.temp_nickname = "N/A"
-            self.temp_message = "N/A"
-            self.temp_guild_name = "N/A"
-            self.temp_pfp_url = "N/A"
+            self.temp_sender_uid = "N/A"; self.temp_nickname = "N/A"; self.temp_message = "N/A"
+            self.temp_guild_name = "N/A"; self.temp_pfp_url = "N/A"
             return
 
         if self.collecting_message and self.message_started:
@@ -947,31 +855,27 @@ class ProcessMonitor:
             parsed = self.parse_message_info(clean)
             if parsed:
                 t = parsed['type']
-                if t == 'sender_uid':    self.temp_sender_uid = parsed['value']
-                elif t == 'nickname':    self.temp_nickname   = parsed['value']
-                elif t == 'message':     self.temp_message    = parsed['value']
-                elif t == 'guild_name':  self.temp_guild_name = parsed['value']
-                elif t == 'pfp_url':     self.temp_pfp_url    = parsed['value']
-
+                if t == 'sender_uid': self.temp_sender_uid = parsed['value']
+                elif t == 'nickname': self.temp_nickname = parsed['value']
+                elif t == 'message': self.temp_message = parsed['value']
+                elif t == 'guild_name': self.temp_guild_name = parsed['value']
+                elif t == 'pfp_url': self.temp_pfp_url = parsed['value']
             if '╚' in clean and '╝' in clean:
-                self.collecting_message = False
-                self.message_started = False
+                self.collecting_message = False; self.message_started = False
                 if not self.message_stored and self.temp_sender_uid != 'N/A':
                     with self.lock:
                         self.last_sender_uid = self.temp_sender_uid
-                        self.last_nickname   = self.temp_nickname
-                        self.last_message    = self.temp_message
+                        self.last_nickname = self.temp_nickname
+                        self.last_message = self.temp_message
                         self.last_guild_name = self.temp_guild_name
-                        self.last_pfp_url    = self.temp_pfp_url
+                        self.last_pfp_url = self.temp_pfp_url
                         self.bot_status = "🟢 ACTIVE & ONLINE"
                         self.message_info_lines.append({
                             'timestamp': timestamp,
                             'data': {
-                                'sender_uid': self.temp_sender_uid,
-                                'nickname':   self.temp_nickname,
-                                'message':    self.temp_message,
-                                'guild_name': self.temp_guild_name,
-                                'pfp_url':    self.temp_pfp_url
+                                'sender_uid': self.temp_sender_uid, 'nickname': self.temp_nickname,
+                                'message': self.temp_message, 'guild_name': self.temp_guild_name,
+                                'pfp_url': self.temp_pfp_url
                             }
                         })
                         if len(self.message_info_lines) > self.max_message_lines:
@@ -980,7 +884,6 @@ class ProcessMonitor:
                 self.message_buffer = []
             return
 
-        # LOGIN SUCCESSFUL fallback
         if 'LOGIN SUCCESSFUL' in clean:
             with self.lock:
                 if self.bot_status == "🔴 OFFLINE":
@@ -1007,7 +910,6 @@ class ProcessMonitor:
 
         with self.lock:
             if self.process and self.process.poll() is None:
-                # Already running — ensure desired is running
                 self._save_desired_state('running')
                 return True
             if self.process:
@@ -1070,6 +972,7 @@ class ProcessMonitor:
                     print(f"⚠️ Bot process died immediately (exit={exit_code}) for user {self.user_id}")
                     self.is_running = False
                     self.bot_status = "🔴 CRASHED"
+                    # ❌ NO auto-restart on crash. Bot stays down until user clicks Start.
                     return False
 
                 return True
@@ -1112,7 +1015,7 @@ class ProcessMonitor:
         except: pass
 
     def stop_process(self, manual=True):
-        """Stop the bot. If manual=True (default), mark desired_state=stopped so watchdog will not restart it."""
+        """Stop the bot. If manual=True, mark desired_state=stopped."""
         with self.lock:
             if manual:
                 self._save_desired_state('stopped')
@@ -1120,7 +1023,7 @@ class ProcessMonitor:
             self._stop_process_internal()
 
     def restart_logic(self):
-        # Explicit restart → desired becomes running
+        # Explicit restart (user clicked Restart) → desired becomes running
         self._save_desired_state('running')
         self.last_restart_reason = 'MANUAL_RESTART'
         self.stop_process(manual=False)
@@ -1276,7 +1179,7 @@ def get_monitor(user_id, create_only=True):
     """
     Return existing ProcessMonitor for user_id, or create one WITHOUT starting the bot.
     Status / dashboard / login must NEVER start a bot as a side-effect.
-    Only explicit start / restart / force / watchdog (when desired_state=running) may start.
+    Only explicit start / restart / force / eligible startup may start.
     """
     with monitors_lock:
         if user_id in monitors:
@@ -1296,7 +1199,6 @@ def get_monitor(user_id, create_only=True):
     monitor = ProcessMonitor(user_id, bot_file)
     with monitors_lock:
         if user_id in monitors:
-            # Another thread won the race — discard the one we just created
             try:
                 monitor.auto_restart_running = False
                 monitor.watchdog_running = False
@@ -1304,154 +1206,71 @@ def get_monitor(user_id, create_only=True):
                 pass
             return monitors[user_id]
         monitors[user_id] = monitor
-    # IMPORTANT: do NOT call start_process() here.
-    # Bot start is only allowed via explicit control or eligible watchdog recovery.
     return monitor
 
 
 def startup_launch_all_bots():
     """
-    Startup এ সব valid bot launch করে এবং monitors dict এ রাখে।
-    এরপর প্রতি ১৫ সেকেন্ডে watchdog চেক করে — কেউ মরে গেলে auto restart।
+    ✅ Startup-এ শুধু একবার bots launch হবে।
+    ❌ কোনো continuous watchdog loop নেই — কেউ crash হলে auto-restart হবে না।
+    ✅ Manual Stop করা bots কখনো launch হবে না (desired_state='stopped' respect করে)।
+    ✅ Expired bots launch হবে না — শুধু expired মার্ক হবে, file delete হবে না।
+    ❌ Bot file কখনো reset/replace হবে না।
     """
-    def _launch_once():
-        try:
-            print("\n🚀 Startup: Launching all valid bots...")
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('''SELECT id, bot_file FROM users 
-                         WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
-                         AND is_admin=0 AND is_agent=0''')
-            rows = c.fetchall()
-            conn.close()
-            count = 0
-            for user_id, bot_file in rows:
-                sub = check_subscription_status(user_id)
-                if sub['status'] == 'expired':
-                    expire_user_bot(user_id)
+    try:
+        print("\n🚀 Startup: Launching all valid bots (ONE TIME only)...")
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''SELECT id, bot_file FROM users 
+                     WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
+                     AND is_admin=0 AND is_agent=0''')
+        rows = c.fetchall()
+        conn.close()
+        count = 0
+        for user_id, bot_file in rows:
+            sub = check_subscription_status(user_id)
+            if sub['status'] == 'expired':
+                # ✅ শুধু expired mark — file delete নয়
+                expire_user_bot(user_id)
+                continue
+            # Respect desired_bot_state — do not auto-start bots that were manually stopped
+            try:
+                conn_ds = sqlite3.connect(DB_FILE)
+                cds = conn_ds.cursor()
+                cds.execute('SELECT desired_bot_state, bot_disabled_by_admin, bot_force_active FROM users WHERE id=?', (user_id,))
+                dsrow = cds.fetchone()
+                conn_ds.close()
+                desired = (dsrow[0] if dsrow and dsrow[0] else 'running')
+                if desired != 'running':
                     continue
-                # Respect desired_bot_state — do not auto-start bots that were manually stopped
-                try:
-                    conn_ds = sqlite3.connect(DB_FILE)
-                    cds = conn_ds.cursor()
-                    cds.execute('SELECT desired_bot_state, bot_disabled_by_admin, bot_force_active FROM users WHERE id=?', (user_id,))
-                    dsrow = cds.fetchone()
-                    conn_ds.close()
-                    desired = (dsrow[0] if dsrow and dsrow[0] else 'running')
-                    if desired != 'running':
+                if dsrow and dsrow[1]:  # admin disabled
+                    continue
+                if get_global_stop() and not (dsrow and dsrow[2]):
+                    continue
+            except Exception:
+                pass
+            path = os.path.join(USER_BOTS_DIR, bot_file)
+            if not os.path.exists(path):
+                continue
+            with monitors_lock:
+                if user_id in monitors:
+                    existing = monitors[user_id]
+                    if existing.is_running and existing.process and existing.process.poll() is None:
                         continue
-                    if dsrow and dsrow[1]:  # admin disabled
-                        continue
-                    if get_global_stop() and not (dsrow and dsrow[2]):
-                        continue
-                except Exception:
-                    pass
-                path = os.path.join(USER_BOTS_DIR, bot_file)
-                if not os.path.exists(path):
-                    continue
-                with monitors_lock:
-                    if user_id in monitors:
-                        existing = monitors[user_id]
-                        if existing.is_running and existing.process and existing.process.poll() is None:
-                            continue
-                m = ProcessMonitor(user_id, path)
-                with monitors_lock:
-                    monitors[user_id] = m
-                m.last_restart_reason = 'SERVER_STARTUP'
-                m.start_process()
-                count += 1
-                print(f"  ✅ Bot launched (SERVER_STARTUP): user_id={user_id} ({bot_file})")
-            print(f"🚀 Startup complete: {count} bots launched\n")
-            return count
-        except Exception as e:
-            print(f"Startup error: {e}")
-            return 0
-
-    # ─── Initial launch ───
-    _launch_once()
-
-    # ─── Continuous watchdog (প্রতি 15 সেকেন্ড) ───
-    # Only recovers crashed bots whose desired_state is still 'running'.
-    # NEVER restarts a manually stopped bot.
-    while True:
-        try:
-            time.sleep(15)
-
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('''SELECT id, bot_file, desired_bot_state, bot_disabled_by_admin, bot_force_active
-                         FROM users 
-                         WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
-                         AND is_admin=0 AND is_agent=0''')
-            rows = c.fetchall()
-            conn.close()
-
-            for row in rows:
-                user_id, bot_file, desired_state, disabled, force_active = row
-                desired_state = desired_state or 'running'
-
-                # Manual stop must be respected
-                if desired_state != 'running':
-                    continue
-
-                # Subscription expired check
-                sub = check_subscription_status(user_id)
-                if sub['status'] == 'expired':
-                    continue
-
-                # Admin disabled
-                if disabled:
-                    continue
-
-                # Global stop (unless force_active)
-                if get_global_stop() and not force_active:
-                    continue
-
-                path = os.path.join(USER_BOTS_DIR, bot_file)
-                if not os.path.exists(path):
-                    continue
-
-                # Process alive check
-                need_start = False
-                with monitors_lock:
-                    if user_id not in monitors:
-                        need_start = True
-                    else:
-                        m = monitors[user_id]
-                        if not m.is_running or not m.process or m.process.poll() is not None:
-                            need_start = True
-
-                if need_start:
-                    try:
-                        # Clean old monitor if any
-                        with monitors_lock:
-                            if user_id in monitors:
-                                old = monitors[user_id]
-                                try:
-                                    old.watchdog_running = False
-                                    old.auto_restart_running = False
-                                except Exception:
-                                    pass
-                                try:
-                                    del monitors[user_id]
-                                except Exception:
-                                    pass
-
-                        m_new = ProcessMonitor(user_id, path)
-                        with monitors_lock:
-                            monitors[user_id] = m_new
-                        m_new.last_restart_reason = 'WATCHDOG_RECOVERY'
-                        ok = m_new.start_process()
-                        if ok:
-                            print(f"🔄 Auto-relaunch (WATCHDOG_RECOVERY): user {user_id} ({bot_file})")
-                        else:
-                            print(f"⚠️ Watchdog: user {user_id} start_process returned False")
-                    except Exception as e:
-                        print(f"Watchdog relaunch error for {user_id}: {e}")
-
-        except Exception as e:
-            print(f"Watchdog loop error: {e}")
-            time.sleep(5)
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            m.last_restart_reason = 'SERVER_STARTUP'
+            m.start_process()
+            count += 1
+            print(f"  ✅ Bot launched (SERVER_STARTUP): user_id={user_id} ({bot_file})")
+        print(f"🚀 Startup complete: {count} bots launched\n")
+        return count
+    except Exception as e:
+        print(f"Startup error: {e}")
+        return 0
+    # ❌ NO continuous watchdog loop here anymore.
+    # Crashed bots stay down until user clicks Start or owner clicks Force Start.
 
 
 # ============================================================
@@ -2250,14 +2069,14 @@ AGENT_CUSTOMER_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta char
 
 
 # ============================================================
-#  OWNER DASHBOARD (with grouped keys/users/history view)
+#  OWNER DASHBOARD
 # ============================================================
 OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Owner Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 <div class="container">
   <div class="card header">
     <h1><i class="fas fa-crown"></i> Owner Dashboard</h1>
     <div class="flex">
-      <form method="POST" action="/owner/reset_all_bots" onsubmit="return confirm('Reset all bots?');" style="display:inline;"><button type="submit" class="btn btn-reset btn-sm"><i class="fas fa-power-off"></i> Reset All</button></form>
+      <form method="POST" action="/owner/reset_all_bots" onsubmit="return confirm('Reset all bots? (Bot files will NOT be touched)');" style="display:inline;"><button type="submit" class="btn btn-reset btn-sm"><i class="fas fa-power-off"></i> Reset All</button></form>
       {% if global_stop %}
         <form method="POST" action="/owner/start_all_bots" style="display:inline;"><button type="submit" class="btn btn-success btn-sm"><i class="fas fa-play"></i> Resume All</button></form>
       {% else %}
@@ -2328,17 +2147,17 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
       <a href="/owner/files" class="btn btn-gold"><i class="fas fa-folder"></i> File Manager</a>
     </div>
     <div style="margin-top:14px;">
-      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload mahir.py</div>
+      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload mahir.py (only used as template for FUTURE bots)</div>
       <form method="POST" action="/owner/upload_mahir" enctype="multipart/form-data" class="upload-form" id="uploadMahirForm">
         <input type="file" name="mahir_file" accept=".py" required style="flex:1;min-width:200px;" id="mahirFileInput"/>
-        <button type="submit" class="btn btn-warning btn-sm" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload & Auto-Reset</button>
+        <button type="submit" class="btn btn-warning btn-sm" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload mahir.py</button>
       </form>
     </div>
     <div style="margin-top:14px;">
-      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload users.db (auto-create bots)</div>
+      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload users.db (existing bot files are NOT overwritten)</div>
       <form method="POST" action="/owner/upload_users_db" enctype="multipart/form-data" class="upload-form" id="uploadDbForm">
         <input type="file" name="db_file" accept=".db" required style="flex:1;min-width:200px;"/>
-        <button type="submit" class="btn btn-warning btn-sm" id="uploadDbBtn" onclick="return confirm('Replace DB and recreate all bots?');"><i class="fas fa-upload"></i> Upload DB</button>
+        <button type="submit" class="btn btn-warning btn-sm" id="uploadDbBtn" onclick="return confirm('Replace DB? Existing bot files will NOT be touched.');"><i class="fas fa-upload"></i> Upload DB</button>
       </form>
     </div>
     {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
@@ -2390,11 +2209,10 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     </form>
   </div>
 
-  <!-- ============ GROUPED KEYS VIEW (Owner & Agents) ============ -->
   <div class="card">
     <div class="card-title"><i class="fas fa-layer-group" style="color:var(--purple);"></i> All Groups (Owner + Agents) — Click to view keys</div>
     <p style="color:var(--muted);font-size:.82rem;margin-bottom:14px;">
-      <i class="fas fa-info-circle"></i> প্রতিটি group-এ ক্লিক করুন → সেখানে সব keys দেখাবে, কয়টা used কয়টা unused, কতবার renew হয়েছে। Key-তে ক্লিক করলে বিস্তারিত renewal history দেখা যাবে।
+      <i class="fas fa-info-circle"></i> প্রতিটি group-এ ক্লিক করুন → সেখানে সব keys দেখাবে, কয়টা used কয়টা unused, কতবার renew হয়েছে।
     </p>
 
     {% for group in grouped_keys %}
@@ -2421,11 +2239,10 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     {% endfor %}
   </div>
 
-  <!-- ============ GROUPED USERS VIEW ============ -->
   <div class="card">
     <div class="card-title"><i class="fas fa-users"></i> Registered Users (Grouped)</div>
     <p style="color:var(--muted);font-size:.82rem;margin-bottom:14px;">
-      <i class="fas fa-info-circle"></i> Owner + প্রতিটি agent-এর under-এ যারা register হয়েছে। Group-এ ক্লিক করুন user list দেখতে।
+      <i class="fas fa-info-circle"></i> Owner + প্রতিটি agent-এর under-এ যারা register হয়েছে।
     </p>
 
     {% for group in grouped_users %}
@@ -2452,7 +2269,6 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
     {% endfor %}
   </div>
 
-  <!-- ============ GROUPED SUBSCRIPTION HISTORY ============ -->
   <div class="card">
     <div class="card-title"><i class="fas fa-history" style="color:var(--purple);"></i> Subscription History (Grouped)</div>
     <p style="color:var(--muted);font-size:.82rem;margin-bottom:14px;">
@@ -2484,84 +2300,10 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
   <a href="/logout" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
 </div>
 
-<div class="modal-overlay" id="disableModal">
-  <div class="modal-box" style="max-width:500px;">
-    <button class="modal-close" onclick="closeDisableModal()">&times;</button>
-    <div class="modal-title"><i class="fas fa-hand-paper" style="color:var(--red2);"></i> Disable User Bot</div>
-    <p style="color:var(--muted);font-size:.85rem;margin-bottom:12px;">User: <strong id="disableUserName" style="color:var(--gold2);"></strong></p>
-    <form method="POST" id="disableForm">
-      <div class="modal-section">
-        <h3><i class="fas fa-comment"></i> Reason (User দেখতে পাবে)</h3>
-        <textarea name="reason" rows="4">Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।</textarea>
-      </div>
-      <div style="text-align:right;display:flex;gap:8px;justify-content:flex-end;">
-        <button type="button" onclick="closeDisableModal()" class="modal-btn modal-btn-cancel">Cancel</button>
-        <button type="submit" class="modal-btn modal-btn-danger"><i class="fas fa-hand-paper"></i> Disable Bot</button>
-      </div>
-    </form>
-  </div>
-</div>
-
-<div class="modal-overlay" id="noticeModal">
-  <div class="modal-box" style="max-width:560px;">
-    <button class="modal-close" onclick="closeNoticeModal()">&times;</button>
-    <div class="modal-title"><i class="fas fa-bullhorn" style="color:var(--gold);"></i> Send Personal Notice</div>
-    <p style="color:var(--muted);font-size:.85rem;margin-bottom:12px;">
-      User: <strong id="noticeUserName" style="color:var(--gold2);"></strong>
-      <br><small style="color:var(--red2);">⚠️ Personal notice, Global notice কে override করবে।</small>
-    </p>
-    <form method="POST" id="noticeForm">
-      <div class="modal-section">
-        <h3><i class="fas fa-comment-dots"></i> Notice Text</h3>
-        <textarea name="personal_notice" id="noticeText" rows="6" placeholder="Type notice here..."></textarea>
-      </div>
-      <div class="modal-section" style="display:flex;align-items:center;gap:12px;">
-        <label style="color:var(--gold2);font-weight:600;cursor:pointer;">
-          <input type="checkbox" name="enabled" id="noticeEnabled" value="1" style="width:auto;margin-right:8px;"/>
-          Enable this notice for this user
-        </label>
-      </div>
-      <div style="text-align:right;display:flex;gap:8px;justify-content:flex-end;">
-        <button type="button" onclick="closeNoticeModal()" class="modal-btn modal-btn-cancel">Cancel</button>
-        <button type="submit" class="modal-btn modal-btn-save"><i class="fas fa-paper-plane"></i> Save Notice</button>
-      </div>
-    </form>
-  </div>
-</div>
-
 <script>
-function openDisableModal(uid, uname){
-  document.getElementById('disableUserName').textContent = uname;
-  document.getElementById('disableForm').action = '/owner/disable_user/' + uid;
-  document.getElementById('disableModal').classList.add('active');
-}
-function closeDisableModal(){document.getElementById('disableModal').classList.remove('active');}
-document.getElementById('disableModal').addEventListener('click', function(e){if(e.target===this)closeDisableModal();});
-
-function openNoticeModal(uid, uname, currentNotice, enabled){
-  document.getElementById('noticeUserName').textContent = uname;
-  document.getElementById('noticeText').value = currentNotice || '';
-  document.getElementById('noticeEnabled').checked = !!enabled;
-  document.getElementById('noticeForm').action = '/owner/set_user_notice/' + uid;
-  document.getElementById('noticeModal').classList.add('active');
-}
-function closeNoticeModal(){document.getElementById('noticeModal').classList.remove('active');}
-document.getElementById('noticeModal').addEventListener('click', function(e){if(e.target===this)closeNoticeModal();});
-
 document.getElementById('uploadMahirForm').addEventListener('submit',function(e){var f=document.getElementById('mahirFileInput').files[0];if(f && f.name.toLowerCase()!=='mahir.py'){e.preventDefault();alert('❌ Only "mahir.py"!');return false;}var b=document.getElementById('uploadMahirBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Uploading...';});
 document.getElementById('uploadDbForm').addEventListener('submit',function(){var b=document.getElementById('uploadDbBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});
 document.getElementById('createAgentForm').addEventListener('submit',function(){var b=document.getElementById('createAgentBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Creating...';});
-
-document.querySelectorAll('.notice-trigger').forEach(function(btn){
-  btn.addEventListener('click', function(){
-    openNoticeModal(
-      this.dataset.uid,
-      this.dataset.uname,
-      this.dataset.notice,
-      this.dataset.enabled === '1'
-    );
-  });
-});
 </script>
 </body></html>'''
 
@@ -2648,7 +2390,7 @@ OWNER_GROUP_KEYS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="U
 </div></body></html>'''
 
 
-OWNER_KEY_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Key Details - {{ key.key[:20] }}...</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+OWNER_KEY_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Key Details</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
 <div class="container">
   <div class="card header">
     <h1><i class="fas fa-key"></i> Key Details</h1>
@@ -3065,7 +2807,7 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
       {% if user.bot_disabled_by_admin %}
       <form method="POST" action="/owner/toggle_user_bot/{{ user.id }}"><button type="submit" class="btn btn-success"><i class="fas fa-play"></i> Enable Bot</button></form>
       {% else %}
-      <button type="button" class="btn btn-warning" onclick="document.getElementById('disableModalDetails').classList.add('active')"><i class="fas fa-hand-paper"></i> Disable Bot</button>
+      <form method="POST" action="/owner/disable_user/{{ user.id }}"><button type="submit" class="btn btn-warning" onclick="return confirm('Disable this bot?');"><i class="fas fa-hand-paper"></i> Disable Bot</button></form>
       {% endif %}
       <form method="POST" action="/owner/force_start_bot/{{ user.id }}"><button type="submit" class="btn btn-gold"><i class="fas fa-bolt"></i> Force Start (Global Stop Override)</button></form>
       {% if user.sub_status == 'expired' or not user.bot_file %}
@@ -3087,20 +2829,6 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
   {% endif %}
 
   <a href="/owner/dashboard" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
-</div>
-
-<div class="modal-overlay" id="disableModalDetails">
-  <div class="modal-box" style="max-width:500px;">
-    <button class="modal-close" onclick="document.getElementById('disableModalDetails').classList.remove('active')">&times;</button>
-    <div class="modal-title"><i class="fas fa-hand-paper" style="color:var(--red2);"></i> Disable Bot</div>
-    <form method="POST" action="/owner/disable_user/{{ user.id }}">
-      <textarea name="reason" rows="4">Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।</textarea>
-      <div style="margin-top:14px;text-align:right;display:flex;gap:8px;justify-content:flex-end;">
-        <button type="button" onclick="document.getElementById('disableModalDetails').classList.remove('active')" class="btn btn-clear btn-sm">Cancel</button>
-        <button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-hand-paper"></i> Disable</button>
-      </div>
-    </form>
-  </div>
 </div>
 
 <script>
@@ -3622,25 +3350,9 @@ def index():
 @app.errorhandler(500)
 @app.errorhandler(sqlite3.OperationalError)
 def handle_db_error(e):
-    """
-    SQLite lock / transient errors must NOT log the user out.
-    Previously this redirected everyone to /login → owner panel randomly kicked out.
-    """
     try:
         init_db(); migrate_db()
-    except Exception:
-        pass
-    print(f"[ERROR HANDLER] {type(e).__name__}: {e}")
-    # Keep the current session — send the user back to a safe place for their role
-    if session.get('owner_mode') or session.get('is_admin'):
-        flash('Temporary server issue — please try again.', 'error')
-        return redirect(url_for('owner_dashboard'))
-    if session.get('is_agent'):
-        flash('Temporary server issue — please try again.', 'error')
-        return redirect(url_for('agent_dashboard'))
-    if session.get('user_id'):
-        flash('Temporary server issue — please try again.', 'error')
-        return redirect(url_for('user_dashboard'))
+    except: pass
     return redirect(url_for('login'))
 
 
@@ -3655,7 +3367,6 @@ def login():
         user = c.fetchone()
         conn.close()
         if user and check_password(user[2], password):
-            session.permanent = True
             session['user_id'] = user[0]; session['username'] = user[1]
             session['is_admin'] = bool(user[3]); session['is_agent'] = bool(user[4])
             if session['is_admin']: return redirect(url_for('owner_dashboard'))
@@ -3745,7 +3456,6 @@ def agent_login():
         user = c.fetchone()
         conn.close()
         if user and user[3] == 1 and check_password(user[2], password):
-            session.permanent = True
             session['user_id'] = user[0]; session['username'] = user[1]
             session['is_agent'] = True; session['is_admin'] = False
             return redirect(url_for('agent_dashboard'))
@@ -4017,16 +3727,9 @@ def agent_download_db():
 
 # ========== OWNER ROUTES ==========
 def _build_grouped_data():
-    """
-    Build grouped view data for owner dashboard:
-    - grouped_keys: owner + each agent with key counts
-    - grouped_users: owner + each agent with user counts
-    - grouped_history: owner + each agent with history counts
-    """
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
-    # Collect agents
     c.execute('SELECT id, username FROM users WHERE is_agent=1 ORDER BY username')
     agents = c.fetchall()
 
@@ -4034,14 +3737,11 @@ def _build_grouped_data():
     groups_users = []
     groups_history = []
 
-    # ---- OWNER group ----
     owner_slug = '__owner__'
-    # Owner keys
     c.execute("SELECT COUNT(*), SUM(CASE WHEN is_used=1 THEN 1 ELSE 0 END) FROM keys WHERE created_by IN ('OWNER','MAHIR TCP','admin','system')")
     r = c.fetchone()
     owner_total_keys = r[0] or 0
     owner_used_keys = r[1] or 0
-    # Renewed users under owner keys
     c.execute("""SELECT COUNT(DISTINCT sh.user_id) FROM subscription_history sh
                  INNER JOIN keys k ON k.key = (SELECT registration_key FROM users WHERE id = sh.user_id)
                  WHERE k.created_by IN ('OWNER','MAHIR TCP','admin','system')""")
@@ -4054,7 +3754,6 @@ def _build_grouped_data():
         'renewed_users': owner_renewed
     })
 
-    # Owner users
     c.execute("""SELECT COUNT(*) FROM users 
                  WHERE is_admin=0 AND is_agent=0 
                  AND (created_by_agent IS NULL OR created_by_agent='' OR created_by_agent IN ('Owner','OWNER','admin','system','MAHIR TCP'))""")
@@ -4076,7 +3775,6 @@ def _build_grouped_data():
         'expired_users': expired_owner, 'renewed_users': renewed_owner
     })
 
-    # Owner history (extended_by_role=owner)
     c.execute("""SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history 
                  WHERE extended_by_role='owner' OR extended_by IN ('OWNER','MAHIR TCP','admin','system')""")
     r = c.fetchone()
@@ -4085,15 +3783,12 @@ def _build_grouped_data():
         'total_entries': r[0] or 0, 'total_days': r[1] or 0
     })
 
-    # ---- AGENT groups ----
     for aid, aname in agents:
         slug = aname
-        # Keys
         c.execute('SELECT COUNT(*), SUM(CASE WHEN is_used=1 THEN 1 ELSE 0 END) FROM keys WHERE created_by=?', (aname,))
         r = c.fetchone()
         total_keys = r[0] or 0
         used_keys = r[1] or 0
-        # Renewed users under this agent
         c.execute('SELECT COUNT(DISTINCT user_id) FROM subscription_history WHERE extended_by=?', (aname,))
         renewed = c.fetchone()[0] or 0
         groups_keys.append({
@@ -4102,7 +3797,6 @@ def _build_grouped_data():
             'unused_keys': total_keys - used_keys, 'renewed_users': renewed
         })
 
-        # Users
         c.execute('SELECT COUNT(*) FROM users WHERE created_by_agent=? AND is_admin=0 AND is_agent=0', (aname,))
         total_users = c.fetchone()[0] or 0
         c.execute('SELECT id FROM users WHERE created_by_agent=? AND is_admin=0 AND is_agent=0', (aname,))
@@ -4120,7 +3814,6 @@ def _build_grouped_data():
             'expired_users': expired, 'renewed_users': renewed_users
         })
 
-        # History
         c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE extended_by=?', (aname,))
         r = c.fetchone()
         groups_history.append({
@@ -4139,7 +3832,6 @@ def owner_login():
         password = request.form['password']
         if username == OWNER_USERNAME and password == OWNER_PASSWORD:
             session.clear()
-            session.permanent = True  # long-lived session (30 days)
             session['user_id'] = 0
             session['username'] = 'OWNER'
             session['is_admin'] = True
@@ -4169,13 +3861,10 @@ def owner_login_as(user_id):
     if not u:
         flash('User not found', 'error')
         return redirect(url_for('owner_dashboard'))
-    # Keep owner_mode + permanent so "Return to Owner" always works and session does not expire
-    session.permanent = True
     session['user_id'] = u[0]
     session['username'] = u[1]
     session['is_admin'] = bool(u[2])
     session['is_agent'] = bool(u[3])
-    # owner_mode stays True
     if session['is_admin']:
         return redirect(url_for('owner_dashboard'))
     elif session['is_agent']:
@@ -4188,7 +3877,6 @@ def owner_login_as(user_id):
 def owner_return():
     if not session.get('owner_mode'):
         return redirect(url_for('login'))
-    session.permanent = True
     session['user_id'] = 0
     session['username'] = 'OWNER'
     session['is_admin'] = True
@@ -4544,7 +4232,7 @@ def owner_force_start_bot(user_id):
         return redirect(url_for('owner_login'))
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('UPDATE users SET bot_force_active=1, bot_disabled_by_admin=0 WHERE id=?', (user_id,))
+    c.execute('UPDATE users SET bot_force_active=1, bot_disabled_by_admin=0, desired_bot_state="running" WHERE id=?', (user_id,))
     conn.commit()
     c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
@@ -4612,16 +4300,8 @@ def owner_toggle_user_bot(user_id):
                     except: pass
             flash('🛑 User bot DISABLED.', 'success')
         else:
-            flash('✅ User bot ENABLED.', 'success')
-            c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
-            r2 = c.fetchone()
-            if r2 and r2[0]:
-                path = os.path.join(USER_BOTS_DIR, r2[0])
-                if os.path.exists(path):
-                    m = ProcessMonitor(user_id, path)
-                    with monitors_lock:
-                        monitors[user_id] = m
-                    m.start_process()
+            flash('✅ User bot ENABLED. Click "Force Start" to run.', 'success')
+            # ❌ Auto-start REMOVED — owner must explicitly click Force Start
     conn.close()
     return redirect(request.referrer or url_for('owner_dashboard'))
 
@@ -4658,11 +4338,16 @@ def owner_recreate_bot(user_id):
         c.execute('UPDATE users SET bot_file=?, bot_status="configured", bot_disabled_by_admin=0, subscription_expiry=? WHERE id=?',
                   (bot_filename, new_expiry, user_id))
         conn.commit(); conn.close()
-        m = ProcessMonitor(user_id, bot_file_path)
+        # ❌ Auto-start REMOVED — owner must click "Force Start" or user must click "Start".
         with monitors_lock:
-            monitors[user_id] = m
-        m.start_process()
-        flash('✅ Bot recreated with 30-day subscription!', 'success')
+            if user_id in monitors:
+                try:
+                    monitors[user_id].watchdog_running = False
+                    monitors[user_id].stop_process()
+                except: pass
+                try: del monitors[user_id]
+                except: pass
+        flash('✅ Bot file recreated with 30-day subscription! Click "Force Start" to run.', 'success')
     except Exception as e:
         flash(f'❌ {e}', 'error')
     return redirect(url_for('owner_user_details', user_id=user_id))
@@ -4719,9 +4404,6 @@ def owner_delete_agent(agent_id):
 
 @app.route('/owner/delete_key/<int:key_id>', methods=['POST'])
 def owner_delete_key(key_id):
-    """
-    Delete a key AND its associated subscription history.
-    """
     if not session.get('is_admin'):
         return redirect(url_for('owner_login'))
     conn = sqlite3.connect(DB_FILE)
@@ -4734,11 +4416,9 @@ def owner_delete_key(key_id):
         return redirect(url_for('owner_dashboard'))
     key_val, used_by = kr
 
-    # Find users linked via this key (registration_key)
     c.execute('SELECT id, bot_file FROM users WHERE registration_key=?', (key_val,))
     linked_users = c.fetchall()
 
-    # Collect user IDs for subscription_history deletion
     user_ids_to_delete_history = [u[0] for u in linked_users]
     if used_by:
         c.execute('SELECT id FROM users WHERE username=?', (used_by,))
@@ -4746,7 +4426,6 @@ def owner_delete_key(key_id):
         if ur and ur[0] not in user_ids_to_delete_history:
             user_ids_to_delete_history.append(ur[0])
 
-    # Stop and remove bot files for linked users
     for uid, bf in linked_users:
         with monitors_lock:
             if uid in monitors:
@@ -4763,15 +4442,12 @@ def owner_delete_key(key_id):
                     try: os.remove(fp)
                     except: pass
 
-    # Delete users linked via this key
     for uid, _ in linked_users:
         c.execute('DELETE FROM users WHERE id=?', (uid,))
 
-    # Delete subscription history for all affected users
     for uid in user_ids_to_delete_history:
         c.execute('DELETE FROM subscription_history WHERE user_id=?', (uid,))
 
-    # Finally delete the key itself
     c.execute('DELETE FROM keys WHERE id=?', (key_id,))
 
     conn.commit(); conn.close()
@@ -4951,50 +4627,75 @@ def _renew_subscription(user_id, redirect_endpoint):
 
 
 def reset_all_bots():
+    """
+    ✅ NEVER touches / resets / replaces bot files.
+    শুধু monitor restart করে — যেসব user এর desired_state='running'।
+    Manual Stop করা bot কখনো restart হবে না।
+    Expired bot skip হবে (কোনো file delete নয়)।
+    """
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''SELECT id, admin_uid, bot_uid, bot_pw, bot_file 
-                 FROM users WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL''')
+    c.execute('''SELECT id, bot_file FROM users 
+                 WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
+                 AND is_admin=0 AND is_agent=0''')
     users = c.fetchall()
     conn.close()
+
+    # Stop & clear old monitors
     with monitors_lock:
         for uid, m in list(monitors.items()):
             try:
                 m.watchdog_running = False
+                m.auto_restart_running = False
                 m.stop_process()
             except: pass
         monitors.clear()
+
     success = 0; fail = 0; skipped = 0
-    for user_id, admin_uid, bot_uid, bot_pw, bot_file in users:
-        if not bot_file: continue
+    for user_id, bot_file in users:
+        if not bot_file:
+            continue
+
+        # Expired → skip (do NOT delete file, do NOT modify anything)
         sub = check_subscription_status(user_id)
         if sub['status'] == 'expired':
-            path = os.path.join(USER_BOTS_DIR, bot_file)
-            if os.path.exists(path):
-                try: os.remove(path)
-                except: pass
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('UPDATE users SET bot_file=NULL, bot_status="expired" WHERE id=?', (user_id,))
-            conn.commit(); conn.close()
             skipped += 1
             continue
-        path = os.path.join(USER_BOTS_DIR, bot_file)
+
+        # Respect desired_state + admin disable
         try:
-            if os.path.exists(MAHIR_SOURCE):
-                shutil.copy2(MAHIR_SOURCE, path)
-            admin_list = parse_admin_uids(admin_uid)
-            ok, _ = inject_credentials_into_bot_file(path, bot_uid, bot_pw, admin_list)
-            if not ok: fail += 1; continue
+            conn_ds = sqlite3.connect(DB_FILE)
+            cds = conn_ds.cursor()
+            cds.execute('SELECT desired_bot_state, bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
+            ds = cds.fetchone()
+            conn_ds.close()
+            desired = (ds[0] if ds and ds[0] else 'running')
+            disabled = ds[1] if ds else 0
+            if desired != 'running' or disabled:
+                skipped += 1
+                continue
+        except Exception:
+            pass
+
+        path = os.path.join(USER_BOTS_DIR, bot_file)
+        if not os.path.exists(path):
+            fail += 1
+            continue
+
+        try:
             m = ProcessMonitor(user_id, path)
             with monitors_lock:
                 monitors[user_id] = m
-            m.start_process()
-            success += 1
+            m.last_restart_reason = 'RESET_ALL'
+            if m.start_process():
+                success += 1
+            else:
+                fail += 1
         except Exception as e:
             print(f"Reset {user_id}: {e}")
             fail += 1
-    print(f"Reset summary: {success} OK, {skipped} expired, {fail} failed")
+
+    print(f"Reset summary: {success} OK, {skipped} skipped, {fail} failed")
     return success, fail
 
 
@@ -5076,36 +4777,36 @@ def configure_bot():
     if not session.get('user_id'):
         flash('Login required', 'error')
         return redirect(url_for('login'))
-    
+
     user_id = session['user_id']
     sub = check_subscription_status(user_id)
     if sub['status'] == 'expired':
         flash('❌ মেয়াদ শেষ!', 'error')
         return redirect(url_for('user_dashboard'))
-    
+
     admin_uid = request.form['admin_uid'].strip()
     bot_uid = request.form['bot_uid'].strip()
     bot_pw = request.form['bot_pw'].strip()
     username = session['username']
-    
+
     if not all([admin_uid, bot_uid, bot_pw]):
         flash('All fields required', 'error')
         return redirect(url_for('user_dashboard'))
-    
+
     safe_name = sanitize_filename(username)
     bot_filename = f"{safe_name}_mahir.py"
     bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
-    
+
     if not os.path.exists(MAHIR_SOURCE):
         with open(MAHIR_SOURCE, 'w') as f:
             f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
-    
+
     try:
         shutil.copy2(MAHIR_SOURCE, bot_file_path)
     except Exception as e:
         flash(f'❌ File copy failed: {e}', 'error')
         return redirect(url_for('user_dashboard'))
-    
+
     admin_uids_list = parse_admin_uids(admin_uid)
     ok, msg = inject_credentials_into_bot_file(
         bot_file_path, bot_uid, bot_pw, admin_uids_list
@@ -5115,26 +4816,26 @@ def configure_bot():
         except: pass
         flash(f'❌ Credential injection failed: {msg}', 'error')
         return redirect(url_for('user_dashboard'))
-    
+
     try:
         with open(bot_file_path, 'r', encoding='utf-8') as f:
             verify_content = f.read()
-        
+
         cred_match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", verify_content)
         if not cred_match or cred_match.group(1) != bot_uid or cred_match.group(2) != bot_pw:
             flash('❌ Credential verification failed — file এ UID/PW সঠিকভাবে বসেনি!', 'error')
             return redirect(url_for('user_dashboard'))
-        
+
         admin_match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]*)\]", verify_content)
         if not admin_match:
             flash('❌ ADMIN_UIDS line missing in file!', 'error')
             return redirect(url_for('user_dashboard'))
-        
+
         print(f"✅ File verified: {bot_filename} | UID={bot_uid} | Admins={admin_uids_list}")
     except Exception as e:
         flash(f'❌ Verify error: {e}', 'error')
         return redirect(url_for('user_dashboard'))
-    
+
     with monitors_lock:
         if user_id in monitors:
             try:
@@ -5145,25 +4846,25 @@ def configure_bot():
                 print(f"Old monitor stop error: {e}")
             try: del monitors[user_id]
             except: pass
-    
+
     admin_uid_db = ', '.join(admin_uids_list)
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, 
-                 bot_file=?, bot_status='configured', bot_disabled_by_admin=0 
+                 bot_file=?, bot_status='configured', bot_disabled_by_admin=0, desired_bot_state='running' 
                  WHERE id=?''', (admin_uid_db, bot_uid, bot_pw, bot_filename, user_id))
     conn.commit(); conn.close()
-    
+
     m = ProcessMonitor(user_id, bot_file_path)
     with monitors_lock:
         monitors[user_id] = m
-    
+
     started = m.start_process()
-    
+
     if not started:
         flash('⚠️ File তৈরি হয়েছে কিন্তু bot start হয়নি (expired/admin-disabled/global-stop)', 'error')
         return redirect(url_for('user_dashboard'))
-    
+
     time.sleep(2)
     if m.process and m.process.poll() is None:
         flash(f'✅ Bot deployed & running! PID: {m.process.pid}', 'success')
@@ -5172,7 +4873,7 @@ def configure_bot():
         exit_code = m.process.returncode if m.process else '?'
         flash(f'⚠️ Bot start হয়েছে কিন্তু সাথে সাথে বন্ধ হয়ে গেছে (exit code: {exit_code})। Log দেখুন।', 'error')
         print(f"⚠️ Bot died immediately for user {user_id}, exit={exit_code}")
-    
+
     def bg_bio():
         time.sleep(3)
         try:
@@ -5180,7 +4881,7 @@ def configure_bot():
         except Exception as e:
             print(f"[BIO] {e}")
     threading.Thread(target=bg_bio, daemon=True).start()
-    
+
     return redirect(url_for('user_dashboard'))
 
 
@@ -5315,8 +5016,9 @@ def owner_upload_mahir():
         flash(f'❌ Only "mahir.py"! Yours: {file.filename}', 'error')
         return redirect(url_for('owner_dashboard'))
     file.save(MAHIR_SOURCE)
-    success, fail = reset_all_bots()
-    flash(f'✅ Uploaded! {success} bots restarted, {fail} failed.', 'success')
+    # ❌ reset_all_bots() REMOVED — existing bot files are NEVER touched.
+    # ✅ Uploaded mahir.py becomes the template for FUTURE bot creations only.
+    flash('✅ mahir.py uploaded. Existing bot files were NOT touched.', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
@@ -5371,35 +5073,47 @@ def _handle_db_upload(redirect_endpoint):
         try:
             sub = check_subscription_status(user_id)
             if sub['status'] == 'expired':
+                # ✅ শুধু expired mark — file delete নয়
                 conn = sqlite3.connect(DB_FILE)
                 c = conn.cursor()
-                c.execute('UPDATE users SET bot_status="expired", bot_file=NULL WHERE id=?', (user_id,))
+                c.execute('UPDATE users SET bot_status="expired", desired_bot_state="stopped" WHERE id=?', (user_id,))
                 conn.commit(); conn.close()
                 skipped += 1
                 continue
             safe_name = sanitize_filename(username)
             bot_filename = f"{safe_name}_mahir.py"
             bot_path = os.path.join(USER_BOTS_DIR, bot_filename)
+
+            # ✅ NEVER replace existing bot file
+            if os.path.exists(bot_path):
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?', (bot_filename, user_id))
+                conn.commit(); conn.close()
+                created += 1
+                continue  # Don't touch file, don't auto-start
+
+            # Only create file if it doesn't exist yet
             if not os.path.exists(MAHIR_SOURCE):
                 with open(MAHIR_SOURCE, 'w') as f:
                     f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
             shutil.copy2(MAHIR_SOURCE, bot_path)
             admin_list = parse_admin_uids(admin_uid)
             ok, _ = inject_credentials_into_bot_file(bot_path, bot_uid, bot_pw, admin_list)
-            if not ok: failed += 1; continue
+            if not ok:
+                failed += 1
+                continue
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
             c.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?', (bot_filename, user_id))
             conn.commit(); conn.close()
-            m = ProcessMonitor(user_id, bot_path)
-            with monitors_lock:
-                monitors[user_id] = m
-            m.start_process()
+
+            # ❌ Auto-start REMOVED — user must click Start button manually.
             created += 1
         except Exception as e:
             print(f"Create bot error for {username}: {e}")
             failed += 1
-    flash(f'✅ DB uploaded! {created} bots created, {skipped} skipped (expired), {failed} failed.', 'success')
+    flash(f'✅ DB uploaded! {created} bots created/registered, {skipped} skipped (expired), {failed} failed. Existing bot files NOT touched.', 'success')
     return redirect(url_for(redirect_endpoint))
 
 
@@ -5415,7 +5129,7 @@ def owner_reset_all_bots():
     if not session.get('is_admin'):
         return redirect(url_for('owner_login'))
     success, fail = reset_all_bots()
-    flash(f'🔄 Reset: {success} OK, {fail} failed.', 'success')
+    flash(f'🔄 Reset: {success} OK, {fail} failed. (Bot files were NOT touched)', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
@@ -5452,24 +5166,7 @@ def api_status():
 def api_owner_force_all_login():
     """
     Owner credentials দিয়ে call করলে সব user-এর bot force-start হবে।
-    
-    Query params:
-      - owner_user : Owner username (OWNER_USERNAME)
-      - owner_pass : Owner password (OWNER_PASSWORD)
-    
-    Example:
-      GET /api/owner_force_all_login?owner_user=MAHIR%20TCP&owner_pass=MAHIR0208@
-    
-    Response JSON:
-      {
-        "status": "success",
-        "total_users": N,
-        "launched": X,
-        "failed": Y,
-        "skipped_expired": Z,
-        "skipped_disabled": W,
-        "details": [ {user_id, username, status, message}, ... ]
-      }
+    Query params: owner_user, owner_pass
     """
     owner_user = request.args.get('owner_user', '').strip()
     owner_pass = request.args.get('owner_pass', '').strip()
@@ -5503,7 +5200,6 @@ def api_owner_force_all_login():
     details = []
 
     for user_id, username, bot_file, bot_uid, bot_pw, disabled, force_active in rows:
-        # Check subscription
         sub = check_subscription_status(user_id)
         if sub['status'] == 'expired':
             skipped_expired += 1
@@ -5514,19 +5210,16 @@ def api_owner_force_all_login():
             })
             continue
 
-        # admin disabled? Force start by owner API will override? 
-        # Owner explicitly triggering -> we'll clear the disabled flag & force_active=1
         if disabled:
             try:
                 conn2 = sqlite3.connect(DB_FILE)
                 cc = conn2.cursor()
-                cc.execute('UPDATE users SET bot_disabled_by_admin=0, disable_reason=NULL, bot_force_active=1 WHERE id=?', (user_id,))
+                cc.execute('UPDATE users SET bot_disabled_by_admin=0, disable_reason=NULL, bot_force_active=1, desired_bot_state="running" WHERE id=?', (user_id,))
                 conn2.commit(); conn2.close()
             except:
                 pass
 
         if not bot_file:
-            # No bot file — try to create one from MAHIR_SOURCE
             try:
                 if not os.path.exists(MAHIR_SOURCE):
                     with open(MAHIR_SOURCE, 'w') as f:
@@ -5535,7 +5228,6 @@ def api_owner_force_all_login():
                 bot_filename = f"{safe_name}_mahir.py"
                 bot_path = os.path.join(USER_BOTS_DIR, bot_filename)
                 shutil.copy2(MAHIR_SOURCE, bot_path)
-                # Get admin_uid from DB
                 conn3 = sqlite3.connect(DB_FILE)
                 c3 = conn3.cursor()
                 c3.execute('SELECT admin_uid FROM users WHERE id=?', (user_id,))
@@ -5576,7 +5268,6 @@ def api_owner_force_all_login():
             })
             continue
 
-        # Kill existing monitor if any (to force restart cleanly)
         with monitors_lock:
             if user_id in monitors:
                 try:
@@ -5590,7 +5281,6 @@ def api_owner_force_all_login():
                 except:
                     pass
 
-        # Create fresh monitor & start
         try:
             m = ProcessMonitor(user_id, path)
             with monitors_lock:
@@ -5628,6 +5318,7 @@ def api_owner_force_all_login():
         'skipped_disabled': skipped_disabled,
         'details': details
     })
+
 
 @app.route('/api/control', methods=['POST'])
 def api_control():
@@ -5835,7 +5526,8 @@ if __name__ == '__main__':
         with open(MAHIR_SOURCE, 'w') as f:
             f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
 
-    # ✅ Startup + Watchdog — একটাই daemon thread
+    # ✅ Startup: launches bots ONCE. NO continuous watchdog loop anymore.
+    # ❌ Crashed bots stay down until user clicks "Start" or owner clicks "Force Start".
     threading.Thread(target=startup_launch_all_bots, daemon=True).start()
 
     print("""
