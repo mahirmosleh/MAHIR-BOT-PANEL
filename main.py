@@ -466,12 +466,13 @@ def format_time_left(expiry_dt):
 
 def expire_user_bot(user_id):
     """
-    ✅ Expired হলে শুধু bot process STOP করবে এবং DB-তে expired মার্ক করবে।
-    ❌ Bot file (.py) কখনো DELETE/REMOVE করবে না — সবসময় অক্ষত থাকবে।
-    ✅ Renew করলে owner "Force Start" চাপলেই একই file আবার চলবে।
+    ✅ Expired হলে:
+      1) Running bot process STOP
+      2) DB-তে bot_status="expired"
+      3) Bot file (.py) DELETE করবে
     """
     try:
-        # 1) Running process থাকলে সেটা stop করো (file delete নয়)
+        # 1) Stop running process
         with monitors_lock:
             if user_id in monitors:
                 try:
@@ -479,31 +480,54 @@ def expire_user_bot(user_id):
                     monitors[user_id].auto_restart_running = False
                     monitors[user_id]._save_desired_state('stopped')
                     monitors[user_id].stop_process(manual=False)
-                    print(f"🛑 IMMEDIATE STOP: User {user_id} bot killed (expired) — file preserved")
+                    print(f"🛑 Expired → Stop: User {user_id}")
                 except Exception as e:
                     print(f"Stop error: {e}")
-                try: del monitors[user_id]
-                except: pass
+                try:
+                    del monitors[user_id]
+                except:
+                    pass
 
-        # 2) ✅ কোনো file deletion নেই
-        # ✅ bot_file DB-তে অক্ষত থাকবে, শুধু status expired, PID NULL
+        # 2) Get bot_file from DB
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
+        c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
+        row = c.fetchone()
+        bot_file = row[0] if row else None
+
+        # 3) Update DB status
         c.execute('''UPDATE users 
                      SET bot_status="expired", 
                          bot_pid=NULL, 
                          desired_bot_state="stopped" 
                      WHERE id=?''', (user_id,))
-        conn.commit(); conn.close()
-        print(f"✅ User {user_id}: Expired → Stopped (bot file PRESERVED, never deleted)")
+        conn.commit()
+        conn.close()
+
+        # 4) DELETE bot file (.py)
+        if bot_file:
+            bot_path = bot_file if os.path.dirname(bot_file) else os.path.join(USER_BOTS_DIR, bot_file)
+            if os.path.exists(bot_path):
+                try:
+                    os.remove(bot_path)
+                    print(f"🗑️ Deleted expired bot file: {bot_path}")
+                except Exception as e:
+                    print(f"Delete file error: {e}")
+            # Related files (login variant etc.)
+            for suffix in ['_login.py', '.log']:
+                extra = bot_path.replace('.py', suffix) if suffix != '.log' else bot_path + '.log'
+                if os.path.exists(extra):
+                    try: os.remove(extra)
+                    except: pass
+
+        print(f"✅ User {user_id}: Expired → Stopped & file DELETED")
     except Exception as e:
         print(f"expire_user_bot error: {e}")
 
 
 def check_all_expired_bots():
     """
-    ✅ Background expiry checker — শুধু expired bot STOP করে।
-    ❌ কখনো file delete করে না, কখনো restart করে না।
+    ✅ Background expiry checker — expired bot STOP + file DELETE করে।
     """
     while True:
         try:
@@ -619,18 +643,12 @@ class ProcessMonitor:
         self.temp_guild_name = "N/A"
         self.temp_pfp_url = "N/A"
 
-        # Desired lifecycle state: 'running' or 'stopped'. Manual stop must be respected.
         self.desired_state = self._load_desired_state()
         self.last_restart_reason = None
 
-        # ❌ AUTO-RESTART ON CRASH — REMOVED
-        # Bot only starts when user clicks "Start" or owner clicks "Force Start".
-        # No auto-restart thread is started here.
         self.auto_restart_running = False
         self.auto_restart_thread = None
 
-        # ✅ Expiry watchdog kept — it kills the bot when subscription expires.
-        # ❌ But it NEVER deletes the bot file.
         self.watchdog_running = True
         self.watchdog_thread = threading.Thread(target=self._expiry_watchdog, daemon=True)
         self.watchdog_thread.start()
@@ -660,18 +678,9 @@ class ProcessMonitor:
             print(f"[desired_state] save error user={self.user_id}: {e}")
 
     def _auto_restart_loop(self):
-        """
-        ❌ DISABLED — this loop never runs anymore.
-        Kept as dead code for backward compatibility, but auto_restart_running is False.
-        """
         return
 
     def _expiry_watchdog(self):
-        """
-        ✅ Only job: kill the bot when subscription expires.
-        ❌ Never restarts the bot for any other reason.
-        ❌ Never deletes the bot file.
-        """
         while self.watchdog_running:
             try:
                 time.sleep(10)
@@ -695,7 +704,7 @@ class ProcessMonitor:
                     try:
                         expiry_dt = datetime.fromisoformat(expiry_val)
                         if datetime.now() > expiry_dt:
-                            print(f"\n⏰ WATCHDOG: User {self.user_id} EXPIRED → Killing process (file preserved)")
+                            print(f"\n⏰ WATCHDOG: User {self.user_id} EXPIRED → Killing process + deleting file")
                             self.watchdog_running = False
                             self.auto_restart_running = False
                             self.stop_process()
@@ -972,7 +981,6 @@ class ProcessMonitor:
                     print(f"⚠️ Bot process died immediately (exit={exit_code}) for user {self.user_id}")
                     self.is_running = False
                     self.bot_status = "🔴 CRASHED"
-                    # ❌ NO auto-restart on crash. Bot stays down until user clicks Start.
                     return False
 
                 return True
@@ -1015,7 +1023,6 @@ class ProcessMonitor:
         except: pass
 
     def stop_process(self, manual=True):
-        """Stop the bot. If manual=True, mark desired_state=stopped."""
         with self.lock:
             if manual:
                 self._save_desired_state('stopped')
@@ -1023,7 +1030,6 @@ class ProcessMonitor:
             self._stop_process_internal()
 
     def restart_logic(self):
-        # Explicit restart (user clicked Restart) → desired becomes running
         self._save_desired_state('running')
         self.last_restart_reason = 'MANUAL_RESTART'
         self.stop_process(manual=False)
@@ -1176,11 +1182,6 @@ monitors = {}
 
 
 def get_monitor(user_id, create_only=True):
-    """
-    Return existing ProcessMonitor for user_id, or create one WITHOUT starting the bot.
-    Status / dashboard / login must NEVER start a bot as a side-effect.
-    Only explicit start / restart / force / eligible startup may start.
-    """
     with monitors_lock:
         if user_id in monitors:
             return monitors[user_id]
@@ -1212,10 +1213,8 @@ def get_monitor(user_id, create_only=True):
 def startup_launch_all_bots():
     """
     ✅ Startup-এ শুধু একবার bots launch হবে।
-    ❌ কোনো continuous watchdog loop নেই — কেউ crash হলে auto-restart হবে না।
-    ✅ Manual Stop করা bots কখনো launch হবে না (desired_state='stopped' respect করে)।
-    ✅ Expired bots launch হবে না — শুধু expired মার্ক হবে, file delete হবে না।
-    ❌ Bot file কখনো reset/replace হবে না।
+    ✅ Manual Stop করা bots কখনো launch হবে না।
+    ✅ Expired bots launch হবে না — expired মার্ক + file delete।
     """
     try:
         print("\n🚀 Startup: Launching all valid bots (ONE TIME only)...")
@@ -1230,10 +1229,8 @@ def startup_launch_all_bots():
         for user_id, bot_file in rows:
             sub = check_subscription_status(user_id)
             if sub['status'] == 'expired':
-                # ✅ শুধু expired mark — file delete নয়
                 expire_user_bot(user_id)
                 continue
-            # Respect desired_bot_state — do not auto-start bots that were manually stopped
             try:
                 conn_ds = sqlite3.connect(DB_FILE)
                 cds = conn_ds.cursor()
@@ -1243,7 +1240,7 @@ def startup_launch_all_bots():
                 desired = (dsrow[0] if dsrow and dsrow[0] else 'running')
                 if desired != 'running':
                     continue
-                if dsrow and dsrow[1]:  # admin disabled
+                if dsrow and dsrow[1]:
                     continue
                 if get_global_stop() and not (dsrow and dsrow[2]):
                     continue
@@ -1269,8 +1266,227 @@ def startup_launch_all_bots():
     except Exception as e:
         print(f"Startup error: {e}")
         return 0
-    # ❌ NO continuous watchdog loop here anymore.
-    # Crashed bots stay down until user clicks Start or owner clicks Force Start.
+
+
+# ============================================================
+#  REBUILD HELPERS (NEW)
+# ============================================================
+def rebuild_all_bot_files(delete_expired=True):
+    """
+    ✅ DB check করে সব bot file rebuild করে:
+       - Non-expired users: fresh mahir.py copy + DB credentials inject
+       - Expired users: bot file DELETE
+       - সব monitor stop করে দেওয়া হয়
+    Return: dict {updated, deleted_expired, failed, total}
+    """
+    # Stop all monitors first
+    with monitors_lock:
+        for uid, m in list(monitors.items()):
+            try:
+                m.watchdog_running = False
+                m.auto_restart_running = False
+                m.stop_process(manual=False)
+            except Exception as e:
+                print(f"Monitor stop error {uid}: {e}")
+        monitors.clear()
+
+    # Ensure template exists
+    if not os.path.exists(MAHIR_SOURCE):
+        with open(MAHIR_SOURCE, 'w') as f:
+            f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT id, username, admin_uid, bot_uid, bot_pw, bot_file,
+                        subscription_expiry, registration_key
+                 FROM users 
+                 WHERE is_admin=0 AND is_agent=0
+                   AND bot_uid IS NOT NULL AND bot_uid != ''
+                   AND bot_pw  IS NOT NULL AND bot_pw  != '' ''')
+    users = c.fetchall()
+    conn.close()
+
+    updated = 0
+    deleted_expired = 0
+    failed = 0
+
+    for user_id, username, admin_uid, bot_uid, bot_pw, bot_file, sub_expiry, reg_key in users:
+        try:
+            # -- Determine expiry --
+            expiry_val = sub_expiry
+            if not expiry_val and reg_key:
+                conn2 = sqlite3.connect(DB_FILE)
+                cc = conn2.cursor()
+                cc.execute('SELECT expiry_date FROM keys WHERE key=?', (reg_key,))
+                kr = cc.fetchone()
+                conn2.close()
+                if kr:
+                    expiry_val = kr[0]
+
+            is_expired = False
+            if expiry_val:
+                try:
+                    if datetime.fromisoformat(expiry_val) < datetime.now():
+                        is_expired = True
+                except:
+                    pass
+
+            # -- Determine bot file path --
+            if bot_file:
+                bot_path = bot_file if os.path.dirname(bot_file) else os.path.join(USER_BOTS_DIR, bot_file)
+            else:
+                safe_name = sanitize_filename(username)
+                bot_filename = f"{safe_name}_mahir.py"
+                bot_path = os.path.join(USER_BOTS_DIR, bot_filename)
+
+            # -- Expired: DELETE file --
+            if is_expired and delete_expired:
+                if os.path.exists(bot_path):
+                    try:
+                        os.remove(bot_path)
+                        print(f"🗑️ Deleted expired: {bot_path}")
+                    except Exception as e:
+                        print(f"Delete error: {e}")
+                conn3 = sqlite3.connect(DB_FILE)
+                c3 = conn3.cursor()
+                c3.execute('UPDATE users SET bot_status="expired", bot_pid=NULL, desired_bot_state="stopped" WHERE id=?',
+                           (user_id,))
+                conn3.commit()
+                conn3.close()
+                deleted_expired += 1
+                continue
+
+            # -- Non-expired: rebuild fresh --
+            shutil.copy2(MAHIR_SOURCE, bot_path)
+
+            admin_list = parse_admin_uids(admin_uid)
+            ok, msg = inject_credentials_into_bot_file(bot_path, bot_uid, bot_pw, admin_list)
+            if not ok:
+                print(f"❌ Inject failed for {username}: {msg}")
+                failed += 1
+                continue
+
+            bot_filename = os.path.basename(bot_path)
+            conn4 = sqlite3.connect(DB_FILE)
+            c4 = conn4.cursor()
+            c4.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?',
+                       (bot_filename, user_id))
+            conn4.commit()
+            conn4.close()
+
+            updated += 1
+            print(f"✅ Rebuilt: {bot_filename} (user={username})")
+
+        except Exception as e:
+            print(f"Rebuild error user {user_id}: {e}")
+            failed += 1
+
+    print(f"🔁 Rebuild done: updated={updated}, expired_deleted={deleted_expired}, failed={failed}, total={len(users)}")
+    return {
+        'updated': updated,
+        'deleted_expired': deleted_expired,
+        'failed': failed,
+        'total': len(users)
+    }
+
+
+def _start_all_eligible_bots():
+    """
+    ✅ সব eligible bot start করে:
+       - desired_state == 'running'
+       - not expired
+       - not admin-disabled
+       - file exist করে
+    Return: (success, fail, skipped)
+    """
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT id, bot_file FROM users 
+                 WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
+                   AND is_admin=0 AND is_agent=0''')
+    users = c.fetchall()
+    conn.close()
+
+    success = 0
+    fail = 0
+    skipped = 0
+
+    for user_id, bot_file in users:
+        if not bot_file:
+            skipped += 1
+            continue
+
+        sub = check_subscription_status(user_id)
+        if sub['status'] == 'expired':
+            skipped += 1
+            continue
+
+        try:
+            conn_ds = sqlite3.connect(DB_FILE)
+            cds = conn_ds.cursor()
+            cds.execute('SELECT desired_bot_state, bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
+            ds = cds.fetchone()
+            conn_ds.close()
+            desired = (ds[0] if ds and ds[0] else 'running')
+            disabled = ds[1] if ds else 0
+            if desired != 'running' or disabled:
+                skipped += 1
+                continue
+            if get_global_stop():
+                conn_fa = sqlite3.connect(DB_FILE)
+                cfa = conn_fa.cursor()
+                cfa.execute('SELECT bot_force_active FROM users WHERE id=?', (user_id,))
+                fa = cfa.fetchone()
+                conn_fa.close()
+                if not (fa and fa[0]):
+                    skipped += 1
+                    continue
+        except Exception:
+            pass
+
+        path = os.path.join(USER_BOTS_DIR, bot_file)
+        if not os.path.exists(path):
+            fail += 1
+            continue
+
+        with monitors_lock:
+            if user_id in monitors:
+                existing = monitors[user_id]
+                if existing.is_running and existing.process and existing.process.poll() is None:
+                    success += 1
+                    continue
+
+        try:
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            m.last_restart_reason = 'REBUILD_RESTART'
+            if m.start_process():
+                success += 1
+            else:
+                fail += 1
+        except Exception as e:
+            print(f"Start error user {user_id}: {e}")
+            fail += 1
+
+    print(f"🚀 Start summary: success={success}, failed={fail}, skipped={skipped}")
+    return success, fail, skipped
+
+
+def reset_all_bots():
+    """
+    ✅ Reset All → 
+      1) Rebuild all bot files from mahir.py + DB credentials
+      2) Delete expired bot files
+      3) Start all eligible bots
+    """
+    result = rebuild_all_bot_files(delete_expired=True)
+    success, fail, skipped = _start_all_eligible_bots()
+
+    print(f"✅ Reset All complete: rebuilt={result['updated']}, "
+          f"expired_deleted={result['deleted_expired']}, "
+          f"started={success}, fail={fail}, skipped={skipped}")
+    return success, fail
 
 
 # ============================================================
@@ -2076,7 +2292,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
   <div class="card header">
     <h1><i class="fas fa-crown"></i> Owner Dashboard</h1>
     <div class="flex">
-      <form method="POST" action="/owner/reset_all_bots" onsubmit="return confirm('Reset all bots? (Bot files will NOT be touched)');" style="display:inline;"><button type="submit" class="btn btn-reset btn-sm"><i class="fas fa-power-off"></i> Reset All</button></form>
+      <form method="POST" action="/owner/reset_all_bots" onsubmit="return confirm('⚠️ Reset All করলে:\\n\\n✅ সব bot file নতুন mahir.py দিয়ে rebuild হবে\\n✅ DB থেকে UID/PW inject হবে\\n✅ Expired bot files DELETE হবে\\n✅ Eligible bots restart হবে\\n\\nচালিয়ে যাবেন?');" style="display:inline;"><button type="submit" class="btn btn-reset btn-sm"><i class="fas fa-sync-alt"></i> Reset All</button></form>
       {% if global_stop %}
         <form method="POST" action="/owner/start_all_bots" style="display:inline;"><button type="submit" class="btn btn-success btn-sm"><i class="fas fa-play"></i> Resume All</button></form>
       {% else %}
@@ -2147,17 +2363,17 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
       <a href="/owner/files" class="btn btn-gold"><i class="fas fa-folder"></i> File Manager</a>
     </div>
     <div style="margin-top:14px;">
-      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload mahir.py (only used as template for FUTURE bots)</div>
+      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload mahir.py — Upload করলে সব bot file নতুন template দিয়ে rebuild হবে + expired delete + eligible restart</div>
       <form method="POST" action="/owner/upload_mahir" enctype="multipart/form-data" class="upload-form" id="uploadMahirForm">
         <input type="file" name="mahir_file" accept=".py" required style="flex:1;min-width:200px;" id="mahirFileInput"/>
         <button type="submit" class="btn btn-warning btn-sm" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload mahir.py</button>
       </form>
     </div>
     <div style="margin-top:14px;">
-      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload users.db (existing bot files are NOT overwritten)</div>
+      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload users.db — Upload করলে সব bot file rebuild হবে + expired delete + eligible restart</div>
       <form method="POST" action="/owner/upload_users_db" enctype="multipart/form-data" class="upload-form" id="uploadDbForm">
         <input type="file" name="db_file" accept=".db" required style="flex:1;min-width:200px;"/>
-        <button type="submit" class="btn btn-warning btn-sm" id="uploadDbBtn" onclick="return confirm('Replace DB? Existing bot files will NOT be touched.');"><i class="fas fa-upload"></i> Upload DB</button>
+        <button type="submit" class="btn btn-warning btn-sm" id="uploadDbBtn" onclick="return confirm('⚠️ Replace DB?\\n\\n✅ সব bot file rebuild হবে\\n✅ Expired bots delete হবে\\n✅ Eligible bots restart হবে\\n\\nচালিয়ে যাবেন?');"><i class="fas fa-upload"></i> Upload DB</button>
       </form>
     </div>
     {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
@@ -2301,7 +2517,7 @@ OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UT
 </div>
 
 <script>
-document.getElementById('uploadMahirForm').addEventListener('submit',function(e){var f=document.getElementById('mahirFileInput').files[0];if(f && f.name.toLowerCase()!=='mahir.py'){e.preventDefault();alert('❌ Only "mahir.py"!');return false;}var b=document.getElementById('uploadMahirBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Uploading...';});
+document.getElementById('uploadMahirForm').addEventListener('submit',function(e){var f=document.getElementById('mahirFileInput').files[0];if(f && f.name.toLowerCase()!=='mahir.py'){e.preventDefault();alert('❌ Only "mahir.py"!');return false;}var b=document.getElementById('uploadMahirBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Rebuilding all bots...';});
 document.getElementById('uploadDbForm').addEventListener('submit',function(){var b=document.getElementById('uploadDbBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});
 document.getElementById('createAgentForm').addEventListener('submit',function(){var b=document.getElementById('createAgentBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Creating...';});
 </script>
@@ -2809,10 +3025,8 @@ USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8
       {% else %}
       <form method="POST" action="/owner/disable_user/{{ user.id }}"><button type="submit" class="btn btn-warning" onclick="return confirm('Disable this bot?');"><i class="fas fa-hand-paper"></i> Disable Bot</button></form>
       {% endif %}
-      <form method="POST" action="/owner/force_start_bot/{{ user.id }}"><button type="submit" class="btn btn-gold"><i class="fas fa-bolt"></i> Force Start (Global Stop Override)</button></form>
-      {% if user.sub_status == 'expired' or not user.bot_file %}
+      <form method="POST" action="/owner/force_start_bot/{{ user.id }}"><button type="submit" class="btn btn-gold"><i class="fas fa-bolt"></i> Force Start (Auto-recreate if missing)</button></form>
       <form method="POST" action="/owner/recreate_bot/{{ user.id }}"><button type="submit" class="btn btn-gold"><i class="fas fa-plus-circle"></i> Recreate Bot File</button></form>
-      {% endif %}
     </div>
   </div>
   {% endif %}
@@ -4222,7 +4436,7 @@ def owner_start_all_bots():
         return redirect(url_for('owner_login'))
     set_setting('global_bot_stop', '0')
     success, fail = reset_all_bots()
-    flash(f'✅ Global stop OFF! {success} bots restarted.', 'success')
+    flash(f'✅ Global stop OFF! Rebuilt + {success} bots started.', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
@@ -4234,11 +4448,23 @@ def owner_force_start_bot(user_id):
     c = conn.cursor()
     c.execute('UPDATE users SET bot_force_active=1, bot_disabled_by_admin=0, desired_bot_state="running" WHERE id=?', (user_id,))
     conn.commit()
-    c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
+    c.execute('SELECT bot_file, bot_uid, bot_pw, admin_uid FROM users WHERE id=?', (user_id,))
     row = c.fetchone()
     conn.close()
     if row and row[0]:
         path = os.path.join(USER_BOTS_DIR, row[0])
+        # ✅ Auto-recreate if file was deleted (expired)
+        if not os.path.exists(path):
+            try:
+                if row[1] and row[2]:
+                    if not os.path.exists(MAHIR_SOURCE):
+                        with open(MAHIR_SOURCE, 'w') as f:
+                            f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+                    shutil.copy2(MAHIR_SOURCE, path)
+                    inject_credentials_into_bot_file(path, row[1], row[2], parse_admin_uids(row[3]))
+                    print(f"♻️ Auto-recreated bot file for user {user_id}")
+            except Exception as e:
+                print(f"Auto-recreate error: {e}")
         if os.path.exists(path):
             with monitors_lock:
                 if user_id in monitors:
@@ -4253,7 +4479,7 @@ def owner_force_start_bot(user_id):
             m.start_process()
             flash(f'⚡ Bot force-started for user {user_id}!', 'success')
         else:
-            flash('❌ Bot file not found', 'error')
+            flash('❌ Bot file not found & could not recreate', 'error')
     else:
         flash('❌ No bot file for this user', 'error')
     return redirect(request.referrer or url_for('owner_dashboard'))
@@ -4301,7 +4527,6 @@ def owner_toggle_user_bot(user_id):
             flash('🛑 User bot DISABLED.', 'success')
         else:
             flash('✅ User bot ENABLED. Click "Force Start" to run.', 'success')
-            # ❌ Auto-start REMOVED — owner must explicitly click Force Start
     conn.close()
     return redirect(request.referrer or url_for('owner_dashboard'))
 
@@ -4338,7 +4563,6 @@ def owner_recreate_bot(user_id):
         c.execute('UPDATE users SET bot_file=?, bot_status="configured", bot_disabled_by_admin=0, subscription_expiry=? WHERE id=?',
                   (bot_filename, new_expiry, user_id))
         conn.commit(); conn.close()
-        # ❌ Auto-start REMOVED — owner must click "Force Start" or user must click "Start".
         with monitors_lock:
             if user_id in monitors:
                 try:
@@ -4624,79 +4848,6 @@ def _renew_subscription(user_id, redirect_endpoint):
     if redirect_endpoint == 'owner_user_details':
         return redirect(url_for(redirect_endpoint, user_id=user_id))
     return redirect(url_for(redirect_endpoint))
-
-
-def reset_all_bots():
-    """
-    ✅ NEVER touches / resets / replaces bot files.
-    শুধু monitor restart করে — যেসব user এর desired_state='running'।
-    Manual Stop করা bot কখনো restart হবে না।
-    Expired bot skip হবে (কোনো file delete নয়)।
-    """
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''SELECT id, bot_file FROM users 
-                 WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
-                 AND is_admin=0 AND is_agent=0''')
-    users = c.fetchall()
-    conn.close()
-
-    # Stop & clear old monitors
-    with monitors_lock:
-        for uid, m in list(monitors.items()):
-            try:
-                m.watchdog_running = False
-                m.auto_restart_running = False
-                m.stop_process()
-            except: pass
-        monitors.clear()
-
-    success = 0; fail = 0; skipped = 0
-    for user_id, bot_file in users:
-        if not bot_file:
-            continue
-
-        # Expired → skip (do NOT delete file, do NOT modify anything)
-        sub = check_subscription_status(user_id)
-        if sub['status'] == 'expired':
-            skipped += 1
-            continue
-
-        # Respect desired_state + admin disable
-        try:
-            conn_ds = sqlite3.connect(DB_FILE)
-            cds = conn_ds.cursor()
-            cds.execute('SELECT desired_bot_state, bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
-            ds = cds.fetchone()
-            conn_ds.close()
-            desired = (ds[0] if ds and ds[0] else 'running')
-            disabled = ds[1] if ds else 0
-            if desired != 'running' or disabled:
-                skipped += 1
-                continue
-        except Exception:
-            pass
-
-        path = os.path.join(USER_BOTS_DIR, bot_file)
-        if not os.path.exists(path):
-            fail += 1
-            continue
-
-        try:
-            m = ProcessMonitor(user_id, path)
-            with monitors_lock:
-                monitors[user_id] = m
-            m.last_restart_reason = 'RESET_ALL'
-            if m.start_process():
-                success += 1
-            else:
-                fail += 1
-        except Exception as e:
-            print(f"Reset {user_id}: {e}")
-            fail += 1
-
-    print(f"Reset summary: {success} OK, {skipped} skipped, {fail} failed")
-    return success, fail
 
 
 # ========== USER DASHBOARD ==========
@@ -5015,10 +5166,23 @@ def owner_upload_mahir():
     if file.filename.lower() != 'mahir.py':
         flash(f'❌ Only "mahir.py"! Yours: {file.filename}', 'error')
         return redirect(url_for('owner_dashboard'))
+
+    # Save new template
     file.save(MAHIR_SOURCE)
-    # ❌ reset_all_bots() REMOVED — existing bot files are NEVER touched.
-    # ✅ Uploaded mahir.py becomes the template for FUTURE bot creations only.
-    flash('✅ mahir.py uploaded. Existing bot files were NOT touched.', 'success')
+
+    # ✅ Rebuild all bot files with new template + DB creds + delete expired
+    result = rebuild_all_bot_files(delete_expired=True)
+
+    # ✅ Start all eligible bots
+    success, fail, skipped = _start_all_eligible_bots()
+
+    flash(
+        f'✅ mahir.py updated! '
+        f'Bots rebuilt: {result["updated"]}, '
+        f'Expired deleted: {result["deleted_expired"]}, '
+        f'Started: {success}, Failed: {fail}, Skipped: {skipped}',
+        'success'
+    )
     return redirect(url_for('owner_dashboard'))
 
 
@@ -5061,59 +5225,20 @@ def _handle_db_upload(redirect_endpoint):
     except Exception as e:
         flash(f'❌ Replace error: {e}', 'error')
         return redirect(url_for(redirect_endpoint))
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''SELECT id, username, admin_uid, bot_uid, bot_pw 
-                 FROM users WHERE bot_uid IS NOT NULL AND bot_pw IS NOT NULL 
-                 AND is_admin=0 AND is_agent=0''')
-    users = c.fetchall()
-    conn.close()
-    created = 0; failed = 0; skipped = 0
-    for user_id, username, admin_uid, bot_uid, bot_pw in users:
-        try:
-            sub = check_subscription_status(user_id)
-            if sub['status'] == 'expired':
-                # ✅ শুধু expired mark — file delete নয়
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute('UPDATE users SET bot_status="expired", desired_bot_state="stopped" WHERE id=?', (user_id,))
-                conn.commit(); conn.close()
-                skipped += 1
-                continue
-            safe_name = sanitize_filename(username)
-            bot_filename = f"{safe_name}_mahir.py"
-            bot_path = os.path.join(USER_BOTS_DIR, bot_filename)
 
-            # ✅ NEVER replace existing bot file
-            if os.path.exists(bot_path):
-                conn = sqlite3.connect(DB_FILE)
-                c = conn.cursor()
-                c.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?', (bot_filename, user_id))
-                conn.commit(); conn.close()
-                created += 1
-                continue  # Don't touch file, don't auto-start
+    # ✅ Rebuild all bot files from new DB + fresh mahir.py + delete expired
+    result = rebuild_all_bot_files(delete_expired=True)
 
-            # Only create file if it doesn't exist yet
-            if not os.path.exists(MAHIR_SOURCE):
-                with open(MAHIR_SOURCE, 'w') as f:
-                    f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
-            shutil.copy2(MAHIR_SOURCE, bot_path)
-            admin_list = parse_admin_uids(admin_uid)
-            ok, _ = inject_credentials_into_bot_file(bot_path, bot_uid, bot_pw, admin_list)
-            if not ok:
-                failed += 1
-                continue
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?', (bot_filename, user_id))
-            conn.commit(); conn.close()
+    # ✅ Start all eligible bots
+    success, fail, skipped = _start_all_eligible_bots()
 
-            # ❌ Auto-start REMOVED — user must click Start button manually.
-            created += 1
-        except Exception as e:
-            print(f"Create bot error for {username}: {e}")
-            failed += 1
-    flash(f'✅ DB uploaded! {created} bots created/registered, {skipped} skipped (expired), {failed} failed. Existing bot files NOT touched.', 'success')
+    flash(
+        f'✅ DB uploaded! '
+        f'Bots rebuilt: {result["updated"]}, '
+        f'Expired deleted: {result["deleted_expired"]}, '
+        f'Started: {success}, Failed: {fail}, Skipped: {skipped}',
+        'success'
+    )
     return redirect(url_for(redirect_endpoint))
 
 
@@ -5129,7 +5254,7 @@ def owner_reset_all_bots():
     if not session.get('is_admin'):
         return redirect(url_for('owner_login'))
     success, fail = reset_all_bots()
-    flash(f'🔄 Reset: {success} OK, {fail} failed. (Bot files were NOT touched)', 'success')
+    flash(f'🔄 Reset complete: {success} bots started, {fail} failed. All bot files were rebuilt from mahir.py + DB creds, expired files deleted.', 'success')
     return redirect(url_for('owner_dashboard'))
 
 
@@ -5140,7 +5265,7 @@ def api_status():
     if not session.get('user_id'):
         return jsonify({'error': 'Login required'}), 401
     user_id = session['user_id']
-    monitor = get_monitor(user_id)  # does NOT start the process
+    monitor = get_monitor(user_id)
     if monitor:
         sd = monitor.get_status()
         sd['desired_state'] = getattr(monitor, 'desired_state', 'running')
@@ -5164,10 +5289,6 @@ def api_status():
 
 @app.route('/api/owner_force_all_login', methods=['GET'])
 def api_owner_force_all_login():
-    """
-    Owner credentials দিয়ে call করলে সব user-এর bot force-start হবে।
-    Query params: owner_user, owner_pass
-    """
     owner_user = request.args.get('owner_user', '').strip()
     owner_pass = request.args.get('owner_pass', '').strip()
 
@@ -5526,8 +5647,6 @@ if __name__ == '__main__':
         with open(MAHIR_SOURCE, 'w') as f:
             f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
 
-    # ✅ Startup: launches bots ONCE. NO continuous watchdog loop anymore.
-    # ❌ Crashed bots stay down until user clicks "Start" or owner clicks "Force Start".
     threading.Thread(target=startup_launch_all_bots, daemon=True).start()
 
     print("""
