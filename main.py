@@ -1,1184 +1,5754 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-MAHIR PANEL — Single-file Flask backend
-Owner / Agent / User role system + Bot lifecycle + Watchdog
-"""
 
-import os, re, sys, time, json, signal, sqlite3, secrets, shutil, subprocess, threading
+import os
+import sys
+import sqlite3
+import hashlib
+import secrets
+import json
+import time
+import subprocess
+import shutil
+import threading
+import re
+import signal
+import zipfile
 from datetime import datetime, timedelta
-from functools import wraps
 from queue import Queue, Empty
-
-from flask import (Flask, render_template, render_template_string, request,
-                   redirect, url_for, session, jsonify, flash, send_file, abort)
-from werkzeug.security import generate_password_hash, check_password_hash
-from flask_wtf.csrf import CSRFProtect
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from dotenv import load_dotenv
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify, flash, send_file
+from functools import wraps
 import psutil
-import requests as rq
+import requests
 
-load_dotenv()
 
-# ══════════════════════════════════════════════════════════════
-# CONFIG
-# ══════════════════════════════════════════════════════════════
-BASE = os.path.dirname(os.path.abspath(__file__))
-DB_FILE       = os.path.join(BASE, os.environ.get("DB_FILE", "users.db"))
-BOT_SOURCE    = os.path.join(BASE, os.environ.get("BOT_SOURCE", "mahir.py"))
-BOT_DIR       = os.path.join(BASE, os.environ.get("BOT_DIR", "bot_files"))
-SECRET_KEY    = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
-OWNER_USER    = os.environ.get("OWNER_USERNAME", "owner")
-OWNER_HASH    = os.environ.get("OWNER_PASSWORD_HASH", "")
-WATCH_INTERVAL= int(os.environ.get("WATCHDOG_INTERVAL", 15))
-MAX_RAPID     = int(os.environ.get("MAX_RAPID_RESTARTS", 5))
-COOLDOWN      = int(os.environ.get("RESTART_COOLDOWN", 60))
-
-os.makedirs(BOT_DIR, exist_ok=True)
-
-ROLE_OWNER = "owner"
-ROLE_AGENT = "agent"
-ROLE_USER  = "user"
-
-# ══════════════════════════════════════════════════════════════
-# FLASK APP
-# ══════════════════════════════════════════════════════════════
-app = Flask(__name__, template_folder=BASE, static_folder=None)
-app.secret_key = SECRET_KEY
-app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=False,       # set True behind HTTPS
-    PERMANENT_SESSION_LIFETIME=timedelta(days=1),
-    WTF_CSRF_TIME_LIMIT=None,
-)
-csrf = CSRFProtect(app)
-limiter = Limiter(get_remote_address, app=app, default_limits=["300 per minute"])
-
-# ══════════════════════════════════════════════════════════════
-# DATABASE
-# ══════════════════════════════════════════════════════════════
-def _conn():
-    c = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
-    c.row_factory = sqlite3.Row
-    c.execute("PRAGMA foreign_keys=ON")
-    c.execute("PRAGMA journal_mode=WAL")
-    return c
-
-class DB:
-    def __enter__(self): self.c = _conn(); return self.c
-    def __exit__(self, exc_type, exc, tb):
+def install_dependencies():
+    required_pkgs = ["colorama", "psutil", "flask", "requests"]
+    for pkg in required_pkgs:
         try:
-            if exc_type: self.c.rollback()
-            else: self.c.commit()
-        finally: self.c.close()
+            __import__(pkg)
+        except ImportError:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--quiet"])
 
-def _has_col(cur, table, col):
-    cur.execute(f"PRAGMA table_info({table})")
-    return any(r[1] == col for r in cur.fetchall())
+install_dependencies()
 
-def init_db():
-    with DB() as c:
-        cur = c.cursor()
-        cur.execute('''CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL,
-            email TEXT,
-            registration_key TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            is_admin INTEGER DEFAULT 0,
-            admin_uid TEXT,
-            bot_uid TEXT,
-            bot_pw TEXT,
-            bot_file TEXT,
-            bot_pid INTEGER,
-            bot_status TEXT DEFAULT 'not_configured'
-        )''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS keys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key TEXT UNIQUE NOT NULL,
-            created_by TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            used_by TEXT,
-            used_at TIMESTAMP,
-            is_used INTEGER DEFAULT 0,
-            expiry_date TIMESTAMP
-        )''')
-        # migrations
-        for col, ddl in [
-            ("role", "TEXT DEFAULT 'user'"),
-            ("parent_agent", "TEXT"),
-            ("subscription_expiry", "TIMESTAMP"),
-            ("is_disabled", "INTEGER DEFAULT 0"),
-            ("disable_reason", "TEXT"),
-            ("personal_notice", "TEXT"),
-            ("max_keys", "INTEGER DEFAULT 0"),
-            ("last_seen", "TIMESTAMP"),
-        ]:
-            if not _has_col(cur, "users", col):
-                cur.execute(f"ALTER TABLE users ADD COLUMN {col} {ddl}")
-        if not _has_col(cur, "keys", "agent"):
-            cur.execute("ALTER TABLE keys ADD COLUMN agent TEXT")
+from colorama import init, Fore, Style
+init(autoreset=True)
 
-        cur.execute('''CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            actor TEXT, actor_role TEXT, action TEXT, target TEXT,
-            result TEXT, ip TEXT, meta TEXT
-        )''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS subscriptions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT, key TEXT,
-            start_date TIMESTAMP, expiry_date TIMESTAMP,
-            renewed_by TEXT, agent TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS notices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            scope TEXT, target TEXT, message TEXT,
-            enabled INTEGER DEFAULT 1,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        cur.execute('''CREATE TABLE IF NOT EXISTS global_state (
-            key TEXT PRIMARY KEY, value TEXT
-        )''')
-        cur.execute("INSERT OR IGNORE INTO global_state (key,value) VALUES ('global_bot_stop','0')")
+app = Flask(__name__)
 
-# ══════════════════════════════════════════════════════════════
-# HELPERS
-# ══════════════════════════════════════════════════════════════
-ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mK]')
-def clean_ansi(s):
-    if not s: return ""
-    return ANSI_RE.sub('', s).strip()
-
-def safe_name(s):
-    return re.sub(r'[^A-Za-z0-9_]', '_', s)
-
-def audit(action, target="", result="ok", meta=""):
+SECRET_KEY_FILE = ".secret_key"
+if os.path.exists(SECRET_KEY_FILE):
     try:
-        actor = session.get("username", "anon")
-        role  = session.get("role", "guest")
-        ip    = request.remote_addr if request else ""
-        with DB() as c:
-            c.execute("INSERT INTO audit_log (actor,actor_role,action,target,result,ip,meta) VALUES (?,?,?,?,?,?,?)",
-                      (actor, role, action, target, result, ip, meta))
-    except Exception: pass
+        with open(SECRET_KEY_FILE, 'r') as f:
+            app.secret_key = f.read().strip()
+    except:
+        app.secret_key = secrets.token_hex(32)
+else:
+    app.secret_key = secrets.token_hex(32)
+    try:
+        with open(SECRET_KEY_FILE, 'w') as f:
+            f.write(app.secret_key)
+        os.chmod(SECRET_KEY_FILE, 0o600)
+    except: pass
+
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = False  # set True only behind HTTPS
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=14)
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
+
+DB_FILE = "users.db"
+MAHIR_SOURCE = "mahir.py"
+USER_BOTS_DIR = "."
+MASTER_ADMIN_UID = "1120167200"
+
+OWNER_USERNAME = "MAHIR TCP"
+OWNER_PASSWORD = "MAHIR0208@"
+
+DB_DOWNLOAD_PASSWORD = "MAHIRDB"
+
+monitors_lock = threading.Lock()
+
+
+def get_db_connection():
+    """Thread-safe SQLite connection with timeout + WAL for concurrency."""
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA busy_timeout=30000')
+        conn.execute('PRAGMA synchronous=NORMAL')
+    except Exception:
+        pass
+    return conn
+
+
+
+# ============================================================
+#  DATABASE
+# ============================================================
+def init_db():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        email TEXT,
+        registration_key TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        is_admin INTEGER DEFAULT 0,
+        is_agent INTEGER DEFAULT 0,
+        admin_uid TEXT,
+        bot_uid TEXT,
+        bot_pw TEXT,
+        bot_file TEXT,
+        bot_pid INTEGER,
+        bot_status TEXT DEFAULT 'not_configured',
+        key_limit INTEGER DEFAULT -1,
+        can_manage_db INTEGER DEFAULT 0,
+        bot_disabled_by_admin INTEGER DEFAULT 0,
+        disable_reason TEXT,
+        subscription_expiry TIMESTAMP NULL,
+        created_by_agent TEXT,
+        bot_force_active INTEGER DEFAULT 0,
+        personal_notice TEXT,
+        personal_notice_enabled INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT UNIQUE NOT NULL,
+        created_by TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        used_by TEXT,
+        used_at TIMESTAMP,
+        is_used INTEGER DEFAULT 0,
+        expiry_date TIMESTAMP NULL,
+        duration_days INTEGER DEFAULT 0
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS subscription_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        username TEXT,
+        extended_by TEXT,
+        extended_by_role TEXT,
+        days_added INTEGER,
+        mode TEXT,
+        old_expiry TIMESTAMP,
+        new_expiry TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    conn.commit()
+    conn.close()
+
+
+def migrate_db():
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(users)")
+        cols = {row[1] for row in c.fetchall()}
+        if 'key_limit' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN key_limit INTEGER DEFAULT -1')
+        if 'can_manage_db' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN can_manage_db INTEGER DEFAULT 0')
+        if 'bot_disabled_by_admin' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN bot_disabled_by_admin INTEGER DEFAULT 0')
+        if 'disable_reason' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN disable_reason TEXT')
+        if 'subscription_expiry' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN subscription_expiry TIMESTAMP NULL')
+        if 'created_by_agent' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN created_by_agent TEXT')
+        if 'bot_force_active' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN bot_force_active INTEGER DEFAULT 0')
+        if 'personal_notice' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN personal_notice TEXT')
+        if 'personal_notice_enabled' not in cols:
+            c.execute('ALTER TABLE users ADD COLUMN personal_notice_enabled INTEGER DEFAULT 0')
+        if 'desired_bot_state' not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN desired_bot_state TEXT DEFAULT 'running'")
+
+        c.execute("PRAGMA table_info(keys)")
+        kcols = {row[1] for row in c.fetchall()}
+        if 'duration_days' not in kcols:
+            c.execute('ALTER TABLE keys ADD COLUMN duration_days INTEGER DEFAULT 0')
+
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='subscription_history'")
+        if not c.fetchone():
+            c.execute('''CREATE TABLE subscription_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                extended_by TEXT,
+                extended_by_role TEXT,
+                days_added INTEGER,
+                mode TEXT,
+                old_expiry TIMESTAMP,
+                new_expiry TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+        else:
+            c.execute("PRAGMA table_info(subscription_history)")
+            hcols = {row[1] for row in c.fetchall()}
+            if 'extended_by_role' not in hcols:
+                c.execute('ALTER TABLE subscription_history ADD COLUMN extended_by_role TEXT')
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Migration warning: {e}")
+
+
+def backfill_created_by_agent():
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''SELECT id, registration_key FROM users 
+                     WHERE (created_by_agent IS NULL OR created_by_agent='') 
+                     AND is_admin=0 AND is_agent=0''')
+        rows = c.fetchall()
+        fixed = 0
+        for user_id, reg_key in rows:
+            if not reg_key:
+                continue
+            c.execute('SELECT created_by FROM keys WHERE key=?', (reg_key,))
+            kr = c.fetchone()
+            if not kr or not kr[0]:
+                continue
+            agent_name = kr[0]
+            if agent_name in ('admin', 'system', 'MAHIR TCP', 'OWNER'):
+                continue
+            c.execute('UPDATE users SET created_by_agent=? WHERE id=?', (agent_name, user_id))
+            fixed += 1
+        conn.commit()
+        conn.close()
+        if fixed:
+            print(f"✅ Backfilled created_by_agent for {fixed} users")
+    except Exception as e:
+        print(f"Backfill error: {e}")
+
+
+# ============================================================
+#  MASKING HELPERS
+# ============================================================
+def mask_email(email):
+    if not email or '@' not in str(email):
+        return '—'
+    email = str(email)
+    local, domain = email.rsplit('@', 1)
+    if len(local) <= 2:
+        masked_local = '*' * max(len(local), 2)
+    else:
+        masked_local = local[0] + '*' * (len(local) - 2) + local[-1]
+    return f"{masked_local}@{domain}"
+
+
+def mask_password(pw, length=8):
+    if not pw:
+        return '—'
+    return '●' * length
+
+
+def mask_bot_password(pw, length=10):
+    if not pw:
+        return '—'
+    return '●' * length
+
+
+def mask_uid(uid):
+    if not uid:
+        return '—'
+    uid = str(uid)
+    if len(uid) <= 4:
+        return '●' * len(uid)
+    return uid[:3] + '●' * (len(uid) - 5) + uid[-2:]
+
+
+def get_setting(key, default=None):
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT value FROM settings WHERE key=?', (key,))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else default
+    except: return default
+
+
+def set_setting(key, value):
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, str(value)))
+        conn.commit()
+        conn.close()
+        return True
+    except: return False
+
+
+def log_subscription_history(user_id, username, extended_by, extended_by_role, days_added, mode, old_expiry, new_expiry):
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''INSERT INTO subscription_history 
+                     (user_id, username, extended_by, extended_by_role, days_added, mode, old_expiry, new_expiry)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (user_id, username, extended_by, extended_by_role, days_added, mode,
+                   old_expiry.isoformat() if old_expiry else None,
+                   new_expiry.isoformat() if new_expiry else None))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print(f"History log error: {e}")
+
 
 def get_global_stop():
-    with DB() as c:
-        r = c.execute("SELECT value FROM global_state WHERE key='global_bot_stop'").fetchone()
-    return bool(r and r[0] == "1")
+    return get_setting('global_bot_stop', '0') == '1'
 
-def set_global_stop(v):
-    with DB() as c:
-        c.execute("UPDATE global_state SET value=? WHERE key='global_bot_stop'", ("1" if v else "0",))
 
 def get_global_notice():
-    with DB() as c:
-        r = c.execute("SELECT message FROM notices WHERE scope='global' AND enabled=1 LIMIT 1").fetchone()
-    return r["message"] if r else ""
+    return get_setting(
+        'global_notice_text',
+        '╔══════════════════════════════╗\n'
+        '🌸 **আসসালামু আলাইকুম** 🌸\n'
+        '╚══════════════════════════════╝\n\n'
+        '💙 **প্রিয় TCP Bot User সবাইকে,**\n\n'
+        'আশা করি আল্লাহর রহমতে আপনারা সবাই ভালো আছেন এবং সুস্থ আছেন। 🤍\n\n'
+        '🔥 **MAHIR TCP BOT**-এর সাথে থাকার জন্য আপনাদের সবাইকে আন্তরিকভাবে ধন্যবাদ। 🫶\n\n'
+        '⚙️ Bot ব্যবহার করার সময় যদি কোনো **সমস্যা • Bug • Error • Update Issue** '
+        'অথবা অন্য কোনো সমস্যা দেখতে পান, তাহলে অবশ্যই আমাদের জানাবেন।\n\n'
+        '🛠️ আপনাদের দেওয়া রিপোর্ট অনুযায়ী সমস্যাগুলো ঠিক করার সর্বোচ্চ চেষ্টা করব, ইনশাআল্লাহ। ❤️\n\n'
+        '⏳ কাজের ব্যস্ততার কারণে কোনো Update বা Fix দিতে মাঝে মাঝে একটু সময় লাগতে পারে। '
+        'তবে চিন্তা করবেন না—সময় পেলেই সবকিছু ঠিক করার চেষ্টা করব। ⚡\n\n'
+        '━━━━━━━━━━━━━━━━━━━━━━\n\n'
+        '🌸 **সবাই ভালো থাকবেন**\n'
+        '🤍 **সুস্থ থাকবেন**\n'
+        '🤲 **নিজেদের খেয়াল রাখবেন**\n\n'
+        '🔥 **MAHIR TCP BOT** 🔥\n'
+        '💫 *Stay Connected • Stay Updated* 💫\n\n'
+        '╚══════════════════════════════╝'
+    )
 
-def is_expired(expiry_iso, role):
-    if role in (ROLE_OWNER, ROLE_AGENT): return False
-    if not expiry_iso: return False
+
+def get_user_login_notice():
+    return get_setting('user_login_notice_text', '')
+
+
+def is_user_login_notice_enabled():
+    return get_setting('user_login_notice_enabled', '0') == '1'
+
+
+def validate_db_file(filepath):
     try:
-        return datetime.fromisoformat(expiry_iso) < datetime.now()
-    except Exception:
+        with open(filepath, 'rb') as f:
+            header = f.read(16)
+            if not header.startswith(b'SQLite format 3\x00'):
+                return False, "Not a valid SQLite database file"
+        conn = sqlite3.connect(filepath)
+        c = conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in c.fetchall()}
+        missing = {'users', 'keys'} - tables
+        if missing:
+            conn.close()
+            return False, f"Missing tables: {', '.join(missing)}"
+        c.execute("PRAGMA integrity_check")
+        result = c.fetchone()
+        conn.close()
+        if result[0] != 'ok':
+            return False, f"Integrity: {result[0]}"
+        return True, "OK"
+    except sqlite3.DatabaseError as e:
+        return False, f"Invalid: {e}"
+    except Exception as e:
+        return False, f"Error: {e}"
+
+
+# Module-level DB init must NEVER crash the worker process
+try:
+    init_db()
+    migrate_db()
+    backfill_created_by_agent()
+except Exception as _e:
+    print(f'[STARTUP] DB init warning (will retry on first request): {_e}')
+
+# Ensure WAL mode is active for concurrent access (owner panel + background threads)
+try:
+    _wal = get_db_connection()
+    _wal.execute('PRAGMA journal_mode=WAL')
+    _wal.execute('PRAGMA busy_timeout=30000')
+    _wal.close()
+except Exception as _e:
+    print(f'[STARTUP] WAL init note: {_e}')
+
+
+# ============================================================
+#  HELPERS
+# ============================================================
+def sanitize_filename(name):
+    return re.sub(r'[^a-zA-Z0-9_]', '_', name)
+
+
+def is_hashed(pw):
+    return len(pw) == 64 and all(c in '0123456789abcdefABCDEF' for c in pw)
+
+
+def check_password(stored, provided):
+    if is_hashed(stored):
+        return stored == hashlib.sha256(provided.encode()).hexdigest()
+    return stored == provided
+
+
+def parse_admin_uids(admin_uid_str):
+    uids = [MASTER_ADMIN_UID]; seen = {MASTER_ADMIN_UID}
+    if admin_uid_str:
+        for p in re.split(r'[,;\s]+', str(admin_uid_str)):
+            p = p.strip().strip("'\"")
+            if p and p not in seen:
+                uids.append(p); seen.add(p)
+    return uids
+
+
+def build_admin_uids_list_string(uids):
+    unique = []; seen = set()
+    for uid in uids:
+        uid = str(uid).strip()
+        if uid and uid not in seen:
+            unique.append(uid); seen.add(uid)
+    if MASTER_ADMIN_UID in unique:
+        unique.remove(MASTER_ADMIN_UID)
+    unique.insert(0, MASTER_ADMIN_UID)
+    return '[' + ', '.join(f"'{uid}'" for uid in unique) + ']'
+
+
+def inject_credentials_into_bot_file(filepath, bot_uid, bot_pw, admin_uids_list):
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        content = re.sub(r"Uid\s*,\s*Pw\s*=\s*'[^']*'\s*,\s*'[^']*'",
+                         f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
+        admin_uids_str = build_admin_uids_list_string(admin_uids_list)
+        if re.search(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", content):
+            content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {admin_uids_str}", content)
+        else:
+            content = re.sub(r"(Uid\s*,\s*Pw\s*=\s*'[^']*'\s*,\s*'[^']*')",
+                             f"\\1\nADMIN_UIDS = {admin_uids_str}", content)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return True, "OK"
+    except Exception as e:
+        return False, str(e)
+
+
+def check_subscription_status(user_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT subscription_expiry, registration_key, is_admin, is_agent FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return {'status': 'unknown', 'days_left': 0, 'expiry': None}
+    if row[2] == 1 or row[3] == 1:
+        conn.close()
+        return {'status': 'unlimited', 'days_left': 999999, 'expiry': None}
+    sub_expiry = row[0]
+    if not sub_expiry and row[1]:
+        c.execute('SELECT expiry_date FROM keys WHERE key=?', (row[1],))
+        kr = c.fetchone()
+        if kr: sub_expiry = kr[0]
+    conn.close()
+    if not sub_expiry:
+        return {'status': 'unlimited', 'days_left': 999999, 'expiry': None}
+    try:
+        expiry_dt = datetime.fromisoformat(sub_expiry)
+        diff = expiry_dt - datetime.now()
+        if diff.total_seconds() <= 0:
+            return {'status': 'expired', 'days_left': 0, 'expiry': expiry_dt}
+        total_hours = diff.total_seconds() / 3600
+        days_left = diff.days if total_hours > 24 else 0
+        return {'status': 'active', 'days_left': days_left, 'expiry': expiry_dt, 'hours_left': int(total_hours)}
+    except:
+        return {'status': 'unknown', 'days_left': 0, 'expiry': None}
+
+
+def format_time_left(expiry_dt):
+    if not expiry_dt:
+        return '∞'
+    diff = expiry_dt - datetime.now()
+    total = int(diff.total_seconds())
+    if total <= 0:
+        return 'Expired'
+    days = total // 86400
+    hours = (total % 86400) // 3600
+    minutes = (total % 3600) // 60
+    parts = []
+    if days > 0: parts.append(f"{days}d")
+    if hours > 0: parts.append(f"{hours}h")
+    if minutes > 0 and days < 7: parts.append(f"{minutes}m")
+    return ' '.join(parts) if parts else 'Less than 1m'
+
+
+def expire_user_bot(user_id):
+    """
+    ✅ Expired হলে:
+      1) Running bot process STOP
+      2) DB-তে bot_status="expired"
+      3) Bot file (.py) DELETE করবে
+    """
+    try:
+        # 1) Stop running process
+        with monitors_lock:
+            if user_id in monitors:
+                try:
+                    monitors[user_id].watchdog_running = False
+                    monitors[user_id].auto_restart_running = False
+                    monitors[user_id]._save_desired_state('stopped')
+                    monitors[user_id].stop_process(manual=False)
+                    print(f"🛑 Expired → Stop: User {user_id}")
+                except Exception as e:
+                    print(f"Stop error: {e}")
+                try:
+                    del monitors[user_id]
+                except:
+                    pass
+
+        # 2) Get bot_file from DB
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
+        row = c.fetchone()
+        bot_file = row[0] if row else None
+
+        # 3) Update DB status
+        c.execute('''UPDATE users 
+                     SET bot_status="expired", 
+                         bot_pid=NULL, 
+                         desired_bot_state="stopped" 
+                     WHERE id=?''', (user_id,))
+        conn.commit()
+        conn.close()
+
+        # 4) DELETE bot file (.py)
+        if bot_file:
+            bot_path = bot_file if os.path.dirname(bot_file) else os.path.join(USER_BOTS_DIR, bot_file)
+            if os.path.exists(bot_path):
+                try:
+                    os.remove(bot_path)
+                    print(f"🗑️ Deleted expired bot file: {bot_path}")
+                except Exception as e:
+                    print(f"Delete file error: {e}")
+            # Related files (login variant etc.)
+            for suffix in ['_login.py', '.log']:
+                extra = bot_path.replace('.py', suffix) if suffix != '.log' else bot_path + '.log'
+                if os.path.exists(extra):
+                    try: os.remove(extra)
+                    except: pass
+
+        print(f"✅ User {user_id}: Expired → Stopped & file DELETED")
+    except Exception as e:
+        print(f"expire_user_bot error: {e}")
+
+
+def check_all_expired_bots():
+    """
+    ✅ Background expiry checker — expired bot STOP + file DELETE করে।
+    """
+    while True:
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('''SELECT id, subscription_expiry, registration_key, bot_file, bot_status
+                         FROM users WHERE is_admin=0 AND is_agent=0''')
+            rows = c.fetchall()
+            conn.close()
+            for user_id, sub_expiry, reg_key, bot_file, bot_status in rows:
+                expiry_val = sub_expiry
+                if not expiry_val and reg_key:
+                    conn = get_db_connection()
+                    cc = conn.cursor()
+                    cc.execute('SELECT expiry_date FROM keys WHERE key=?', (reg_key,))
+                    kr = cc.fetchone()
+                    conn.close()
+                    if kr: expiry_val = kr[0]
+                if expiry_val:
+                    try:
+                        expiry_dt = datetime.fromisoformat(expiry_val)
+                        if datetime.now() > expiry_dt:
+                            if bot_status == 'expired':
+                                continue
+                            print(f"\n⏰ EXPIRY DETECTED → User {user_id}")
+                            expire_user_bot(user_id)
+                    except: pass
+        except Exception as e:
+            print(f"BG check error: {e}")
+        time.sleep(15)
+
+
+threading.Thread(target=check_all_expired_bots, daemon=True).start()
+
+
+def update_bot_bio(uid, password, username=None):
+    """Generate JWT then set bio via mahir-auto-bio-web"""
+    try:
+        safe_uid = requests.utils.quote(str(uid), safe='')
+        safe_pw = requests.utils.quote(str(password), safe='')
+        jwt_url = f"https://mahir-jwt-generator.vercel.app/token?uid={safe_uid}&password={safe_pw}"
+        resp = requests.get(jwt_url, timeout=20)
+        if resp.status_code != 200:
+            print(f"[BIO] JWT generator HTTP {resp.status_code}")
+            return False
+        data = resp.json()
+        if data.get('status') != 'success':
+            print(f"[BIO] JWT status not success: {data.get('status')}")
+            return False
+        jwt_token = data.get('jwt_token')
+        if not jwt_token:
+            print("[BIO] No jwt_token in response")
+            return False
+        bio_text = "[C][B]WEB : MAHIR.XO.JE [FFD700]TG : MAHIR0208"
+        encoded_jwt = requests.utils.quote(jwt_token, safe='')
+        encoded_bio = requests.utils.quote(bio_text, safe='')
+        bio_url = f"https://mahir-auto-bio-web.vercel.app/api/bio?jwt={encoded_jwt}&bio={encoded_bio}"
+        bio_resp = requests.get(bio_url, timeout=20)
+        ok = bio_resp.status_code == 200
+        print(f"[BIO] Bio update {'OK' if ok else 'FAILED'} for UID {uid}")
+        return ok
+    except Exception as e:
+        print(f"[BIO] Error: {e}")
         return False
 
-# ══════════════════════════════════════════════════════════════
-# AUTH DECORATORS
-# ══════════════════════════════════════════════════════════════
-def _is_api():
-    return request.path.startswith("/api/") or request.is_json
 
-def login_required(f):
-    @wraps(f)
-    def w(*a, **k):
-        if not session.get("username"):
-            return (jsonify({"error":"login required"}),401) if _is_api() else redirect(url_for("page_login"))
-        return f(*a, **k)
-    return w
-
-def owner_required(f):
-    @wraps(f)
-    def w(*a, **k):
-        if session.get("role") != ROLE_OWNER:
-            return (jsonify({"error":"owner only"}),403) if _is_api() else redirect(url_for("page_login"))
-        return f(*a, **k)
-    return w
-
-def agent_or_owner(f):
-    @wraps(f)
-    def w(*a, **k):
-        if session.get("role") not in (ROLE_OWNER, ROLE_AGENT):
-            return (jsonify({"error":"agent/owner only"}),403) if _is_api() else redirect(url_for("page_login"))
-        return f(*a, **k)
-    return w
-
-# ══════════════════════════════════════════════════════════════
-# PROCESS MONITOR
-# ══════════════════════════════════════════════════════════════
+# ============================================================
+#  PROCESS MONITOR
+# ============================================================
 class ProcessMonitor:
-    def __init__(self, user_id, username, bot_file):
-        self.user_id   = user_id
-        self.username  = username
-        self.bot_file  = bot_file
-        self.process   = None
-        self.is_running= False
-        self.start_time= None
+    def __init__(self, user_id, bot_file_path):
+        self.user_id = user_id
+        self.process = None
+        self.process_name = bot_file_path
+        self.is_running = False
+        self.start_time = None
         self.restart_count = 0
-        self.rapid_restarts= 0
-        self.last_restart_ts = 0.0
-        self.user_stopped = False
+        self.output_lines = []
+        self.full_history = []
+        self.error_lines = []
+        self.message_info_lines = []
+        self.max_display_lines = 500
+        self.max_history_lines = 5000
+        self.max_error_lines = 1000
+        self.max_message_lines = 500
         self.lock = threading.Lock()
-
-        self.output_lines, self.error_lines, self.message_lines = [], [], []
-        self.max_out, self.max_err, self.max_msg = 300, 500, 200
-
-        self.bot_uid = self.bot_name = self.bot_region = "N/A"
-        self.bot_status = "🔴 OFFLINE"
-        self.last_sender_uid = self.last_guild_name = self.last_nickname = "N/A"
-        self.last_message = self.last_pfp_url = "N/A"
+        self.output_queue = Queue()
+        self.output_thread = None
         self.cpu_history = [0] * 20
         self.ram_history = [0] * 20
+        self.bot_uid = "N/A"
+        self.bot_name = "N/A"
+        self.bot_region = "N/A"
+        self.bot_status = "🔴 OFFLINE"
+        self.bot_clan_id = "N/A"
+        self.bot_server = "N/A"
+        self.bot_chat_server = "N/A"
+        self.bot_by = "N/A"
+        self.last_sender_uid = "N/A"
+        self.last_guild_name = "N/A"
+        self.last_nickname = "N/A"
+        self.last_message = "N/A"
+        self.last_pfp_url = "N/A"
+        self.account_info_found = False
+        self.banner_received = False
+        self.collecting_message = False
+        self.message_started = False
+        self.message_stored = False
+        self.message_buffer = []
+        self.temp_sender_uid = "N/A"
+        self.temp_nickname = "N/A"
+        self.temp_message = "N/A"
+        self.temp_guild_name = "N/A"
+        self.temp_pfp_url = "N/A"
 
-    def _db(self, pid=None, status=None):
+        self.desired_state = self._load_desired_state()
+        self.last_restart_reason = None
+
+        self.auto_restart_running = False
+        self.auto_restart_thread = None
+
+        self.watchdog_running = True
+        self.watchdog_thread = threading.Thread(target=self._expiry_watchdog, daemon=True)
+        self.watchdog_thread.start()
+
+    def _load_desired_state(self):
         try:
-            with DB() as c:
-                if pid is not None:
-                    c.execute("UPDATE users SET bot_pid=?,bot_status=? WHERE id=?",
-                              (pid, status or "running", self.user_id))
-                elif status is not None:
-                    c.execute("UPDATE users SET bot_status=? WHERE id=?", (status, self.user_id))
-        except Exception: pass
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('SELECT desired_bot_state FROM users WHERE id=?', (self.user_id,))
+            row = c.fetchone()
+            conn.close()
+            if row and row[0] in ('running', 'stopped'):
+                return row[0]
+        except Exception:
+            pass
+        return 'running'
 
-    def start(self):
+    def _save_desired_state(self, state):
+        self.desired_state = state
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('UPDATE users SET desired_bot_state=? WHERE id=?', (state, self.user_id))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[desired_state] save error user={self.user_id}: {e}")
+
+    def _auto_restart_loop(self):
+        return
+
+    def _expiry_watchdog(self):
+        while self.watchdog_running:
+            try:
+                time.sleep(10)
+                if not self.watchdog_running:
+                    break
+                if not self.is_running:
+                    continue
+                conn = get_db_connection()
+                c = conn.cursor()
+                c.execute('SELECT subscription_expiry, registration_key FROM users WHERE id=?', (self.user_id,))
+                row = c.fetchone()
+                expiry_val = None
+                if row:
+                    expiry_val = row[0]
+                    if not expiry_val and row[1]:
+                        c.execute('SELECT expiry_date FROM keys WHERE key=?', (row[1],))
+                        kr = c.fetchone()
+                        if kr: expiry_val = kr[0]
+                conn.close()
+                if expiry_val:
+                    try:
+                        expiry_dt = datetime.fromisoformat(expiry_val)
+                        if datetime.now() > expiry_dt:
+                            print(f"\n⏰ WATCHDOG: User {self.user_id} EXPIRED → Killing process + deleting file")
+                            self.watchdog_running = False
+                            self.auto_restart_running = False
+                            self.stop_process()
+                            expire_user_bot(self.user_id)
+                            break
+                    except: pass
+            except Exception as e:
+                print(f"Watchdog error: {e}")
+
+    def can_start(self):
+        sub = check_subscription_status(self.user_id)
+        if sub['status'] == 'expired':
+            return False, "expired"
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('SELECT bot_disabled_by_admin, bot_force_active FROM users WHERE id=?', (self.user_id,))
+            row = c.fetchone()
+            conn.close()
+            if row and row[0]:
+                return False, "admin_disabled"
+            if get_global_stop():
+                if row and row[1]:
+                    return True, "force_active"
+                return False, "global_stop"
+        except: pass
+        return True, "ok"
+
+    def clean_ansi(self, text):
+        if not text: return ""
+        text = re.compile(r'\x1b\[[0-9;]*[mK]').sub('', text)
+        text = re.sub(r'\[\d+m', '', text)
+        text = re.sub(r'\[\d+;\d+m', '', text)
+        text = re.sub(r'\[\d+;\d+;\d+m', '', text)
+        text = text.replace('[]', '')
+        try:
+            text = text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+        except:
+            text = ''.join(c for c in text if c.isprintable() or c in '\n\r\t')
+        return text.strip()
+
+    def parse_banner(self, clean):
+        d = {}
+        s = re.sub(r'[║│┃]+', ' ', clean)
+        s = s.strip()
+
+        m = re.search(r'STATUS\s*:\s*(.+?)(?:\s{2,}|$)', s)
+        if m:
+            val = m.group(1).strip()
+            if 'READY' in val.upper() or 'RUNNING' in val.upper() or 'ONLINE' in val.upper():
+                d['status'] = "🟢 ACTIVE & ONLINE"
+            else:
+                d['status'] = val
+
+        m = re.search(r'\bNAME\s*:\s*(.+?)(?:\s{2,}|$)', s)
+        if m:
+            v = m.group(1).strip()
+            v = re.sub(r'[║│┃].*$', '', v).strip()
+            if v and v not in ('N/A', '---', 'Name', '—'):
+                d['name'] = v
+
+        m = re.search(r'\bUID\s*:\s*(\d+)', s)
+        if m:
+            d['uid'] = m.group(1)
+
+        m = re.search(r'\bREGION\s*:\s*([A-Za-z]+)', s)
+        if m:
+            d['region'] = m.group(1).strip().upper()
+
+        m = re.search(r'CLAN_ID\s*:\s*(\S+)', s)
+        if m:
+            v = m.group(1).strip()
+            if v and v not in ('—', '-', 'None'):
+                d['clan_id'] = v
+
+        m = re.search(r'\bONLINE\s*:\s*([\d.]+:\d+)', s)
+        if m:
+            d['server'] = m.group(1)
+
+        m = re.search(r'\bCHAT\s*:\s*([\d.]+:\d+)', s)
+        if m:
+            d['chat_server'] = m.group(1)
+
+        m = re.search(r'\bBY\s*:\s*(.+?)(?:\s{2,}|$)', s)
+        if m:
+            v = m.group(1).strip()
+            v = re.sub(r'[║│┃].*$', '', v).strip()
+            if v:
+                d['by'] = v
+
+        return d
+
+    def parse_message_info(self, line):
+        clean = self.clean_ansi(line)
+        if not clean: return None
+        m = re.search(r'Sender UID\s*[:：]\s*(\d+)', clean, re.IGNORECASE)
+        if m: return {'type': 'sender_uid', 'value': m.group(1)}
+        m = re.search(r'Nickname\s*[:：]\s*(.+?)(?:\s*$)', clean, re.IGNORECASE)
+        if m:
+            v = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', m.group(1).strip()))
+            if v and len(v) > 1: return {'type': 'nickname', 'value': v[:100]}
+        m = re.search(r'Message\s*[:：]\s*(.+?)(?:\s*$)', clean, re.IGNORECASE)
+        if m:
+            v = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', m.group(1).strip()))
+            if v: return {'type': 'message', 'value': v[:500]}
+        m = re.search(r'Guild Name\s*[:：]\s*(.+?)(?:\s*$)', clean, re.IGNORECASE)
+        if m:
+            v = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', re.sub(r'\[[0-9;]*m', '', m.group(1).strip()))
+            if v: return {'type': 'guild_name', 'value': v[:100]}
+        m = re.search(r'PFP URL\s*[:：]\s*(https?://[^\s]+)', clean, re.IGNORECASE)
+        if m: return {'type': 'pfp_url', 'value': m.group(1)[:200]}
+        return None
+
+    def process_line(self, line, timestamp):
+        clean = self.clean_ansi(line)
+        if not clean: return
+
+        if 'MAHIR BOT ONLINE' in clean or 'MAHIR BOT' in clean.upper():
+            self.banner_received = True
+            d = self.parse_banner(clean)
+            if d:
+                with self.lock:
+                    if 'status' in d: self.bot_status = d['status']
+                    if 'name' in d: self.bot_name = d['name']
+                    if 'uid' in d: self.bot_uid = d['uid']
+                    if 'region' in d: self.bot_region = d['region']
+                    if 'clan_id' in d: self.bot_clan_id = d['clan_id']
+                    if 'server' in d: self.bot_server = d['server']
+                    if 'chat_server' in d: self.bot_chat_server = d['chat_server']
+                    if 'by' in d: self.bot_by = d['by']
+                    self.account_info_found = True
+            return
+
+        if self.banner_received:
+            d = self.parse_banner(clean)
+            if d:
+                with self.lock:
+                    if 'status' in d: self.bot_status = d['status']
+                    if 'name' in d and self.bot_name in ('N/A', '', None): self.bot_name = d['name']
+                    if 'uid' in d and self.bot_uid in ('N/A', '', None): self.bot_uid = d['uid']
+                    if 'region' in d: self.bot_region = d['region']
+                    if 'clan_id' in d: self.bot_clan_id = d['clan_id']
+                    if 'server' in d: self.bot_server = d['server']
+                    if 'chat_server' in d: self.bot_chat_server = d['chat_server']
+                    if 'by' in d: self.bot_by = d['by']
+                    self.account_info_found = True
+
+        if 'MESSAGE INFO' in clean or '[ MESSAGE INFO ]' in clean:
+            self.collecting_message = True; self.message_started = True; self.message_stored = False
+            self.message_buffer = [clean]
+            self.temp_sender_uid = "N/A"; self.temp_nickname = "N/A"; self.temp_message = "N/A"
+            self.temp_guild_name = "N/A"; self.temp_pfp_url = "N/A"
+            return
+
+        if self.collecting_message and self.message_started:
+            self.message_buffer.append(clean)
+            parsed = self.parse_message_info(clean)
+            if parsed:
+                t = parsed['type']
+                if t == 'sender_uid': self.temp_sender_uid = parsed['value']
+                elif t == 'nickname': self.temp_nickname = parsed['value']
+                elif t == 'message': self.temp_message = parsed['value']
+                elif t == 'guild_name': self.temp_guild_name = parsed['value']
+                elif t == 'pfp_url': self.temp_pfp_url = parsed['value']
+            if '╚' in clean and '╝' in clean:
+                self.collecting_message = False; self.message_started = False
+                if not self.message_stored and self.temp_sender_uid != 'N/A':
+                    with self.lock:
+                        self.last_sender_uid = self.temp_sender_uid
+                        self.last_nickname = self.temp_nickname
+                        self.last_message = self.temp_message
+                        self.last_guild_name = self.temp_guild_name
+                        self.last_pfp_url = self.temp_pfp_url
+                        self.bot_status = "🟢 ACTIVE & ONLINE"
+                        self.message_info_lines.append({
+                            'timestamp': timestamp,
+                            'data': {
+                                'sender_uid': self.temp_sender_uid, 'nickname': self.temp_nickname,
+                                'message': self.temp_message, 'guild_name': self.temp_guild_name,
+                                'pfp_url': self.temp_pfp_url
+                            }
+                        })
+                        if len(self.message_info_lines) > self.max_message_lines:
+                            self.message_info_lines = self.message_info_lines[-self.max_message_lines:]
+                        self.message_stored = True
+                self.message_buffer = []
+            return
+
+        if 'LOGIN SUCCESSFUL' in clean:
+            with self.lock:
+                if self.bot_status == "🔴 OFFLINE":
+                    self.bot_status = "🟢 ACTIVE & ONLINE"
+            return
+
+    def is_error_line(self, line):
+        if not line: return False
+        l = line.lower()
+        for p in ['error','exception','failed','traceback','critical','fatal','timeout',
+                  'connection refused','permission denied','keyerror','attributeerror',
+                  'typeerror','valueerror','indexerror','authentication failed','disconnected']:
+            if p in l: return True
+        return False
+
+    def start_process(self):
+        can, reason = self.can_start()
+        if not can:
+            with self.lock:
+                self.is_running = False
+                self.bot_status = "🔴 BLOCKED"
+            print(f"⛔ Cannot start user {self.user_id}: {reason}")
+            return False
+
         with self.lock:
             if self.process and self.process.poll() is None:
+                self._save_desired_state('running')
                 return True
-            if not os.path.exists(self.bot_file):
-                self.bot_status = "⚠️ NO FILE"; self._db(status="no_file"); return False
+            if self.process:
+                self._stop_process_internal()
+            if not os.path.exists(self.process_name):
+                print(f"Error: {self.process_name} not found")
+                return False
+
             try:
+                env_copy = os.environ.copy()
+                env_copy['TERM'] = 'xterm'
+                env_copy['PYTHONUNBUFFERED'] = '1'
+                env_copy['PYTHONIOENCODING'] = 'utf-8'
+                env_copy['LANG'] = 'en_US.UTF-8'
+                env_copy['LC_ALL'] = 'en_US.UTF-8'
+
                 self.process = subprocess.Popen(
-                    [sys.executable, "-u", self.bot_file],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1, errors="replace",
+                    [sys.executable, "-u", self.process_name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    text=True, bufsize=1,
+                    universal_newlines=True, errors='replace',
+                    cwd=USER_BOTS_DIR,
+                    env=env_copy,
                     start_new_session=True,
                 )
+                self.is_running = True
+                self.start_time = datetime.now()
+                self.bot_status = "🟢 ACTIVE & ONLINE"
+                self._save_desired_state('running')
+
+                try:
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute('UPDATE users SET bot_status="running", bot_pid=? WHERE id=?',
+                              (self.process.pid, self.user_id))
+                    conn.commit(); conn.close()
+                except: pass
+
+                def enqueue():
+                    try:
+                        for line in iter(self.process.stdout.readline, ''):
+                            if line:
+                                ts = datetime.now().strftime('%H:%M:%S')
+                                self.output_queue.put(f"[{ts}] {line.rstrip()}")
+                                try:
+                                    self.process_line(line, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                                except Exception as pe:
+                                    print(f"[process_line error] {pe}")
+                    except Exception as e:
+                        print(f"[enqueue error user={self.user_id}] {e}")
+
+                self.output_thread = threading.Thread(target=enqueue, daemon=True)
+                self.output_thread.start()
+
+                time.sleep(0.3)
+                if self.process.poll() is not None:
+                    exit_code = self.process.returncode
+                    print(f"⚠️ Bot process died immediately (exit={exit_code}) for user {self.user_id}")
+                    self.is_running = False
+                    self.bot_status = "🔴 CRASHED"
+                    return False
+
+                return True
             except Exception as e:
-                self.bot_status = f"❌ ERROR: {e}"; self._db(status="error"); return False
-            self.is_running = True
-            self.start_time = datetime.now()
-            self.bot_status = "🟢 RUNNING"
-            self.user_stopped = False
-            threading.Thread(target=self._reader, daemon=True).start()
-            self._db(pid=self.process.pid, status="running")
-            return True
+                self.output_lines.append(f"Error: {str(e)}")
+                self.is_running = False
+                return False
 
-    def _reader(self):
-        try:
-            for line in iter(self.process.stdout.readline, ''):
-                if not line: break
-                ts = datetime.now().strftime('%H:%M:%S')
-                line = line.rstrip()
-                with self.lock:
-                    self.output_lines.append(f"[{ts}] {line}")
-                    if len(self.output_lines) > self.max_out:
-                        self.output_lines = self.output_lines[-self.max_out:]
-                    if self._is_err(line):
-                        self.error_lines.append(f"[{ts}] {line}")
-                        self.error_lines = self.error_lines[-self.max_err:]
-                self._parse(line)
-        except Exception: pass
-
-    @staticmethod
-    def _is_err(line):
-        l = line.lower()
-        return any(k in l for k in ("error","exception","traceback","failed","critical",
-                                    "fatal","timeout","refused","denied","keyerror",
-                                    "attributeerror","typeerror","valueerror","indexerror"))
-
-    def _parse(self, line):
-        c = clean_ansi(line)
-        if not c: return
-        for pat, field, conv in [
-            (r'UID\s*[:：]\s*(\d+)', 'bot_uid', str),
-            (r'NAME\s*[:：]\s*(.+?)$', 'bot_name', lambda v: v[:60]),
-            (r'REGION\s*[:：]\s*(\w+)', 'bot_region', lambda v: v.upper()),
-            (r'Sender UID\s*[:：]\s*(\d+)', 'last_sender_uid', str),
-        ]:
-            m = re.search(pat, c, re.I)
-            if m:
-                with self.lock: setattr(self, field, conv(m.group(1).strip()))
-        m = re.search(r'Nickname\s*[:：]\s*(.+?)$', c, re.I)
-        if m:
-            with self.lock: self.last_nickname = m.group(1).strip()[:60]
-        m = re.search(r'Guild Name\s*[:：]\s*(.+?)$', c, re.I)
-        if m:
-            with self.lock: self.last_guild_name = m.group(1).strip()[:60]
-        m = re.search(r'PFP URL\s*[:：]\s*(https?://\S+)', c, re.I)
-        if m:
-            with self.lock: self.last_pfp_url = m.group(1)[:200]
-        m = re.search(r'Message\s*[:：]\s*(.+?)$', c, re.I)
-        if m:
-            with self.lock:
-                self.last_message = m.group(1).strip()[:200]
-                self.message_lines.append({
-                    "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    "data": {
-                        "sender_uid": self.last_sender_uid,
-                        "nickname":   self.last_nickname,
-                        "message":    self.last_message,
-                        "guild_name": self.last_guild_name,
-                        "pfp_url":    self.last_pfp_url,
-                    }
-                })
-                self.message_lines = self.message_lines[-self.max_msg:]
-        if "LOGIN SUCCESSFUL" in c.upper():
-            with self.lock: self.bot_status = "🟢 ACTIVE & ONLINE"
-
-    def stop(self, by_user=True):
-        with self.lock:
-            if by_user: self.user_stopped = True
-            if self.process:
+    def _stop_process_internal(self):
+        if self.process:
+            try:
                 try:
                     pgid = os.getpgid(self.process.pid)
                     os.killpg(pgid, signal.SIGTERM)
-                except Exception:
-                    try: self.process.terminate()
-                    except Exception: pass
-                try: self.process.wait(timeout=5)
-                except Exception:
+                    time.sleep(0.3)
                     try:
-                        pgid = os.getpgid(self.process.pid)
                         os.killpg(pgid, signal.SIGKILL)
-                    except Exception:
-                        try: self.process.kill()
-                        except Exception: pass
-                self.process = None
-            self.is_running = False
-            self.bot_status = "🔴 OFFLINE"
-            self._db(pid=None, status="stopped")
+                    except: pass
+                except:
+                    pass
 
-    def restart(self, by_watchdog=False):
-        if by_watchdog:
-            now = time.time()
-            if now - self.last_restart_ts < 30: self.rapid_restarts += 1
-            else: self.rapid_restarts = 0
-            self.last_restart_ts = now
-            if self.rapid_restarts > MAX_RAPID:
-                time.sleep(min(COOLDOWN, 60))
-                self.rapid_restarts = 0
-        self.stop(by_user=False)
-        time.sleep(1)
-        ok = self.start()
-        if ok: self.restart_count += 1
-        return ok
+                p = psutil.Process(self.process.pid)
+                for child in p.children(recursive=True):
+                    try: child.kill()
+                    except: pass
+                try:
+                    p.kill(); p.wait(timeout=3)
+                except: pass
+            except:
+                try: self.process.kill()
+                except: pass
+            self.process = None
+        self.is_running = False
+        self.bot_status = "🔴 OFFLINE"
+        try:
+            conn = get_db_connection()
+            c = conn.cursor()
+            c.execute('UPDATE users SET bot_pid=NULL, bot_status="stopped" WHERE id=?', (self.user_id,))
+            conn.commit(); conn.close()
+        except: pass
 
-    def status(self):
-        alive = self.process is not None and self.process.poll() is None
+    def stop_process(self, manual=True):
+        with self.lock:
+            if manual:
+                self._save_desired_state('stopped')
+                print(f"🛑 MANUAL STOP: user {self.user_id} → desired_state=stopped")
+            self._stop_process_internal()
+
+    def restart_logic(self):
+        self._save_desired_state('running')
+        self.last_restart_reason = 'MANUAL_RESTART'
+        self.stop_process(manual=False)
+        time.sleep(2)
+        s = self.start_process()
+        if s:
+            with self.lock: self.restart_count += 1
+        return s
+
+    def update_logs(self):
+        new_logs = []
+        while not self.output_queue.empty():
+            try: new_logs.append(self.output_queue.get_nowait())
+            except Empty: break
+        if new_logs:
+            with self.lock:
+                self.full_history.extend(new_logs)
+                if len(self.full_history) > self.max_history_lines:
+                    self.full_history = self.full_history[-self.max_history_lines:]
+                self.output_lines.extend(new_logs)
+                if len(self.output_lines) > self.max_display_lines:
+                    self.output_lines = self.output_lines[-self.max_display_lines:]
+                for log in new_logs:
+                    if self.is_error_line(log):
+                        self.error_lines.append(log)
+                        if len(self.error_lines) > self.max_error_lines:
+                            self.error_lines = self.error_lines[-self.max_error_lines:]
+        return new_logs
+
+    def get_status(self):
+        self.update_logs()
         uptime = "00:00:00"
-        if alive and self.start_time:
+        if self.is_running and self.start_time:
             uptime = str(datetime.now() - self.start_time).split('.')[0]
         try:
-            cpu = psutil.cpu_percent(interval=0.1)
+            cpu = psutil.cpu_percent(interval=0.5)
             ram = psutil.virtual_memory().percent
             try: disk = psutil.disk_usage('/').percent
-            except Exception: disk = psutil.disk_usage(os.path.expanduser("~")).percent
-        except Exception:
-            cpu = ram = disk = 0
+            except: disk = psutil.disk_usage(os.path.expanduser("~")).percent
+        except: cpu, ram, disk = 0, 0, 0
         with self.lock:
-            self.cpu_history.append(cpu); self.cpu_history = self.cpu_history[-20:]
-            self.ram_history.append(ram); self.ram_history = self.ram_history[-20:]
-            return {
-                "is_running": alive,
-                "uptime": uptime,
-                "restart_count": self.restart_count,
-                "cpu": cpu, "ram": ram, "disk": disk,
-                "cpu_history": self.cpu_history, "ram_history": self.ram_history,
-                "logs": self.output_lines[-200:],
-                "error_logs": self.error_lines[-100:],
-                "message_history": self.message_lines[-50:],
-                "bot_uid": self.bot_uid, "bot_name": self.bot_name,
-                "bot_region": self.bot_region, "bot_status": self.bot_status,
-                "last_sender_uid": self.last_sender_uid,
-                "last_guild_name": self.last_guild_name,
-                "last_nickname": self.last_nickname,
-                "last_message": self.last_message,
-                "last_pfp_url": self.last_pfp_url,
-            }
+            self.cpu_history.append(cpu); self.ram_history.append(ram)
+            if len(self.cpu_history) > 20:
+                self.cpu_history = self.cpu_history[-20:]; self.ram_history = self.ram_history[-20:]
+        return {
+            'is_running': self.is_running, 'process_name': os.path.basename(self.process_name),
+            'uptime': uptime, 'script_remaining': 'No Limit', 'cpu': cpu, 'ram': ram, 'disk': disk,
+            'restart_count': self.restart_count, 'logs': self.output_lines[-200:],
+            'full_logs': self.full_history, 'error_logs': self.error_lines[-200:],
+            'message_history': self.message_info_lines[-50:], 'bot_uid': self.bot_uid,
+            'bot_name': self.bot_name, 'bot_status': self.bot_status, 'bot_region': self.bot_region,
+            'bot_clan_id': self.bot_clan_id,
+            'bot_server': self.bot_server, 'bot_chat_server': self.bot_chat_server,
+            'bot_by': self.bot_by,
+            'last_sender_uid': self.last_sender_uid, 'last_guild_name': self.last_guild_name,
+            'last_nickname': self.last_nickname, 'last_message': self.last_message,
+            'last_pfp_url': self.last_pfp_url, 'cpu_history': self.cpu_history,
+            'ram_history': self.ram_history, 'auto_restart_minutes': 0
+        }
 
     def clear_errors(self):
         with self.lock: self.error_lines = []
+        return True
+
     def clear_messages(self):
-        with self.lock: self.message_lines = []
+        with self.lock: self.message_info_lines = []
+        return True
 
-# ══════════════════════════════════════════════════════════════
-# MONITOR REGISTRY + WATCHDOG
-# ══════════════════════════════════════════════════════════════
-monitors = {}
-monitors_lock = threading.Lock()
+    def hard_reset(self):
+        self.stop_process()
+        with self.lock:
+            self.restart_count = 0
+            self.output_lines = []; self.full_history = []
+            self.error_lines = []; self.message_info_lines = []
+            self.account_info_found = False
+            self.banner_received = False
+            self.bot_uid = "N/A"; self.bot_name = "N/A"; self.bot_status = "🔴 OFFLINE"
+            self.bot_region = "N/A"; self.bot_clan_id = "N/A"
+            self.bot_server = "N/A"; self.bot_chat_server = "N/A"; self.bot_by = "N/A"
+            self.last_sender_uid = "N/A"; self.last_guild_name = "N/A"
+            self.last_nickname = "N/A"; self.last_message = "N/A"; self.last_pfp_url = "N/A"
+        self._save_desired_state('running')
+        self.last_restart_reason = 'HARD_RESET'
+        return self._force_start_process()
 
-def get_monitor(user_id, username=None, bot_file=None):
-    with monitors_lock:
-        if user_id in monitors: return monitors[user_id]
-        if bot_file is None or username is None:
-            with DB() as c:
-                r = c.execute("SELECT username, bot_file FROM users WHERE id=?", (user_id,)).fetchone()
-                if not r: return None
-                username, bot_file = r["username"], r["bot_file"]
-        if not bot_file: return None
-        path = bot_file if os.path.isabs(bot_file) else os.path.join(BOT_DIR, bot_file)
-        if not os.path.exists(path): return None
-        m = ProcessMonitor(user_id, username, path)
-        monitors[user_id] = m
-        return m
+    def _force_start_process(self):
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                return True
+            if self.process:
+                self._stop_process_internal()
+            if not os.path.exists(self.process_name):
+                print(f"Error: {self.process_name} not found")
+                return False
+            try:
+                env_copy = os.environ.copy()
+                env_copy['TERM'] = 'xterm'
+                env_copy['PYTHONUNBUFFERED'] = '1'
+                env_copy['PYTHONIOENCODING'] = 'utf-8'
+                env_copy['LANG'] = 'en_US.UTF-8'
+                env_copy['LC_ALL'] = 'en_US.UTF-8'
 
-def drop_monitor(user_id):
-    with monitors_lock:
-        m = monitors.pop(user_id, None)
-    if m:
-        try: m.stop(by_user=True)
-        except Exception: pass
-
-class Watchdog:
-    def __init__(self):
-        self._stop = threading.Event()
-        self.thread = threading.Thread(target=self._loop, daemon=True)
-    def start(self): self.thread.start()
-    def stop(self):  self._stop.set()
-    def _loop(self):
-        while not self._stop.wait(WATCH_INTERVAL):
-            try: self._tick()
-            except Exception as e: print("[watchdog]", e)
-    def _tick(self):
-        global_stop = get_global_stop()
-        with DB() as c:
-            users = c.execute("""SELECT id, username, bot_file, is_disabled, role,
-                                        subscription_expiry FROM users
-                                 WHERE bot_file IS NOT NULL""").fetchall()
-        for u in users:
-            monitor = get_monitor(u["id"], u["username"], u["bot_file"])
-            if not monitor: continue
-            expired = is_expired(u["subscription_expiry"], u["role"])
-            if expired:
-                if monitor.is_running: monitor.stop(by_user=False)
-                monitor.bot_status = "⏰ EXPIRED"
-                monitor._db(status="expired")
-                continue
-            if u["is_disabled"] or global_stop:
-                if monitor.is_running: monitor.stop(by_user=False)
-                continue
-            if monitor.user_stopped: continue
-            if not monitor.is_running:
-                monitor.restart(by_watchdog=True)
-
-watchdog = Watchdog()
-
-# ══════════════════════════════════════════════════════════════
-# BOT DEPLOYMENT
-# ══════════════════════════════════════════════════════════════
-def deploy_bot(user_id, username, admin_uid, bot_uid, bot_pw):
-    fname = f"{safe_name(username)}_mahir.py"
-    path = os.path.join(BOT_DIR, fname)
-    if not os.path.exists(BOT_SOURCE):
-        with open(BOT_SOURCE, "w") as f:
-            f.write("# Mahir bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
-    shutil.copy2(BOT_SOURCE, path)
-    with open(path) as f: content = f.read()
-    content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'",
-                     f"Uid, Pw = '{bot_uid}', '{bot_pw}'", content)
-    content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]",
-                     f"ADMIN_UIDS = ['{admin_uid}']", content)
-    with open(path, "w") as f: f.write(content)
-    with DB() as c:
-        c.execute("""UPDATE users SET bot_file=?, admin_uid=?, bot_uid=?, bot_pw=?,
-                     bot_status='configured' WHERE id=?""",
-                  (fname, admin_uid, bot_uid, bot_pw, user_id))
-    return fname
-
-# ══════════════════════════════════════════════════════════════
-# PAGE ROUTES
-# ══════════════════════════════════════════════════════════════
-@app.route("/")
-def page_index():
-    r = session.get("role")
-    if r == ROLE_OWNER: return redirect(url_for("page_owner"))
-    if r == ROLE_AGENT: return redirect(url_for("page_agent"))
-    if r == ROLE_USER:  return redirect(url_for("page_user"))
-    return redirect(url_for("page_login"))
-
-@app.route("/login", methods=["GET","POST"])
-@limiter.limit("15 per minute", methods=["POST"])
-def page_login():
-    if request.method == "POST":
-        u = request.form.get("username","").strip()
-        p = request.form.get("password","")
-        # env owner
-        if u == OWNER_USER and OWNER_HASH and check_password_hash(OWNER_HASH, p):
-            session.permanent = True
-            session["user_id"] = -1
-            session["username"] = u
-            session["role"] = ROLE_OWNER
-            audit("login", u + " (owner)")
-            return redirect(url_for("page_owner"))
-        with DB() as c:
-            row = c.execute("SELECT id,username,password,is_admin,role FROM users WHERE username=?", (u,)).fetchone()
-        if row and check_password_hash(row["password"], p):
-            role = row["role"] or (ROLE_OWNER if row["is_admin"] else ROLE_USER)
-            session.permanent = True
-            session["user_id"] = row["id"]
-            session["username"] = row["username"]
-            session["role"] = role
-            audit("login", u)
-            if role == ROLE_OWNER: return redirect(url_for("page_owner"))
-            if role == ROLE_AGENT: return redirect(url_for("page_agent"))
-            return redirect(url_for("page_user"))
-        flash("Invalid credentials", "error")
-    return render_template("login.html")
-
-@app.route("/register", methods=["GET","POST"])
-@limiter.limit("10 per minute", methods=["POST"])
-def page_register():
-    if request.method == "POST":
-        u = request.form.get("username","").strip()
-        p = request.form.get("password","")
-        e = request.form.get("email","")
-        k = request.form.get("registration_key","").strip()
-        if not (u and p and k):
-            flash("All fields required", "error")
-            return render_template("register.html")
-        with DB() as c:
-            kr = c.execute("SELECT id,expiry_date,is_used FROM keys WHERE key=?", (k,)).fetchone()
-            if not kr or kr["is_used"]:
-                flash("Invalid or used key", "error"); return render_template("register.html")
-            if kr["expiry_date"]:
+                self.process = subprocess.Popen(
+                    [sys.executable, "-u", self.process_name],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    text=True, bufsize=1,
+                    universal_newlines=True, errors='replace',
+                    cwd=USER_BOTS_DIR,
+                    env=env_copy,
+                    start_new_session=True,
+                )
+                self.is_running = True
+                self.start_time = datetime.now()
+                self.bot_status = "🟢 ACTIVE & ONLINE"
                 try:
-                    if datetime.fromisoformat(kr["expiry_date"]) < datetime.now():
-                        flash("Key expired", "error"); return render_template("register.html")
-                except Exception: pass
-            if c.execute("SELECT 1 FROM users WHERE username=?", (u,)).fetchone():
-                flash("Username taken", "error"); return render_template("register.html")
-            c.execute("""INSERT INTO users (username,password,email,registration_key,
-                         role, subscription_expiry, is_admin)
-                         VALUES (?,?,?,?,?,?,0)""",
-                      (u, generate_password_hash(p, method="pbkdf2:sha256:600000"),
-                       e, k, ROLE_USER, kr["expiry_date"]))
-            c.execute("UPDATE keys SET is_used=1, used_by=?, used_at=CURRENT_TIMESTAMP WHERE key=?",
-                      (u, k))
-            c.execute("INSERT INTO subscriptions (username,key,start_date,expiry_date) VALUES (?,?,CURRENT_TIMESTAMP,?)",
-                      (u, k, kr["expiry_date"]))
-        audit("register", u)
-        flash("Registered! Please login.", "success")
-        return redirect(url_for("page_login"))
-    return render_template("register.html")
+                    conn = get_db_connection()
+                    c = conn.cursor()
+                    c.execute('UPDATE users SET bot_status="running", bot_pid=? WHERE id=?',
+                              (self.process.pid, self.user_id))
+                    conn.commit(); conn.close()
+                except: pass
 
-@app.route("/logout")
-def page_logout():
-    u = session.get("username","")
-    session.clear()
-    audit("logout", u)
-    return redirect(url_for("page_login"))
+                def enqueue():
+                    try:
+                        for line in iter(self.process.stdout.readline, ''):
+                            if line:
+                                ts = datetime.now().strftime('%H:%M:%S')
+                                self.output_queue.put(f"[{ts}] {line.rstrip()}")
+                                try:
+                                    self.process_line(line, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                                except Exception as pe:
+                                    print(f"[process_line error] {pe}")
+                    except Exception as e:
+                        print(f"[enqueue error user={self.user_id}] {e}")
 
-@app.route("/owner")
-@owner_required
-def page_owner():
-    return render_template("owner.html",
-                           username=session.get("username"),
-                           role=session.get("role"))
+                self.output_thread = threading.Thread(target=enqueue, daemon=True)
+                self.output_thread.start()
+                return True
+            except Exception as e:
+                self.output_lines.append(f"Error: {str(e)}")
+                return False
 
-@app.route("/agent")
-@agent_or_owner
-def page_agent():
-    return render_template("agent.html",
-                           username=session.get("username"),
-                           role=session.get("role"))
 
-@app.route("/dashboard")
-@login_required
-def page_user():
-    with DB() as c:
-        u = c.execute("""SELECT admin_uid,bot_uid,bot_pw,bot_file,bot_status,
-                                subscription_expiry,role,is_disabled,disable_reason,
-                                personal_notice FROM users WHERE id=?""",
-                      (session["user_id"],)).fetchone()
-    if not u:
-        session.clear(); return redirect(url_for("page_login"))
-    expired = is_expired(u["subscription_expiry"], u["role"])
-    return render_template("user.html",
-                           username=session.get("username"),
-                           role=session.get("role"),
-                           config_done=bool(u["bot_file"]),
-                           expired=expired,
-                           disabled=bool(u["is_disabled"]),
-                           disable_reason=u["disable_reason"] or "",
-                           global_notice=get_global_notice(),
-                           personal_notice=u["personal_notice"] or "")
+# ============================================================
+#  MONITORS
+# ============================================================
+monitors = {}
 
-# ══════════════════════════════════════════════════════════════
-# USER APIs
-# ══════════════════════════════════════════════════════════════
-@app.route("/api/auth/me")
-@login_required
-def api_me():
-    return jsonify({"username": session.get("username"), "role": session.get("role")})
 
-@app.route("/api/configure", methods=["POST"])
-@login_required
-def api_configure():
-    data = request.json or {}
-    a_uid = (data.get("admin_uid") or "").strip()
-    b_uid = (data.get("bot_uid") or "").strip()
-    b_pw  = (data.get("bot_pw") or "").strip()
-    if not (a_uid and b_uid and b_pw):
-        return jsonify({"error": "all fields required"}), 400
-    fname = deploy_bot(session["user_id"], session["username"], a_uid, b_uid, b_pw)
-    m = get_monitor(session["user_id"], session["username"], fname)
-    if m: m.start()
-    audit("configure_bot", session["username"], meta=fname)
-    return jsonify({"status":"ok"})
+def get_monitor(user_id, create_only=True):
+    with monitors_lock:
+        if user_id in monitors:
+            return monitors[user_id]
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT bot_file FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return None
+    bot_file = row[0]
+    if not os.path.dirname(bot_file):
+        bot_file = os.path.join(USER_BOTS_DIR, bot_file)
+    if not os.path.exists(bot_file):
+        return None
+    monitor = ProcessMonitor(user_id, bot_file)
+    with monitors_lock:
+        if user_id in monitors:
+            try:
+                monitor.auto_restart_running = False
+                monitor.watchdog_running = False
+            except Exception:
+                pass
+            return monitors[user_id]
+        monitors[user_id] = monitor
+    return monitor
 
-@app.route("/api/status")
-@login_required
-def api_status():
-    m = get_monitor(session["user_id"])
-    if not m:
-        return jsonify({
-            "is_running": False, "bot_status": "NOT CONFIGURED",
-            "logs": [], "error_logs": [], "message_history": [],
-            "cpu":0,"ram":0,"disk":0,
-            "cpu_history":[0]*20, "ram_history":[0]*20,
-            "uptime":"00:00:00","restart_count":0,
-            "bot_uid":"N/A","bot_name":"N/A","bot_region":"N/A",
-            "last_sender_uid":"N/A","last_guild_name":"N/A",
-            "last_nickname":"N/A","last_message":"N/A","last_pfp_url":"N/A"
-        })
-    return jsonify(m.status())
 
-@app.route("/api/control", methods=["POST"])
-@login_required
-def api_control():
-    action = (request.json or {}).get("action")
-    m = get_monitor(session["user_id"])
-    if not m: return jsonify({"error":"not configured"}), 400
-    if get_global_stop() and action == "start":
-        return jsonify({"error":"Global stop active"}), 403
-    with DB() as c:
-        u = c.execute("SELECT is_disabled, subscription_expiry, role FROM users WHERE id=?",
-                      (session["user_id"],)).fetchone()
-    if u["is_disabled"] and action == "start":
-        return jsonify({"error":"Bot disabled by owner"}), 403
-    if is_expired(u["subscription_expiry"], u["role"]) and action == "start":
-        return jsonify({"error":"Subscription expired"}), 403
-    if action == "start": m.start()
-    elif action == "stop": m.stop(by_user=True)
-    elif action == "reset": m.stop(by_user=True); m.start()
-    else: return jsonify({"error":"invalid action"}), 400
-    audit(f"bot_{action}", session["username"])
-    return jsonify({"status":"ok"})
-
-@app.route("/api/clear_errors", methods=["POST"])
-@login_required
-def api_clear_errors():
-    m = get_monitor(session["user_id"])
-    if m: m.clear_errors()
-    return jsonify({"status":"ok"})
-
-@app.route("/api/clear_messages", methods=["POST"])
-@login_required
-def api_clear_messages():
-    m = get_monitor(session["user_id"])
-    if m: m.clear_messages()
-    return jsonify({"status":"ok"})
-
-@app.route("/api/export_logs")
-@login_required
-def api_export_logs():
-    m = get_monitor(session["user_id"])
-    return jsonify({"logs": m.output_lines if m else []})
-
-@app.route("/api/export_errors")
-@login_required
-def api_export_errors():
-    m = get_monitor(session["user_id"])
-    return jsonify({"errors": m.error_lines if m else []})
-
-@app.route("/api/export_messages")
-@login_required
-def api_export_messages():
-    m = get_monitor(session["user_id"])
-    return jsonify({"messages": m.message_lines if m else []})
-
-@app.route("/api/admin_uids", methods=["GET","POST"])
-@login_required
-def api_admin_uids():
-    m = get_monitor(session["user_id"])
-    if not m: return jsonify({"uids":[]})
-    if request.method == "GET":
-        with open(m.bot_file) as f: content = f.read()
-        match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]*)\]", content)
-        uids = re.findall(r"['\"]([^'\"]+)['\"]", match.group(1)) if match else []
-        return jsonify({"uids": uids})
-    uids = (request.json or {}).get("uids", [])
-    with open(m.bot_file) as f: content = f.read()
-    new_list = "[" + ", ".join(f"'{u}'" for u in uids) + "]"
-    content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {new_list}", content)
-    with open(m.bot_file, "w") as f: f.write(content)
-    m.restart()
-    audit("admin_uids_update", session["username"], meta=",".join(uids))
-    return jsonify({"status":"success"})
-
-@app.route("/api/bot_creds", methods=["GET","POST"])
-@login_required
-def api_bot_creds():
-    m = get_monitor(session["user_id"])
-    if not m: return jsonify({"uid":"","pw":""})
-    if request.method == "GET":
-        with open(m.bot_file) as f: content = f.read()
-        match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", content)
-        return jsonify({"uid": match.group(1) if match else "",
-                        "pw":  match.group(2) if match else ""})
-    data = request.json or {}
-    uid, pw = data.get("uid",""), data.get("pw","")
-    with open(m.bot_file) as f: content = f.read()
-    content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'",
-                     f"Uid, Pw = '{uid}', '{pw}'", content)
-    with open(m.bot_file, "w") as f: f.write(content)
-    m.restart()
-    audit("bot_creds_update", session["username"])
-    return jsonify({"status":"success"})
-
-@app.route("/api/friend", methods=["POST"])
-@login_required
-def api_friend():
-    data = request.json or {}
-    action = data.get("action"); target = data.get("uid")
-    m = get_monitor(session["user_id"])
-    if not m: return jsonify({"status":"error","message":"not configured"}), 400
-    with open(m.bot_file) as f: content = f.read()
-    match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", content)
-    if not match: return jsonify({"status":"error","message":"no creds"}), 400
-    uid, pw = match.group(1), match.group(2)
+def startup_launch_all_bots():
+    """
+    ✅ Startup-এ শুধু একবার bots launch হবে।
+    ✅ Manual Stop করা bots কখনো launch হবে না।
+    ✅ Expired bots launch হবে না — expired মার্ক + file delete।
+    """
     try:
-        if action == "list":
-            r = rq.get(f"https://mahir-friend-web.vercel.app/friend_list?uid={uid}&password={pw}", timeout=25)
-        elif action in ("add","remove"):
-            api = "add_friend" if action == "add" else "remove_friend"
-            r = rq.get(f"https://mahir-friend-web.vercel.app/{api}?uid={uid}&password={pw}&friend_uid={target}", timeout=15)
+        print("\n🚀 Startup: Launching all valid bots (ONE TIME only)...")
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('''SELECT id, bot_file FROM users 
+                     WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
+                     AND is_admin=0 AND is_agent=0''')
+        rows = c.fetchall()
+        conn.close()
+        count = 0
+        for user_id, bot_file in rows:
+            sub = check_subscription_status(user_id)
+            if sub['status'] == 'expired':
+                expire_user_bot(user_id)
+                continue
+            try:
+                conn_ds = get_db_connection()
+                cds = conn_ds.cursor()
+                cds.execute('SELECT desired_bot_state, bot_disabled_by_admin, bot_force_active FROM users WHERE id=?', (user_id,))
+                dsrow = cds.fetchone()
+                conn_ds.close()
+                desired = (dsrow[0] if dsrow and dsrow[0] else 'running')
+                if desired != 'running':
+                    continue
+                if dsrow and dsrow[1]:
+                    continue
+                if get_global_stop() and not (dsrow and dsrow[2]):
+                    continue
+            except Exception:
+                pass
+            path = os.path.join(USER_BOTS_DIR, bot_file)
+            if not os.path.exists(path):
+                continue
+            with monitors_lock:
+                if user_id in monitors:
+                    existing = monitors[user_id]
+                    if existing.is_running and existing.process and existing.process.poll() is None:
+                        continue
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            m.last_restart_reason = 'SERVER_STARTUP'
+            m.start_process()
+            count += 1
+            print(f"  ✅ Bot launched (SERVER_STARTUP): user_id={user_id} ({bot_file})")
+        print(f"🚀 Startup complete: {count} bots launched\n")
+        return count
+    except Exception as e:
+        print(f"Startup error: {e}")
+        return 0
+
+
+# ============================================================
+#  REBUILD HELPERS (NEW)
+# ============================================================
+def rebuild_all_bot_files(delete_expired=True):
+    """
+    ✅ DB check করে সব bot file rebuild করে:
+       - Non-expired users: fresh mahir.py copy + DB credentials inject
+       - Expired users: bot file DELETE
+       - সব monitor stop করে দেওয়া হয়
+    Return: dict {updated, deleted_expired, failed, total}
+    """
+    # Stop all monitors first
+    with monitors_lock:
+        for uid, m in list(monitors.items()):
+            try:
+                m.watchdog_running = False
+                m.auto_restart_running = False
+                m.stop_process(manual=False)
+            except Exception as e:
+                print(f"Monitor stop error {uid}: {e}")
+        monitors.clear()
+
+    # Ensure template exists
+    if not os.path.exists(MAHIR_SOURCE):
+        with open(MAHIR_SOURCE, 'w') as f:
+            f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, username, admin_uid, bot_uid, bot_pw, bot_file,
+                        subscription_expiry, registration_key
+                 FROM users 
+                 WHERE is_admin=0 AND is_agent=0
+                   AND bot_uid IS NOT NULL AND bot_uid != ''
+                   AND bot_pw  IS NOT NULL AND bot_pw  != '' ''')
+    users = c.fetchall()
+    conn.close()
+
+    updated = 0
+    deleted_expired = 0
+    failed = 0
+
+    for user_id, username, admin_uid, bot_uid, bot_pw, bot_file, sub_expiry, reg_key in users:
+        try:
+            # -- Determine expiry --
+            expiry_val = sub_expiry
+            if not expiry_val and reg_key:
+                conn2 = get_db_connection()
+                cc = conn2.cursor()
+                cc.execute('SELECT expiry_date FROM keys WHERE key=?', (reg_key,))
+                kr = cc.fetchone()
+                conn2.close()
+                if kr:
+                    expiry_val = kr[0]
+
+            is_expired = False
+            if expiry_val:
+                try:
+                    if datetime.fromisoformat(expiry_val) < datetime.now():
+                        is_expired = True
+                except:
+                    pass
+
+            # -- Determine bot file path --
+            if bot_file:
+                bot_path = bot_file if os.path.dirname(bot_file) else os.path.join(USER_BOTS_DIR, bot_file)
+            else:
+                safe_name = sanitize_filename(username)
+                bot_filename = f"{safe_name}_mahir.py"
+                bot_path = os.path.join(USER_BOTS_DIR, bot_filename)
+
+            # -- Expired: DELETE file --
+            if is_expired and delete_expired:
+                if os.path.exists(bot_path):
+                    try:
+                        os.remove(bot_path)
+                        print(f"🗑️ Deleted expired: {bot_path}")
+                    except Exception as e:
+                        print(f"Delete error: {e}")
+                conn3 = get_db_connection()
+                c3 = conn3.cursor()
+                c3.execute('UPDATE users SET bot_status="expired", bot_pid=NULL, desired_bot_state="stopped" WHERE id=?',
+                           (user_id,))
+                conn3.commit()
+                conn3.close()
+                deleted_expired += 1
+                continue
+
+            # -- Non-expired: rebuild fresh --
+            shutil.copy2(MAHIR_SOURCE, bot_path)
+
+            admin_list = parse_admin_uids(admin_uid)
+            ok, msg = inject_credentials_into_bot_file(bot_path, bot_uid, bot_pw, admin_list)
+            if not ok:
+                print(f"❌ Inject failed for {username}: {msg}")
+                failed += 1
+                continue
+
+            bot_filename = os.path.basename(bot_path)
+            conn4 = get_db_connection()
+            c4 = conn4.cursor()
+            c4.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?',
+                       (bot_filename, user_id))
+            conn4.commit()
+            conn4.close()
+
+            updated += 1
+            print(f"✅ Rebuilt: {bot_filename} (user={username})")
+
+        except Exception as e:
+            print(f"Rebuild error user {user_id}: {e}")
+            failed += 1
+
+    print(f"🔁 Rebuild done: updated={updated}, expired_deleted={deleted_expired}, failed={failed}, total={len(users)}")
+    return {
+        'updated': updated,
+        'deleted_expired': deleted_expired,
+        'failed': failed,
+        'total': len(users)
+    }
+
+
+def _start_all_eligible_bots():
+    """
+    ✅ সব eligible bot start করে:
+       - desired_state == 'running'
+       - not expired
+       - not admin-disabled
+       - file exist করে
+    Return: (success, fail, skipped)
+    """
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, bot_file FROM users 
+                 WHERE bot_file IS NOT NULL AND bot_uid IS NOT NULL
+                   AND is_admin=0 AND is_agent=0''')
+    users = c.fetchall()
+    conn.close()
+
+    success = 0
+    fail = 0
+    skipped = 0
+
+    for user_id, bot_file in users:
+        if not bot_file:
+            skipped += 1
+            continue
+
+        sub = check_subscription_status(user_id)
+        if sub['status'] == 'expired':
+            skipped += 1
+            continue
+
+        try:
+            conn_ds = get_db_connection()
+            cds = conn_ds.cursor()
+            cds.execute('SELECT desired_bot_state, bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
+            ds = cds.fetchone()
+            conn_ds.close()
+            desired = (ds[0] if ds and ds[0] else 'running')
+            disabled = ds[1] if ds else 0
+            if desired != 'running' or disabled:
+                skipped += 1
+                continue
+            if get_global_stop():
+                conn_fa = get_db_connection()
+                cfa = conn_fa.cursor()
+                cfa.execute('SELECT bot_force_active FROM users WHERE id=?', (user_id,))
+                fa = cfa.fetchone()
+                conn_fa.close()
+                if not (fa and fa[0]):
+                    skipped += 1
+                    continue
+        except Exception:
+            pass
+
+        path = os.path.join(USER_BOTS_DIR, bot_file)
+        if not os.path.exists(path):
+            fail += 1
+            continue
+
+        with monitors_lock:
+            if user_id in monitors:
+                existing = monitors[user_id]
+                if existing.is_running and existing.process and existing.process.poll() is None:
+                    success += 1
+                    continue
+
+        try:
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            m.last_restart_reason = 'REBUILD_RESTART'
+            if m.start_process():
+                success += 1
+            else:
+                fail += 1
+        except Exception as e:
+            print(f"Start error user {user_id}: {e}")
+            fail += 1
+
+    print(f"🚀 Start summary: success={success}, failed={fail}, skipped={skipped}")
+    return success, fail, skipped
+
+
+def reset_all_bots():
+    """
+    ✅ Reset All → 
+      1) Rebuild all bot files from mahir.py + DB credentials
+      2) Delete expired bot files
+      3) Start all eligible bots
+    """
+    result = rebuild_all_bot_files(delete_expired=True)
+    success, fail, skipped = _start_all_eligible_bots()
+
+    print(f"✅ Reset All complete: rebuilt={result['updated']}, "
+          f"expired_deleted={result['deleted_expired']}, "
+          f"started={success}, fail={fail}, skipped={skipped}")
+    return success, fail
+
+
+# ============================================================
+#  DECORATORS
+# ============================================================
+def owner_required(f):
+    @wraps(f)
+    def d(*a, **k):
+        if not session.get('is_admin'):
+            flash('Owner access required', 'error')
+            return redirect(url_for('owner_login'))
+        return f(*a, **k)
+    return d
+
+
+def agent_required(f):
+    @wraps(f)
+    def d(*a, **k):
+        if not session.get('is_agent'):
+            flash('Agent access required', 'error')
+            return redirect(url_for('agent_login'))
+        return f(*a, **k)
+    return d
+
+
+def login_required(f):
+    @wraps(f)
+    def d(*a, **k):
+        # user_id can be -1 for pure owner; treat None as not logged in
+        if session.get('user_id') is None and not session.get('is_admin'):
+            flash('Please login first', 'error')
+            return redirect(url_for('login'))
+        return f(*a, **k)
+    return d
+
+
+# ============================================================
+#  COMMON CSS / SIDEBAR
+# ============================================================
+SIDEBAR_MENU = '''
+<div class="hamburger-menu">
+  <button class="hamburger-btn" onclick="toggleMenu()" aria-label="Menu"><i class="fas fa-bars"></i></button>
+  <div class="menu-dropdown" id="menuDropdown">
+    <div class="menu-title">Premium App</div>
+    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="sidebar-download"><i class="fas fa-download"></i> DOWNLOAD APK</a>
+    <div class="menu-divider"></div>
+    <div class="menu-title">Authentication</div>
+    <a href="/login" class="menu-item"><i class="fas fa-sign-in-alt"></i> User Login</a>
+    <a href="/register" class="menu-item"><i class="fas fa-user-plus"></i> Create Account</a>
+    <a href="/recover" class="menu-item"><i class="fas fa-key"></i> Forgot Password</a>
+    <div class="menu-divider"></div>
+    <div class="menu-title">Roles</div>
+    <a href="/owner/login" class="menu-item"><i class="fas fa-crown"></i> Owner Login</a>
+    <a href="/agent/login" class="menu-item"><i class="fas fa-user-tie"></i> Agent Login</a>
+    <div class="menu-divider"></div>
+    <div class="menu-title">Social</div>
+    <a href="https://t.me/mahirtcpchat" target="_blank" class="menu-item"><i class="fab fa-telegram"></i> Telegram</a>
+    <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="menu-item"><i class="fab fa-tiktok"></i> TikTok</a>
+    <a href="https://whatsapp.com/channel/0029Vb9Omjk2ZjCevpv6h209" target="_blank" class="menu-item"><i class="fab fa-whatsapp" style="color:#25D366;"></i> WhatsApp Channel</a>
+    <a href="https://chat.whatsapp.com/CTiEuMnEKacHZ7wirSNjqs" target="_blank" class="menu-item"><i class="fab fa-whatsapp" style="color:#25D366;"></i> WhatsApp Group</a>
+    <div class="menu-divider"></div>
+    <a href="https://MAHIR.XO.JE/" target="_blank" class="menu-item"><i class="fas fa-globe"></i> Website</a>
+  </div>
+</div>
+'''
+
+COMMON_CSS = '''
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--gold:#F5C842;--gold2:#FFE28A;--purple:#8540F5;--blue:#3B8CFF;--red:#D42A3A;--red2:#FF5A6A;--green:#4ade80;--bg:#07070f;--card:rgba(14,14,28,.88);--line:rgba(245,200,66,.12);--text:#e9e9f8;--muted:rgba(233,233,248,.55);--mono:'JetBrains Mono',monospace}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
+body::before{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;background:radial-gradient(1000px 620px at 12% -10%,rgba(245,200,66,.10),transparent 60%),radial-gradient(900px 620px at 105% 115%,rgba(133,64,245,.13),transparent 60%),#07070f}
+a{color:var(--gold2)}
+.container{width:100%;max-width:1200px;margin:0 auto;padding:20px;position:relative;z-index:1}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:24px;margin-bottom:20px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+.card-title{font-size:1.05rem;font-weight:700;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.card-title i{color:var(--purple)}
+.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:14px;padding:20px 24px;margin-bottom:22px}
+.header h1{font-size:1.5rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;display:flex;align-items:center;gap:12px}
+.welcome-text{color:var(--muted);font-size:.9rem}.welcome-text strong{color:var(--gold2)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 20px;border:none;border-radius:12px;font-family:inherit;font-weight:700;font-size:.85rem;cursor:pointer;text-decoration:none;transition:transform .2s ease;box-shadow:0 4px 16px rgba(0,0,0,.3)}
+.btn:hover:not(:disabled){transform:translateY(-2px);filter:brightness(1.1)}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.btn-sm{padding:6px 12px;font-size:.75rem;border-radius:10px}
+.btn-xs{padding:4px 9px;font-size:.68rem;border-radius:8px}
+.btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.btn-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.btn-primary{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+.btn-warning{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}
+.btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.btn-gold{background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14}
+.btn-clear{background:rgba(255,255,255,.08);color:var(--text)}
+.btn-start{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.btn-stop{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.btn-reset{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}
+.btn-export{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+.btn-admin{background:linear-gradient(135deg,#00d9f5,#8540F5);color:#fff}
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;border:1px solid transparent}
+.badge-used{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}
+.badge-unused{background:rgba(245,200,66,.10);color:var(--gold);border-color:rgba(245,200,66,.3)}
+.badge-permanent{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.3)}
+.badge-admin{background:rgba(133,64,245,.14);color:#c9a7ff;border-color:rgba(133,64,245,.35)}
+.badge-agent{background:rgba(59,140,255,.12);color:#7ab5ff;border-color:rgba(59,140,255,.3)}
+.badge-user{background:rgba(255,255,255,.05);color:var(--muted);border-color:rgba(255,255,255,.1)}
+.badge-running{background:rgba(57,255,20,.08);color:var(--green);border-color:rgba(57,255,20,.3)}
+.badge-stopped{background:rgba(255,23,68,.08);color:#ff5a76;border-color:rgba(255,23,68,.3)}
+.badge-active{background:rgba(59,140,255,.10);color:#6db2ff;border-color:rgba(59,140,255,.35)}
+.badge-offline{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.35)}
+.badge-expired{background:rgba(212,42,58,.15);color:#ff5a76;border-color:rgba(212,42,58,.5)}
+.badge-owner{background:linear-gradient(135deg,rgba(245,200,66,.2),rgba(133,64,245,.2));color:#FFE28A;border-color:rgba(245,200,66,.5)}
+.input-group{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+input[type=text],input[type=password],input[type=email],input[type=number]{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem}
+input:focus{outline:none;border-color:var(--gold)}
+input::placeholder{color:rgba(233,233,248,.3)}
+input[type=file]{padding:10px 14px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.88rem;cursor:pointer}
+input[type=file]::file-selector-button{padding:6px 14px;border:none;border-radius:8px;background:rgba(245,200,66,.15);color:var(--gold2);font-weight:600;margin-right:10px;cursor:pointer}
+textarea{padding:12px 16px;border-radius:12px;border:1px solid rgba(245,200,66,.14);background:rgba(0,0,0,.45);color:var(--text);font-family:inherit;font-size:.95rem;width:100%;resize:vertical}
+select{padding:10px;border-radius:10px;background:#0a0a14;color:#fff;border:1px solid rgba(245,200,66,.2);font-family:inherit;font-size:.85rem}
+.table-wrapper{overflow-x:auto;margin-top:12px}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th,td{padding:12px 14px;text-align:left;border-bottom:1px solid rgba(245,200,66,.06)}
+th{color:var(--gold2);font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;background:rgba(0,0,0,.3);font-weight:700}
+tr:hover td{background:rgba(245,200,66,.03)}
+td code{background:rgba(0,0,0,.5);padding:4px 10px;border-radius:8px;color:var(--gold);font-family:var(--mono);font-size:.82rem}
+.empty-row td{text-align:center;color:var(--muted);padding:28px 0;font-style:italic}
+.stat-card{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:16px;padding:18px;text-align:center}
+.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);margin-bottom:8px;font-weight:700}
+.stat-value{font-size:1.25rem;font-weight:800;color:#fff;word-break:break-all}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+.system-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:12px}
+.progress-bar{background:#15152a;border-radius:999px;height:7px;overflow:hidden;margin-top:10px;border:1px solid rgba(245,200,66,.06)}
+.progress-fill{background:linear-gradient(90deg,#F5C842,#8540F5,#3B8CFF);height:100%;width:0%;border-radius:999px;transition:width .5s ease}
+.key-display{display:flex;align-items:center;gap:16px;flex-wrap:wrap;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:14px 18px;margin-top:14px}
+.back-link{color:var(--gold2);text-decoration:none;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:.9rem;padding:10px 0}
+.breadcrumb{color:var(--muted);font-size:.85rem;margin-bottom:14px;padding:10px 14px;background:rgba(0,0,0,.3);border-radius:10px}
+.breadcrumb a{color:var(--gold2);text-decoration:none}
+.current-dir{color:var(--gold);font-weight:600}
+.folder-link{color:var(--gold);text-decoration:none;font-weight:600}
+.file-name{color:#8fc0ff}
+.td-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.flex{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.flex-grow{flex:1;min-width:150px}
+.stat-box{display:inline-block;background:rgba(0,0,0,.4);padding:6px 18px;border-radius:999px;color:var(--gold);font-weight:700;border:1px solid rgba(245,200,66,.12)}
+.upload-form{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+@media (max-width:768px){.container{padding:14px}.header{padding:16px;flex-direction:column;text-align:center}.system-stats{grid-template-columns:1fr}.input-group{flex-direction:column;align-items:stretch}.input-group input{width:100%}th,td{padding:9px 10px;font-size:.78rem}}
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.auth-card{width:100%;max-width:440px;padding:38px 34px;border-radius:24px}
+.logo-wrap{width:96px;height:96px;margin:0 auto 18px;border-radius:50%;padding:6px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(133,64,245,.12));border:1px solid rgba(59,140,255,.25)}
+.logo-wrap img{width:100%;height:100%;border-radius:50%;object-fit:cover}
+.auth-title{text-align:center;font-size:1.7rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px}
+.auth-sub{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:22px}
+.field{position:relative;margin-bottom:14px}
+.field i{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:rgba(233,233,248,.35);font-size:.95rem}
+.field input{width:100%;padding:14px 16px 14px 46px}
+.btn-block{width:100%;padding:14px;font-size:1rem}
+.auth-links{text-align:center;margin-top:18px;padding-top:16px;border-top:1px solid rgba(245,200,66,.08);display:flex;flex-direction:column;gap:8px}
+.auth-links a{color:var(--gold2);text-decoration:none;font-size:.88rem}
+.alert{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:12px;margin-bottom:16px;font-size:.88rem;border:1px solid;text-align:center}
+.alert.error{background:rgba(212,42,58,.10);color:var(--red2);border-color:rgba(212,42,58,.3)}
+.alert.success{background:rgba(59,140,255,.08);color:#8fc0ff;border-color:rgba(59,140,255,.25)}
+.hamburger-menu{position:fixed;top:20px;left:20px;z-index:1000}
+.hamburger-btn{background:rgba(14,14,28,.92);border:1px solid rgba(245,200,66,.2);color:var(--gold);width:46px;height:46px;border-radius:12px;cursor:pointer;font-size:1.2rem}
+.menu-dropdown{display:none;position:absolute;top:56px;left:0;background:rgba(12,12,24,.97);border:1px solid rgba(245,200,66,.12);border-radius:14px;padding:8px 0;min-width:250px;box-shadow:0 20px 50px rgba(0,0,0,.6)}
+.menu-dropdown.active{display:block}
+.menu-title{padding:8px 20px 4px;color:rgba(233,233,248,.35);font-size:.62rem;text-transform:uppercase;letter-spacing:2px;font-weight:700}
+.menu-item{display:flex;align-items:center;gap:12px;padding:9px 20px;color:rgba(233,233,248,.75);text-decoration:none;font-size:.88rem;border-left:3px solid transparent}
+.menu-item:hover{background:rgba(245,200,66,.05);border-left-color:var(--gold);color:var(--gold)}
+.menu-item i{width:18px;text-align:center;color:rgba(233,233,248,.35)}
+.menu-divider{border-top:1px solid rgba(245,200,66,.07);margin:6px 14px}
+.sidebar-download{display:flex;align-items:center;justify-content:center;gap:10px;margin:8px 14px;padding:11px;border-radius:12px;background:linear-gradient(135deg,#F5C842,#8540F5 60%,#3B8CFF);color:#0a0a14 !important;text-decoration:none;font-weight:800;font-size:.82rem;border-left:none !important}
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:99999;justify-content:center;align-items:center;padding:16px;backdrop-filter:blur(6px)}
+.modal-overlay.active{display:flex;animation:fadeIn .25s ease}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.modal-box{background:#101022;border:1px solid rgba(245,200,66,.14);border-radius:18px;padding:24px;max-width:720px;width:100%;max-height:90vh;overflow-y:auto;position:relative;animation:slideUp .3s ease}
+@keyframes slideUp{from{transform:translateY(30px);opacity:0}to{transform:translateY(0);opacity:1}}
+.modal-close{position:absolute;top:12px;right:16px;font-size:1.7rem;color:var(--gold2);cursor:pointer;background:none;border:none}
+.modal-title{font-size:1.3rem;font-weight:800;color:var(--gold);margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.modal-section{background:rgba(0,0,0,.3);border:1px solid rgba(245,200,66,.07);border-radius:14px;padding:16px;margin-bottom:14px}
+.modal-section h3{color:var(--gold);font-size:.95rem;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.modal-input-group{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+.modal-input-group label{min-width:90px;color:var(--gold2);font-weight:600;font-size:.82rem}
+.modal-input-group input{flex:1;min-width:160px}
+.modal-btn{display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border:none;border-radius:10px;font-weight:700;font-size:.78rem;cursor:pointer;font-family:inherit}
+.modal-btn-save{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400}
+.modal-btn-cancel{background:rgba(255,255,255,.08);color:var(--text)}
+.modal-btn-action{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+.modal-btn-danger{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.modal-btn-info{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.modal-result-box{background:rgba(0,0,0,.45);border:1px solid rgba(245,200,66,.08);border-radius:10px;padding:12px;margin-top:10px;max-height:160px;overflow-y:auto;font-size:.78rem;color:#c5c5e5;white-space:pre-wrap;word-break:break-word}
+.notification{position:fixed;top:20px;right:20px;padding:12px 18px;border-radius:12px;z-index:999999;font-weight:600;font-size:.85rem;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.notification-success{background:linear-gradient(135deg,#3B8CFF,#0F4CBF);color:#fff}
+.notification-error{background:linear-gradient(135deg,#D42A3A,#8A1A28);color:#fff}
+.notification-info{background:linear-gradient(135deg,#8540F5,#5A1A9A);color:#fff}
+.notice-indicator{position:fixed;bottom:20px;right:20px;background:linear-gradient(135deg,#F5C842,#FF5A6A);color:#0a0a14;padding:12px 20px;border-radius:14px;cursor:pointer;font-weight:800;font-size:.85rem;box-shadow:0 10px 30px rgba(245,200,66,.4);z-index:9998;display:flex;align-items:center;gap:10px;animation:pulseB 2s infinite}
+@keyframes pulseB{0%,100%{transform:scale(1)}50%{transform:scale(1.05)}}
+.notice-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:99998;justify-content:center;align-items:center;padding:20px;backdrop-filter:blur(8px)}
+.notice-overlay.show{display:flex;animation:fadeIn .3s ease}
+.notice-box{background:linear-gradient(135deg,#1a0a2e,#0a0a1a);border:2px solid rgba(245,200,66,.35);border-radius:22px;padding:32px 28px;max-width:480px;width:100%;text-align:center;box-shadow:0 0 60px rgba(245,200,66,.3);animation:slideUp .4s ease;position:relative}
+.notice-icon{font-size:3.5rem;margin-bottom:16px;display:block}
+.notice-title{font-size:1.4rem;font-weight:900;background:linear-gradient(120deg,#F5C842,#FF5A6A,#B388FF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:14px;letter-spacing:1px}
+.notice-msg{color:#c5c5e5;font-size:.95rem;line-height:1.7;margin-bottom:22px;padding:16px;background:rgba(0,0,0,.4);border-radius:14px;border:1px solid rgba(245,200,66,.1);text-align:left}
+.notice-contact-title{font-size:.78rem;color:var(--gold2);text-transform:uppercase;letter-spacing:2px;margin-bottom:14px;font-weight:700}
+.notice-buttons{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.notice-btn{display:inline-flex;align-items:center;gap:8px;padding:12px 20px;border-radius:12px;text-decoration:none;font-weight:700;font-size:.85rem;color:#fff !important}
+.notice-btn:hover{transform:translateY(-2px)}
+.notice-btn-tg{background:linear-gradient(135deg,#0088cc,#005f8a)}
+.notice-btn-tt{background:linear-gradient(135deg,#ff0050,#c40040)}
+.notice-btn-web{background:linear-gradient(135deg,#F5C842,#C99A1A);color:#141400 !important}
+.notice-btn-wa-ch{background:linear-gradient(135deg,#25D366,#128C7E)}
+.notice-btn-wa-gp{background:linear-gradient(135deg,#075E54,#128C7E)}
+.keys-table-wrap{background:linear-gradient(135deg,rgba(15,10,30,.95),rgba(10,5,20,.95));border:1px solid rgba(245,200,66,.15);border-radius:20px;padding:22px;box-shadow:0 15px 40px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.03)}
+.keys-table{width:100%;border-collapse:separate;border-spacing:0 8px}
+.keys-table thead th{color:#FFE28A;font-size:.7rem;text-transform:uppercase;letter-spacing:2px;background:transparent;padding:10px 14px;border:none;font-weight:800;text-align:left}
+.keys-table tbody tr{background:rgba(0,0,0,.35);transition:all .25s}
+.keys-table tbody tr:hover{background:rgba(245,200,66,.06);transform:translateY(-1px)}
+.keys-table tbody td{padding:14px;border:none;vertical-align:middle;color:#e9e9f8;font-size:.85rem}
+.keys-table tbody tr td:first-child{border-top-left-radius:12px;border-bottom-left-radius:12px}
+.keys-table tbody tr td:last-child{border-top-right-radius:12px;border-bottom-right-radius:12px}
+.key-code{background:linear-gradient(135deg,rgba(245,200,66,.08),rgba(133,64,245,.08));padding:6px 14px;border-radius:10px;color:#F5C842;font-family:'Courier New',monospace;font-size:.78rem;font-weight:600;letter-spacing:.5px;border:1px solid rgba(245,200,66,.2);display:inline-block;word-break:break-all;max-width:280px}
+.creator-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:8px;background:rgba(245,200,66,.08);color:#FFE28A;font-weight:700;font-size:.72rem;border:1px solid rgba(245,200,66,.2);letter-spacing:.5px;text-transform:uppercase}
+.creator-badge.agent{background:rgba(59,140,255,.08);color:#7ab5ff;border-color:rgba(59,140,255,.25)}
+.creator-badge.owner{background:linear-gradient(135deg,rgba(245,200,66,.2),rgba(133,64,245,.2));color:#FFE28A;border-color:rgba(245,200,66,.5)}
+.used-by{color:#c5c5e5;font-weight:500;font-style:italic}
+.used-by .user-icon{color:#7dd3fc;margin-right:4px}
+.duration-tag{display:inline-block;padding:3px 10px;border-radius:20px;background:rgba(74,222,128,.1);color:#4ade80;font-size:.68rem;font-weight:700;letter-spacing:.5px;border:1px solid rgba(74,222,128,.25)}
+.delete-key-btn{background:linear-gradient(135deg,#D42A3A,#8A1A28);border:none;color:#fff;width:34px;height:34px;border-radius:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .25s}
+.delete-key-btn:hover{transform:scale(1.1);box-shadow:0 6px 20px rgba(212,42,58,.5)}
+.status-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 14px;border-radius:20px;font-size:.68rem;font-weight:800;letter-spacing:.8px;text-transform:uppercase}
+.status-badge.used{background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(15,76,191,.15));color:#7ab5ff;border:1px solid rgba(59,140,255,.4)}
+.status-badge.available{background:linear-gradient(135deg,rgba(245,200,66,.15),rgba(201,154,26,.15));color:#FFE28A;border:1px solid rgba(245,200,66,.4)}
+.days-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;font-size:.72rem;font-weight:800;letter-spacing:.5px;background:linear-gradient(135deg,rgba(59,140,255,.15),rgba(15,76,191,.15));color:#7ab5ff;border:1px solid rgba(59,140,255,.4)}
+.days-badge.warn{background:linear-gradient(135deg,rgba(245,200,66,.15),rgba(201,154,26,.15));color:#FFE28A;border-color:rgba(245,200,66,.4)}
+.days-badge.danger{background:linear-gradient(135deg,rgba(212,42,58,.15),rgba(138,26,40,.15));color:#ff5a76;border-color:rgba(212,42,58,.4)}
+.days-badge.permanent{background:linear-gradient(135deg,rgba(74,222,128,.15),rgba(34,140,80,.15));color:#4ade80;border-color:rgba(74,222,128,.4)}
+.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;margin-top:12px}
+.detail-item{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:14px;padding:14px 16px}
+.detail-label{font-size:.65rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--gold2);font-weight:700;margin-bottom:6px}
+.detail-value{font-size:.95rem;color:#fff;word-break:break-all;font-family:var(--mono);line-height:1.4}
+.detail-value.big{font-size:1.1rem;font-weight:700}
+.masked{color:#F5C842;letter-spacing:1px;}
+.mask-note{display:inline-flex;align-items:center;gap:6px;margin-top:6px;font-size:.68rem;color:var(--red2);background:rgba(212,42,58,.08);padding:4px 10px;border-radius:8px;border:1px solid rgba(212,42,58,.25);}
+.live-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 14px;border-radius:999px;font-size:.75rem;font-weight:700;text-transform:uppercase}
+.live-online{background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.35)}
+.live-offline{background:rgba(212,42,58,.12);color:#ff5a76;border:1px solid rgba(212,42,58,.35)}
+.group-card{background:linear-gradient(135deg,rgba(15,10,30,.95),rgba(10,5,20,.95));border:1px solid rgba(245,200,66,.15);border-radius:18px;padding:18px;margin-bottom:14px;transition:all .25s}
+.group-card:hover{border-color:rgba(245,200,66,.35);transform:translateY(-2px)}
+.group-header{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.group-name{font-size:1.1rem;font-weight:800;color:#FFE28A;display:flex;align-items:center;gap:10px}
+.group-name i{color:var(--gold);}
+.group-stats{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.group-stat{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.15);padding:6px 14px;border-radius:10px;font-size:.78rem;color:#c5c5e5}
+.group-stat strong{color:var(--gold);font-size:.9rem}
+'''
+
+SIDEBAR_JS = '''
+<script>
+function toggleMenu(){document.getElementById('menuDropdown').classList.toggle('active');}
+document.addEventListener('click',function(e){var m=document.querySelector('.hamburger-menu');if(m&&!m.contains(e.target)){var d=document.getElementById('menuDropdown');if(d)d.classList.remove('active');}});
+</script>
+'''
+
+
+# ============================================================
+#  LOGIN PAGES
+# ============================================================
+LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Welcome Back - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Welcome Back</div><div class="auth-sub">Sign in to your account</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="loginForm">
+  <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required/></div>
+  <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
+</form>
+<script>document.getElementById('loginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
+<div class="auth-links"><a href="/register"><i class="fas fa-user-plus"></i> Don't have an account? Register</a><a href="/recover"><i class="fas fa-key"></i> Forgot Password?</a></div></div></div>
+''' + SIDEBAR_JS + '''</body></html>'''
+
+REGISTER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Create Account - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Create Account</div><div class="auth-sub">Join the MAHIR network</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="registerForm">
+  <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required/></div>
+  <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required/></div>
+  <div class="field"><i class="fas fa-envelope"></i><input type="email" name="email" placeholder="Email (optional)"/></div>
+  <div class="field"><i class="fas fa-key"></i><input type="text" name="registration_key" placeholder="Registration Key" required/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="registerBtn"><i class="fas fa-paper-plane"></i> Register</button>
+</form>
+<script>document.getElementById('registerForm').addEventListener('submit',function(){var b=document.getElementById('registerBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});</script>
+<div class="auth-links"><a href="/login"><i class="fas fa-arrow-left"></i> Already have an account? Login</a></div></div></div>
+''' + SIDEBAR_JS + '''</body></html>'''
+
+RECOVER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Recover Password - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap" style="display:flex;align-items:center;justify-content:center;"><i class="fas fa-key" style="font-size:2rem;color:var(--gold);"></i></div><div class="auth-title">Recover Password</div><div class="auth-sub">Reset your password</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="recoverForm">
+  <div class="field"><i class="fas fa-user"></i><input type="text" name="username" placeholder="Username" required/></div>
+  <div class="field"><i class="fas fa-envelope"></i><input type="email" name="email" placeholder="Email Address" required/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="recoverBtn"><i class="fas fa-paper-plane"></i> Recover</button>
+</form>
+<script>document.getElementById('recoverForm').addEventListener('submit',function(){var b=document.getElementById('recoverBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});</script>
+<div class="auth-links"><a href="/login"><i class="fas fa-arrow-left"></i> Back to Login</a></div></div></div>
+''' + SIDEBAR_JS + '''</body></html>'''
+
+OWNER_LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Owner Access - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">👑 Owner Access</div><div class="auth-sub">Master control panel</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="ownerLoginForm">
+  <div class="field"><i class="fas fa-crown"></i><input type="text" name="username" placeholder="Owner Username" required/></div>
+  <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
+</form>
+<script>document.getElementById('ownerLoginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
+<div class="auth-links"><a href="/login"><i class="fas fa-arrow-left"></i> Back to Main</a></div></div></div>
+''' + SIDEBAR_JS + '''</body></html>'''
+
+AGENT_LOGIN_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Agent Login - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+''' + SIDEBAR_MENU + '''
+<div class="auth-wrap"><div class="card auth-card"><div class="logo-wrap"><img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/></div><div class="auth-title">Agent Login</div><div class="auth-sub">Agent panel access</div>
+{% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+<form method="POST" id="agentLoginForm">
+  <div class="field"><i class="fas fa-user-tie"></i><input type="text" name="username" placeholder="Agent Username" required/></div>
+  <div class="field"><i class="fas fa-lock"></i><input type="password" name="password" placeholder="Password" required/></div>
+  <button type="submit" class="btn btn-gold btn-block" id="loginBtn"><i class="fas fa-sign-in-alt"></i> Login</button>
+</form>
+<script>document.getElementById('agentLoginForm').addEventListener('submit',function(){var b=document.getElementById('loginBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Authenticating...';});</script>
+<div class="auth-links"><a href="/login"><i class="fas fa-arrow-left"></i> Back to Main</a></div></div></div>
+''' + SIDEBAR_JS + '''</body></html>'''
+
+
+# ============================================================
+#  AGENT DASHBOARD
+# ============================================================
+AGENT_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Agent Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-user-tie"></i> Agent Dashboard</h1>
+    <div class="flex">
+      <a href="/agent/subscription" class="btn btn-gold btn-sm"><i class="fas fa-clock-rotate-left"></i> Subscription Management</a>
+      <button type="button" class="btn btn-info btn-sm" onclick="openDbDownloadModal()"><i class="fas fa-database"></i> Download DB</button>
+      <span class="welcome-text">Welcome, <strong>{{ session.username }}</strong></span>
+      <a href="/agent/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-chart-simple"></i> Stats</div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Keys Created</div><div class="stat-value">{{ key_count }}</div></div>
+      <div class="stat-card"><div class="stat-label">My Customers</div><div class="stat-value">{{ my_users|length }}</div></div>
+      <div class="stat-card"><div class="stat-label">Key Limit</div><div class="stat-value">{% if key_limit >= 0 %}{{ key_limit }}{% else %}∞{% endif %}</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key"></i> Generate Registration Key</div>
+    {% if key_limit >= 0 and key_count >= key_limit %}
+    <div style="padding:14px;background:rgba(212,42,58,.1);border-radius:12px;color:var(--red2);"><i class="fas fa-exclamation-triangle"></i> Max {{ key_limit }} keys.</div>
+    {% else %}
+    <form method="POST" action="/agent/create_key" class="input-group">
+      <label>Days (0=Permanent):</label>
+      <input type="number" name="days_valid" value="30" min="0" style="width:110px;"/>
+      <button type="submit" class="btn btn-gold"><i class="fas fa-plus-circle"></i> Generate</button>
+    </form>
+    {% endif %}
+    {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+    {% if new_key %}
+    <div class="key-display"><strong>New Key:</strong><code>{{ new_key }}</code>{% if days == 0 %}<span class="badge badge-permanent">∞ Permanent</span>{% else %}<span style="color:var(--muted);">valid {{ days }} days</span>{% endif %}</div>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-users"></i> My Customers ({{ my_users|length }})</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> আপনার তৈরি key দিয়ে যারা register হয়েছে। Renew / Extend করতে পারবেন।</p>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>ID</th><th>Username</th><th>Bot UID</th><th>Status</th><th>Days Left</th><th>Time Left</th><th>Expiry</th><th>Renewals</th><th style="text-align:right;">Actions</th></tr></thead>
+        <tbody>
+          {% for u in my_users %}
+          <tr>
+            <td>{{ u.id }}</td>
+            <td><strong>{{ u.username }}</strong><br><small style="color:var(--muted);font-size:.7rem;">{{ u.email or '—' }}</small></td>
+            <td>{{ u.bot_uid or '—' }}</td>
+            <td>
+              {% if u.sub_status == 'expired' %}<span class="badge badge-expired">Expired</span>
+              {% elif u.sub_status == 'unlimited' %}<span class="badge badge-permanent">∞</span>
+              {% else %}<span class="badge badge-active">Active</span>{% endif %}
+            </td>
+            <td>
+              {% if u.sub_status == 'unlimited' %}
+                <span class="days-badge permanent"><i class="fas fa-infinity"></i> Unlimited</span>
+              {% elif u.sub_status == 'expired' %}
+                <span class="days-badge danger"><i class="fas fa-times-circle"></i> 0 days</span>
+              {% elif u.sub_days <= 3 %}
+                <span class="days-badge danger"><i class="fas fa-exclamation-triangle"></i> {{ u.sub_days }} days</span>
+              {% elif u.sub_days <= 7 %}
+                <span class="days-badge warn"><i class="fas fa-clock"></i> {{ u.sub_days }} days</span>
+              {% else %}
+                <span class="days-badge"><i class="fas fa-check-circle"></i> {{ u.sub_days }} days</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--gold2);">{{ u.sub_time_left }}</small></td>
+            <td><small style="color:var(--muted);">{{ u.sub_expiry or '—' }}</small></td>
+            <td>{% if u.renew_count > 0 %}<span class="days-badge"><i class="fas fa-redo"></i> {{ u.renew_count }}x (+{{ u.renew_days }}d)</span>{% else %}<small style="color:var(--muted);">—</small>{% endif %}</td>
+            <td>
+              <form method="POST" action="/agent/renew_subscription/{{ u.id }}" style="display:flex;gap:4px;justify-content:flex-end;">
+                <input type="number" name="days" value="30" min="1" style="width:70px;padding:4px;font-size:.72rem;"/>
+                <select name="mode" style="padding:4px;font-size:.72rem;border-radius:6px;background:#000;color:#fff;border:1px solid rgba(245,200,66,.2);">
+                  <option value="extend">Extend</option>
+                  <option value="reset">New</option>
+                </select>
+                <button type="submit" class="btn btn-gold btn-sm" style="padding:4px 8px;font-size:.65rem;"><i class="fas fa-sync"></i></button>
+              </form>
+              <div style="text-align:right;margin-top:4px;">
+                <a href="/agent/customer_history/{{ u.id }}" class="btn btn-info btn-xs" style="font-size:.62rem;"><i class="fas fa-eye"></i> Details</a>
+              </div>
+            </td>
+          </tr>
+          {% else %}<tr class="empty-row"><td colspan="9">No customers yet.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key" style="color:var(--purple);"></i> Recent Keys (Mine)</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>KEY</th>
+            <th>CREATED</th>
+            <th>USER DAYS LEFT</th>
+            <th>USED BY</th>
+            <th>STATUS</th>
+            <th style="text-align:right;">ACTION</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for key in keys %}
+          <tr>
+            <td><span class="key-code">{{ key.key }}</span></td>
+            <td style="color:var(--muted);font-size:.78rem;">{{ key.created_at[:16] if key.created_at else '—' }}</td>
+            <td>
+              {% if key.user_sub_status == 'unlimited' %}
+                <span class="days-badge permanent"><i class="fas fa-infinity"></i> Unlimited</span>
+              {% elif key.user_sub_status == 'expired' %}
+                <span class="days-badge danger"><i class="fas fa-times-circle"></i> Expired</span>
+              {% elif key.user_sub_days is not none and key.user_sub_days >= 0 %}
+                {% if key.user_sub_days <= 3 %}
+                  <span class="days-badge danger"><i class="fas fa-exclamation-triangle"></i> {{ key.user_sub_days }} days left</span>
+                {% elif key.user_sub_days <= 7 %}
+                  <span class="days-badge warn"><i class="fas fa-clock"></i> {{ key.user_sub_days }} days left</span>
+                {% else %}
+                  <span class="days-badge"><i class="fas fa-check-circle"></i> {{ key.user_sub_days }} days left</span>
+                {% endif %}
+              {% else %}
+                <span style="color:var(--muted);font-size:.75rem;">— (unused)</span>
+              {% endif %}
+            </td>
+            <td>{% if key.used_by %}<span class="used-by"><i class="fas fa-user user-icon"></i>{{ key.used_by }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}</td>
+            <td>{% if key.is_used %}<span class="status-badge used"><i class="fas fa-check-circle"></i> USED</span>{% else %}<span class="status-badge available"><i class="fas fa-clock"></i> AVAILABLE</span>{% endif %}</td>
+            <td style="text-align:right;">
+              {% if key.used_user_id %}
+                <a href="/agent/customer_history/{{ key.used_user_id }}" class="btn btn-info btn-xs" style="font-size:.7rem;"><i class="fas fa-eye"></i> Details</a>
+              {% else %}
+                <span style="color:var(--muted);font-size:.72rem;">—</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% else %}<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px;">No keys yet. Generate one above.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <a href="/login" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
+</div>
+
+<div class="modal-overlay" id="dbDownloadModal">
+  <div class="modal-box" style="max-width:420px;">
+    <button class="modal-close" onclick="closeDbDownloadModal()">&times;</button>
+    <div class="modal-title"><i class="fas fa-database" style="color:var(--gold);"></i> Database Download</div>
+    <p style="color:var(--muted);font-size:.85rem;margin-bottom:14px;">
+      <i class="fas fa-lock" style="color:var(--red2);"></i> DB download করতে password দিন।
+    </p>
+    <form method="POST" action="/agent/download_db" id="dbDownloadForm">
+      <input type="password" name="db_password" placeholder="Enter DB Password" required style="width:100%;margin-bottom:12px;"/>
+      <div style="text-align:right;display:flex;gap:8px;justify-content:flex-end;">
+        <button type="button" onclick="closeDbDownloadModal()" class="btn btn-clear btn-sm">Cancel</button>
+        <button type="submit" class="btn btn-gold btn-sm" id="dbDownloadBtn"><i class="fas fa-download"></i> Download</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+function openDbDownloadModal(){document.getElementById('dbDownloadModal').classList.add('active');}
+function closeDbDownloadModal(){document.getElementById('dbDownloadModal').classList.remove('active');}
+document.getElementById('dbDownloadModal').addEventListener('click', function(e){if(e.target===this)closeDbDownloadModal();});
+document.getElementById('dbDownloadForm').addEventListener('submit', function(){
+  var b=document.getElementById('dbDownloadBtn'); b.disabled=true; b.innerHTML='<span class="spinner"></span> Downloading...';
+});
+</script>
+</body></html>'''
+
+
+# ============================================================
+#  AGENT SUBSCRIPTION MANAGEMENT PAGE
+# ============================================================
+AGENT_SUBSCRIPTION_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Subscription Management - Agent</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-clock-rotate-left"></i> Subscription Management</h1>
+    <div class="flex">
+      <a href="/agent/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
+      <span class="welcome-text">Agent: <strong>{{ session.username }}</strong></span>
+      <a href="/agent/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-chart-simple"></i> Subscription Overview</div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Total Customers</div><div class="stat-value">{{ my_users|length }}</div></div>
+      <div class="stat-card"><div class="stat-label">Active</div><div class="stat-value" style="color:#4ade80;">{{ active_count }}</div></div>
+      <div class="stat-card"><div class="stat-label">Expiring Soon (≤7d)</div><div class="stat-value" style="color:#F5C842;">{{ expiring_count }}</div></div>
+      <div class="stat-card"><div class="stat-label">Expired</div><div class="stat-value" style="color:#ff5a76;">{{ expired_count }}</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-users"></i> All Customers — Extend Subscription</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> আপনি যেকোনো customer-এর মেয়াদ extend বা reset করতে পারবেন। Extend = current expiry-র সাথে যোগ হবে, Reset = আজ থেকে নতুন করে শুরু হবে।</p>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>USERNAME</th>
+            <th>STATUS</th>
+            <th>DAYS LEFT</th>
+            <th>TIME LEFT</th>
+            <th>EXPIRY</th>
+            <th>RENEWALS</th>
+            <th style="text-align:right;">ACTIONS</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in my_users %}
+          <tr>
+            <td>
+              <strong style="color:#FFE28A;">{{ u.username }}</strong>
+              <br><small style="color:var(--muted);font-size:.7rem;">ID #{{ u.id }} · {{ u.email or '—' }}</small>
+            </td>
+            <td>
+              {% if u.sub_status == 'expired' %}<span class="badge badge-expired">Expired</span>
+              {% elif u.sub_status == 'unlimited' %}<span class="badge badge-permanent">∞ Unlimited</span>
+              {% elif u.sub_days <= 3 %}<span class="badge badge-expired">Expiring</span>
+              {% else %}<span class="badge badge-running">Active</span>{% endif %}
+            </td>
+            <td>
+              {% if u.sub_status == 'unlimited' %}
+                <span class="days-badge permanent"><i class="fas fa-infinity"></i> ∞</span>
+              {% elif u.sub_status == 'expired' %}
+                <span class="days-badge danger"><i class="fas fa-times-circle"></i> 0d</span>
+              {% elif u.sub_days <= 3 %}
+                <span class="days-badge danger"><i class="fas fa-exclamation-triangle"></i> {{ u.sub_days }}d</span>
+              {% elif u.sub_days <= 7 %}
+                <span class="days-badge warn"><i class="fas fa-clock"></i> {{ u.sub_days }}d</span>
+              {% else %}
+                <span class="days-badge"><i class="fas fa-check-circle"></i> {{ u.sub_days }}d</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--gold2);">{{ u.sub_time_left }}</small></td>
+            <td><small style="color:var(--muted);">{{ u.sub_expiry or '—' }}</small></td>
+            <td>
+              {% if u.renew_count > 0 %}
+                <span class="days-badge"><i class="fas fa-redo"></i> {{ u.renew_count }}x (+{{ u.renew_days }}d)</span>
+              {% else %}
+                <small style="color:var(--muted);">—</small>
+              {% endif %}
+            </td>
+            <td>
+              <form method="POST" action="/agent/renew_subscription/{{ u.id }}" style="display:flex;gap:4px;justify-content:flex-end;align-items:center;">
+                <input type="number" name="days" value="30" min="1" style="width:70px;padding:6px;font-size:.75rem;"/>
+                <select name="mode" style="padding:6px;font-size:.75rem;border-radius:8px;background:#000;color:#fff;border:1px solid rgba(245,200,66,.2);">
+                  <option value="extend">Extend</option>
+                  <option value="reset">Reset</option>
+                </select>
+                <button type="submit" class="btn btn-gold btn-sm" style="padding:5px 10px;font-size:.7rem;"><i class="fas fa-sync"></i> Apply</button>
+              </form>
+              <div style="text-align:right;margin-top:4px;">
+                <a href="/agent/customer_history/{{ u.id }}" class="btn btn-info btn-xs" style="font-size:.65rem;"><i class="fas fa-eye"></i> View Details</a>
+              </div>
+            </td>
+          </tr>
+          {% else %}<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No customers yet.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-list-alt" style="color:var(--purple);"></i> My Recent Renewal History (Latest 100)</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> আপনার করা renewal-এর সব লগ।</p>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>USERNAME</th>
+            <th>DAYS ADDED</th>
+            <th>MODE</th>
+            <th>OLD EXPIRY</th>
+            <th>NEW EXPIRY</th>
+            <th>WHEN</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in my_history %}
+          <tr>
+            <td><strong style="color:#FFE28A;">{{ h.username }}</strong></td>
+            <td>
+              {% if h.mode == 'reset' %}
+                <span class="days-badge warn"><i class="fas fa-sync"></i> Reset +{{ h.days_added }}d</span>
+              {% else %}
+                <span class="days-badge permanent"><i class="fas fa-plus-circle"></i> +{{ h.days_added }} days</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.mode }}</small></td>
+            <td><small style="color:var(--muted);">{{ h.old_expiry[:16] if h.old_expiry else '—' }}</small></td>
+            <td><small style="color:#7dd3fc;">{{ h.new_expiry[:16] if h.new_expiry else '—' }}</small></td>
+            <td><small style="color:var(--muted);">{{ h.created_at[:16] if h.created_at else '—' }}</small></td>
+          </tr>
+          {% else %}<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:30px;">No renewal history yet.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <a href="/agent/dashboard" class="back-link"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+</div></body></html>'''
+
+
+# ============================================================
+#  AGENT CUSTOMER HISTORY / DETAILS PAGE (MASKED)
+# ============================================================
+AGENT_CUSTOMER_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Customer Details - Agent</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-user-circle"></i> {{ user.username }}</h1>
+    <div class="flex">
+      <a href="/agent/subscription" class="btn btn-gold btn-sm"><i class="fas fa-arrow-left"></i> Subscription</a>
+      <a href="/agent/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-th-large"></i> Dashboard</a>
+      <a href="/agent/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-id-card"></i> Account Information</div>
+    <div style="text-align:center;margin-bottom:16px;">
+      {% if user.bot_disabled_by_admin %}<span class="live-badge live-offline"><i class="fas fa-hand-paper"></i> OWNER DISABLED</span>
+      {% elif user.sub_status == 'expired' %}<span class="live-badge live-offline"><i class="fas fa-clock"></i> EXPIRED</span>
+      {% elif live and live.is_running %}<span class="live-badge live-online"><i class="fas fa-circle"></i> LIVE · RUNNING</span>
+      {% else %}<span class="live-badge live-offline"><i class="fas fa-circle"></i> OFFLINE</span>{% endif %}
+    </div>
+    <div class="detail-grid">
+      <div class="detail-item"><div class="detail-label">User ID</div><div class="detail-value big">#{{ user.id }}</div></div>
+      <div class="detail-item"><div class="detail-label">Username</div><div class="detail-value big">{{ user.username }}</div></div>
+      <div class="detail-item">
+        <div class="detail-label">Email</div>
+        <div class="detail-value masked">{{ user.email_masked }}</div>
+        <span class="mask-note"><i class="fas fa-lock"></i> Masked for privacy</span>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">Account Password</div>
+        <div class="detail-value masked">{{ user.password_masked }}</div>
+        <span class="mask-note"><i class="fas fa-lock"></i> Masked for privacy</span>
+      </div>
+      <div class="detail-item"><div class="detail-label">Role</div><div class="detail-value">USER</div></div>
+      <div class="detail-item"><div class="detail-label">Created</div><div class="detail-value">{{ user.created_at }}</div></div>
+      <div class="detail-item">
+        <div class="detail-label">Subscription</div>
+        <div class="detail-value">
+          {% if user.sub_status == 'unlimited' %}<span style="color:#4ade80;">∞ Unlimited</span>
+          {% elif user.sub_status == 'expired' %}<span style="color:#ff5a76;">Expired</span>
+          {% else %}<span style="color:#4ade80;">{{ user.sub_days }} days left</span>{% endif %}
+          <br><small style="color:var(--muted);">Time: {{ user.sub_time_left }}</small>
+          {% if user.sub_expiry %}<br><small style="color:var(--muted);">Expires: {{ user.sub_expiry }}</small>{% endif %}
+        </div>
+      </div>
+      <div class="detail-item"><div class="detail-label">Renew Count</div><div class="detail-value big">{{ user.renew_count }}x <small style="color:#4ade80;">(+{{ user.renew_days }}d)</small></div></div>
+      <div class="detail-item"><div class="detail-label">Registration Key</div><div class="detail-value">{{ user.registration_key }}</div></div>
+      <div class="detail-item"><div class="detail-label">Created By</div><div class="detail-value">{% if not user.created_by_agent or user.created_by_agent in ['Owner','OWNER','admin','system','MAHIR TCP'] %}<span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER MAHIR</span>{% else %}<span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT {{ user.created_by_agent }}</span>{% endif %}</div></div>
+    </div>
+  </div>
+
+  {% if user.bot_uid != '—' %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-robot"></i> Bot Information</div>
+    <div class="detail-grid">
+      <div class="detail-item"><div class="detail-label">Bot UID</div><div class="detail-value big">{{ user.bot_uid }}</div></div>
+      <div class="detail-item">
+        <div class="detail-label">Bot Password</div>
+        <div class="detail-value masked">{{ user.bot_pw_masked }}</div>
+        <span class="mask-note"><i class="fas fa-lock"></i> Masked for privacy</span>
+      </div>
+      <div class="detail-item"><div class="detail-label">Bot File</div><div class="detail-value">{{ user.bot_file }}</div></div>
+      <div class="detail-item"><div class="detail-label">Owner UIDs</div><div class="detail-value">{{ user.admin_uid }}</div></div>
+      <div class="detail-item"><div class="detail-label">Bot Status</div><div class="detail-value">{{ user.bot_status }}</div></div>
+      <div class="detail-item"><div class="detail-label">Force Active</div><div class="detail-value">{% if user.bot_force_active %}<span style="color:#4ade80;">YES</span>{% else %}<span style="color:var(--muted);">NO</span>{% endif %}</div></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if live %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-satellite-dish"></i> Live Bot Status</div>
+    <div class="detail-grid">
+      <div class="detail-item"><div class="detail-label">Live Bot Name</div><div class="detail-value big">{{ live.bot_name }}</div></div>
+      <div class="detail-item"><div class="detail-label">Region</div><div class="detail-value">{{ live.bot_region }}</div></div>
+      <div class="detail-item"><div class="detail-label">Uptime</div><div class="detail-value">{{ live.uptime }}</div></div>
+      <div class="detail-item"><div class="detail-label">CPU</div><div class="detail-value">{{ live.cpu }}%</div></div>
+      <div class="detail-item"><div class="detail-label">RAM</div><div class="detail-value">{{ live.ram }}%</div></div>
+      <div class="detail-item"><div class="detail-label">Last Message</div><div class="detail-value">{{ live.last_message }}</div></div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-sync"></i> Quick Renew / Extend</div>
+    <form method="POST" action="/agent/renew_subscription/{{ user.id }}" class="flex">
+      <label style="color:var(--gold2);font-weight:600;">Mode:</label>
+      <select name="mode">
+        <option value="extend">Extend from current</option>
+        <option value="reset">New package (reset)</option>
+      </select>
+      <label style="color:var(--gold2);font-weight:600;">Days:</label>
+      <input type="number" name="days" value="30" min="1" style="width:120px;"/>
+      <button type="submit" class="btn btn-gold"><i class="fas fa-save"></i> Apply</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-history" style="color:var(--purple);"></i> Renewal History ({{ sub_history|length }})</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>DAYS ADDED</th>
+            <th>MODE</th>
+            <th>OLD EXPIRY</th>
+            <th>NEW EXPIRY</th>
+            <th>EXTENDED BY</th>
+            <th>ROLE</th>
+            <th>WHEN</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in sub_history %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td>
+              {% if h.mode == 'reset' %}
+                <span class="days-badge warn"><i class="fas fa-sync"></i> Reset +{{ h.days_added }}d</span>
+              {% else %}
+                <span class="days-badge permanent"><i class="fas fa-plus-circle"></i> +{{ h.days_added }} days</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.mode }}</small></td>
+            <td><small style="color:var(--muted);">{{ h.old_expiry[:16] if h.old_expiry else '—' }}</small></td>
+            <td><small style="color:#7dd3fc;">{{ h.new_expiry[:16] if h.new_expiry else '—' }}</small></td>
+            <td><strong style="color:#FFE28A;">{{ h.extended_by or '—' }}</strong></td>
+            <td>
+              {% if h.extended_by_role == 'owner' %}<span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+              {% elif h.extended_by_role == 'agent' %}<span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT</span>
+              {% else %}<small style="color:var(--muted);">—</small>{% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.created_at[:16] if h.created_at else '—' }}</small></td>
+          </tr>
+          {% else %}<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px;">No renewal history yet.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <a href="/agent/subscription" class="back-link"><i class="fas fa-arrow-left"></i> Back to Subscription</a>
+</div></body></html>'''
+
+
+# ============================================================
+#  OWNER DASHBOARD
+# ============================================================
+OWNER_DASHBOARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Owner Dashboard - MAHIR PREMIUM</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-crown"></i> Owner Dashboard</h1>
+    <div class="flex">
+      <form method="POST" action="/owner/reset_all_bots" onsubmit="return confirm('⚠️ Reset All করলে:\\n\\n✅ সব bot file নতুন mahir.py দিয়ে rebuild হবে\\n✅ DB থেকে UID/PW inject হবে\\n✅ Expired bot files DELETE হবে\\n✅ Eligible bots restart হবে\\n\\nচালিয়ে যাবেন?');" style="display:inline;"><button type="submit" class="btn btn-reset btn-sm"><i class="fas fa-sync-alt"></i> Reset All</button></form>
+      {% if global_stop %}
+        <form method="POST" action="/owner/start_all_bots" style="display:inline;"><button type="submit" class="btn btn-success btn-sm"><i class="fas fa-play"></i> Resume All</button></form>
+      {% else %}
+        <form method="POST" action="/owner/stop_all_bots" onsubmit="return confirm('Stop all bots globally?');" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-hand-paper"></i> Stop All (Lock)</button></form>
+      {% endif %}
+      <span class="welcome-text">Welcome, <strong>{{ session.username }}</strong></span>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  {% if global_stop %}
+  <div class="card" style="background:rgba(212,42,58,.1);border-color:rgba(212,42,58,.4);">
+    <div style="display:flex;align-items:center;gap:12px;color:var(--red2);font-weight:700;"><i class="fas fa-exclamation-triangle" style="font-size:1.5rem;"></i> <span>Global Bot Stop চালু! সব user bot বন্ধ (force-active বাদে)।</span></div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-server"></i> Server Resources</div>
+    <div class="system-stats">
+      <div class="stat-card"><div class="stat-label">CPU</div><div class="stat-value">{{ cpu }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ cpu }}%;"></div></div></div>
+      <div class="stat-card"><div class="stat-label">RAM</div><div class="stat-value">{{ ram_percent }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ ram_percent }}%;"></div></div></div>
+      <div class="stat-card"><div class="stat-label">Disk</div><div class="stat-value">{{ disk_percent }}%</div><div class="progress-bar"><div class="progress-fill" style="width:{{ disk_percent }}%;"></div></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-bullhorn"></i> Global Notice Settings</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;"><i class="fas fa-info-circle"></i> User panel-এ button আকারে দেখানো হবে।</p>
+    <form method="POST" action="/owner/set_global_notice">
+      <textarea name="notice_text" rows="3">{{ global_notice }}</textarea>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="submit" class="btn btn-gold btn-sm"><i class="fas fa-save"></i> Save Notice</button>
+        <a href="/owner/preview_global_notice" target="_blank" class="btn btn-info btn-sm"><i class="fas fa-eye"></i> Preview</a>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-bell"></i> User Login Notice (Popup)</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:12px;">
+      <i class="fas fa-info-circle"></i> এই notice enable করলে <b style="color:var(--gold2);">প্রত্যেক user</b> তার panel-এ login করলে এই popup দেখতে পাবে। <br>
+      <b style="color:var(--red2);">⚠️ Important:</b> কোন নির্দিষ্ট user কে personal notice পাঠালে, সেটা এই global notice কে override করবে।
+    </p>
+    <form method="POST" action="/owner/set_user_login_notice">
+      <div class="flex" style="margin-bottom:12px;">
+        <label style="color:var(--gold2);font-weight:600;">Status:</label>
+        {% if login_notice_enabled %}
+          <span class="badge badge-running">🟢 ENABLED</span>
+        {% else %}
+          <span class="badge badge-stopped">🔴 DISABLED</span>
+        {% endif %}
+      </div>
+      <textarea name="notice_text" rows="4" placeholder="Type notice text here...">{{ login_notice_text }}</textarea>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+        <button type="submit" name="action" value="save" class="btn btn-gold btn-sm"><i class="fas fa-save"></i> Save</button>
+        {% if login_notice_enabled %}
+          <button type="submit" name="action" value="disable" class="btn btn-danger btn-sm"><i class="fas fa-toggle-off"></i> Disable Notice</button>
+        {% else %}
+          <button type="submit" name="action" value="enable" class="btn btn-success btn-sm"><i class="fas fa-toggle-on"></i> Enable Notice</button>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-upload"></i> Owner Actions</div>
+    <div class="flex">
+      <a href="/owner/files" class="btn btn-gold"><i class="fas fa-folder"></i> File Manager</a>
+    </div>
+    <div style="margin-top:14px;">
+      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload mahir.py — Upload করলে সব bot file নতুন template দিয়ে rebuild হবে + expired delete + eligible restart</div>
+      <form method="POST" action="/owner/upload_mahir" enctype="multipart/form-data" class="upload-form" id="uploadMahirForm">
+        <input type="file" name="mahir_file" accept=".py" required style="flex:1;min-width:200px;" id="mahirFileInput"/>
+        <button type="submit" class="btn btn-warning btn-sm" id="uploadMahirBtn"><i class="fas fa-cloud-upload-alt"></i> Upload mahir.py</button>
+      </form>
+    </div>
+    <div style="margin-top:14px;">
+      <div style="font-size:.82rem;color:var(--gold2);font-weight:600;margin-bottom:8px;">Upload users.db — Upload করলে সব bot file rebuild হবে + expired delete + eligible restart</div>
+      <form method="POST" action="/owner/upload_users_db" enctype="multipart/form-data" class="upload-form" id="uploadDbForm">
+        <input type="file" name="db_file" accept=".db" required style="flex:1;min-width:200px;"/>
+        <button type="submit" class="btn btn-warning btn-sm" id="uploadDbBtn" onclick="return confirm('⚠️ Replace DB?\\n\\n✅ সব bot file rebuild হবে\\n✅ Expired bots delete হবে\\n✅ Eligible bots restart হবে\\n\\nচালিয়ে যাবেন?');"><i class="fas fa-upload"></i> Upload DB</button>
+      </form>
+    </div>
+    {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-user-tie"></i> Agent Management</div>
+    <form method="POST" action="/owner/create_agent" class="flex" id="createAgentForm">
+      <input type="text" name="username" placeholder="Username" required class="flex-grow"/>
+      <input type="email" name="email" placeholder="Email" required class="flex-grow"/>
+      <input type="password" name="password" placeholder="Password" required class="flex-grow"/>
+      <button type="submit" class="btn btn-success btn-sm" id="createAgentBtn"><i class="fas fa-user-plus"></i> Create</button>
+    </form>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Keys/Limit</th><th>Action</th></tr></thead>
+        <tbody>
+          {% for agent in agents %}
+          <tr>
+            <td>{{ agent.id }}</td>
+            <td><strong>{{ agent.username }}</strong></td>
+            <td>{{ agent.email or '-' }}</td>
+            <td>
+              <span class="badge badge-admin">{{ agent.key_count }}{% if agent.key_limit >= 0 %} / {{ agent.key_limit }}{% else %} / ∞{% endif %}</span>
+              <form method="POST" action="/owner/set_key_limit/{{ agent.id }}" style="margin-top:4px;display:flex;gap:4px;">
+                <input type="number" name="key_limit" value="{{ agent.key_limit }}" min="-1" style="width:70px;padding:4px;font-size:.72rem;"/>
+                <button type="submit" class="btn btn-gold btn-xs"><i class="fas fa-save"></i></button>
+              </form>
+            </td>
+            <td>
+              <div class="td-actions">
+                <a href="/owner/login_as/{{ agent.id }}" class="btn btn-warning btn-sm" title="User Panel Login"><i class="fas fa-sign-in-alt"></i> User Panel</a>
+                <a href="/owner/user_details/{{ agent.id }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i></a>
+                <form method="POST" action="/owner/delete_agent/{{ agent.id }}" onsubmit="return confirm('Delete?');" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></form>
+              </div>
+            </td>
+          </tr>
+          {% else %}<tr class="empty-row"><td colspan="5">No agents</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key"></i> Generate Key (Owner)</div>
+    <form method="POST" action="/owner/create_key" class="flex">
+      <div class="input-group"><label>Days (0=Permanent):</label><input type="number" name="days_valid" value="30" min="0" style="width:110px;"/></div>
+      <button type="submit" class="btn btn-gold"><i class="fas fa-plus-circle"></i> Generate</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-layer-group" style="color:var(--purple);"></i> All Groups (Owner + Agents) — Click to view keys</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:14px;">
+      <i class="fas fa-info-circle"></i> প্রতিটি group-এ ক্লিক করুন → সেখানে সব keys দেখাবে, কয়টা used কয়টা unused, কতবার renew হয়েছে।
+    </p>
+
+    {% for group in grouped_keys %}
+    <div class="group-card">
+      <div class="group-header">
+        <div class="group-name">
+          {% if group.is_owner %}
+            <i class="fas fa-crown" style="color:#F5C842;"></i> {{ group.name }}
+          {% else %}
+            <i class="fas fa-user-tie" style="color:#7ab5ff;"></i> AGENT {{ group.name }}
+          {% endif %}
+        </div>
+        <div class="group-stats">
+          <span class="group-stat"><strong>{{ group.total_keys }}</strong> Keys</span>
+          <span class="group-stat">✅ <strong>{{ group.used_keys }}</strong> Used</span>
+          <span class="group-stat">⏳ <strong>{{ group.unused_keys }}</strong> Unused</span>
+          <span class="group-stat">🔁 <strong>{{ group.renewed_users }}</strong> Renewed</span>
+          <a href="/owner/group_keys/{{ group.slug }}" class="btn btn-gold btn-sm"><i class="fas fa-eye"></i> View Keys</a>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div style="text-align:center;color:var(--muted);padding:30px;">No groups yet.</div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-users"></i> Registered Users (Grouped)</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:14px;">
+      <i class="fas fa-info-circle"></i> Owner + প্রতিটি agent-এর under-এ যারা register হয়েছে।
+    </p>
+
+    {% for group in grouped_users %}
+    <div class="group-card">
+      <div class="group-header">
+        <div class="group-name">
+          {% if group.is_owner %}
+            <i class="fas fa-crown" style="color:#F5C842;"></i> {{ group.name }}
+          {% else %}
+            <i class="fas fa-user-tie" style="color:#7ab5ff;"></i> AGENT {{ group.name }}
+          {% endif %}
+        </div>
+        <div class="group-stats">
+          <span class="group-stat"><strong>{{ group.total_users }}</strong> Users</span>
+          <span class="group-stat">🟢 <strong>{{ group.active_users }}</strong> Active</span>
+          <span class="group-stat">🔴 <strong>{{ group.expired_users }}</strong> Expired</span>
+          <span class="group-stat">🔁 <strong>{{ group.renewed_users }}</strong> Renewed</span>
+          <a href="/owner/group_users/{{ group.slug }}" class="btn btn-gold btn-sm"><i class="fas fa-eye"></i> View Users</a>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div style="text-align:center;color:var(--muted);padding:30px;">No users yet.</div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-history" style="color:var(--purple);"></i> Subscription History (Grouped)</div>
+    <p style="color:var(--muted);font-size:.82rem;margin-bottom:14px;">
+      <i class="fas fa-info-circle"></i> প্রতিটি group-এর renew history আলাদা করে দেখতে পারবেন।
+    </p>
+
+    {% for group in grouped_history %}
+    <div class="group-card">
+      <div class="group-header">
+        <div class="group-name">
+          {% if group.is_owner %}
+            <i class="fas fa-crown" style="color:#F5C842;"></i> {{ group.name }}
+          {% else %}
+            <i class="fas fa-user-tie" style="color:#7ab5ff;"></i> AGENT {{ group.name }}
+          {% endif %}
+        </div>
+        <div class="group-stats">
+          <span class="group-stat"><strong>{{ group.total_entries }}</strong> Records</span>
+          <span class="group-stat">📅 <strong>{{ group.total_days }}</strong> Days added</span>
+          <a href="/owner/group_history/{{ group.slug }}" class="btn btn-gold btn-sm"><i class="fas fa-eye"></i> View History</a>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div style="text-align:center;color:var(--muted);padding:30px;">No history yet.</div>
+    {% endfor %}
+  </div>
+
+  <a href="/logout" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
+</div>
+
+<script>
+document.getElementById('uploadMahirForm').addEventListener('submit',function(e){var f=document.getElementById('mahirFileInput').files[0];if(f && f.name.toLowerCase()!=='mahir.py'){e.preventDefault();alert('❌ Only "mahir.py"!');return false;}var b=document.getElementById('uploadMahirBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Rebuilding all bots...';});
+document.getElementById('uploadDbForm').addEventListener('submit',function(){var b=document.getElementById('uploadDbBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Processing...';});
+document.getElementById('createAgentForm').addEventListener('submit',function(){var b=document.getElementById('createAgentBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Creating...';});
+</script>
+</body></html>'''
+
+
+# ============================================================
+#  OWNER GROUP DETAIL PAGES
+# ============================================================
+OWNER_GROUP_KEYS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>{{ group_name }} - Keys</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1>{% if is_owner %}<i class="fas fa-crown" style="color:#F5C842;"></i> {{ group_name }}{% else %}<i class="fas fa-user-tie" style="color:#7ab5ff;"></i> AGENT {{ group_name }}{% endif %}</h1>
+    <div class="flex">
+      <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-chart-simple"></i> Key Statistics</div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Total Keys</div><div class="stat-value">{{ keys|length }}</div></div>
+      <div class="stat-card"><div class="stat-label">Used</div><div class="stat-value" style="color:#7ab5ff;">{{ used_count }}</div></div>
+      <div class="stat-card"><div class="stat-label">Unused</div><div class="stat-value" style="color:#F5C842;">{{ unused_count }}</div></div>
+      <div class="stat-card"><div class="stat-label">Renewed Users</div><div class="stat-value" style="color:#4ade80;">{{ renewed_count }}</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key"></i> Keys List — Click key to view details</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>KEY</th>
+            <th>CREATED</th>
+            <th>DURATION</th>
+            <th>USED BY</th>
+            <th>RENEWALS</th>
+            <th>STATUS</th>
+            <th style="text-align:right;">ACTION</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for key in keys %}
+          <tr>
+            <td>
+              <a href="/owner/key_details/{{ key.id }}" style="text-decoration:none;">
+                <span class="key-code" style="cursor:pointer;">{{ key.key }}</span>
+              </a>
+            </td>
+            <td style="color:var(--muted);font-size:.78rem;">{{ key.created_at[:16] if key.created_at else '—' }}</td>
+            <td>
+              {% if key.duration_days == 0 %}
+                <span class="duration-tag" style="background:rgba(74,222,128,.15);color:#4ade80;border-color:rgba(74,222,128,.4);">∞ Permanent</span>
+              {% else %}
+                <span class="duration-tag">{{ key.duration_days }}d</span>
+              {% endif %}
+            </td>
+            <td>{% if key.used_by %}<span class="used-by"><i class="fas fa-user user-icon"></i>{{ key.used_by }}</span>{% else %}<span style="color:var(--muted);">—</span>{% endif %}</td>
+            <td>
+              {% if key.renew_count > 0 %}
+                <span class="days-badge"><i class="fas fa-redo"></i> {{ key.renew_count }}x (+{{ key.renew_days }}d)</span>
+              {% else %}
+                <span style="color:var(--muted);font-size:.75rem;">—</span>
+              {% endif %}
+            </td>
+            <td>{% if key.is_used %}<span class="status-badge used"><i class="fas fa-check-circle"></i> USED</span>{% else %}<span class="status-badge available"><i class="fas fa-clock"></i> AVAILABLE</span>{% endif %}</td>
+            <td style="text-align:right;">
+              <a href="/owner/key_details/{{ key.id }}" class="btn btn-info btn-sm" style="font-size:.7rem;"><i class="fas fa-eye"></i> Details</a>
+              <form method="POST" action="/owner/delete_key/{{ key.id }}" onsubmit="return confirm('Delete this key AND its subscription history?');" style="display:inline;">
+                <button type="submit" class="delete-key-btn" title="Delete" style="width:30px;height:30px;font-size:.72rem;"><i class="fas fa-trash"></i></button>
+              </form>
+            </td>
+          </tr>
+          {% else %}<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:30px;">No keys in this group.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <a href="/owner/dashboard" class="back-link"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+</div></body></html>'''
+
+
+OWNER_KEY_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Key Details</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-key"></i> Key Details</h1>
+    <div class="flex">
+      <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
+      <a href="/owner/group_keys/{{ creator_slug }}" class="btn btn-gold btn-sm"><i class="fas fa-layer-group"></i> Back to Group</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-info-circle"></i> Key Information</div>
+    <div class="detail-grid">
+      <div class="detail-item" style="grid-column:1/-1;">
+        <div class="detail-label">Key</div>
+        <div class="detail-value big" style="word-break:break-all;">{{ key.key }}</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">Created By</div>
+        <div class="detail-value">
+          {% if is_owner_group %}<span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+          {% else %}<span class="creator-badge agent"><i class="fas fa-user-tie"></i> {{ key.created_by }}</span>{% endif %}
+        </div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">Created At</div>
+        <div class="detail-value">{{ key.created_at or '—' }}</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">Duration</div>
+        <div class="detail-value">
+          {% if key.duration_days == 0 %}<span style="color:#4ade80;">∞ Permanent</span>
+          {% else %}{{ key.duration_days }} days{% endif %}
+        </div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">Expiry Date</div>
+        <div class="detail-value">{{ key.expiry_date[:16] if key.expiry_date else '∞ Never' }}</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">Status</div>
+        <div class="detail-value">
+          {% if key.is_used %}<span class="status-badge used"><i class="fas fa-check-circle"></i> USED</span>
+          {% else %}<span class="status-badge available"><i class="fas fa-clock"></i> AVAILABLE</span>{% endif %}
+        </div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">Used By</div>
+        <div class="detail-value">{{ key.used_by or '—' }}</div>
+      </div>
+      <div class="detail-item">
+        <div class="detail-label">Used At</div>
+        <div class="detail-value">{{ key.used_at[:16] if key.used_at else '—' }}</div>
+      </div>
+    </div>
+  </div>
+
+  {% if user %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-user"></i> User Information (Who used this key)</div>
+    <div class="detail-grid">
+      <div class="detail-item"><div class="detail-label">User ID</div><div class="detail-value big">#{{ user.id }}</div></div>
+      <div class="detail-item"><div class="detail-label">Username</div><div class="detail-value big">{{ user.username }}</div></div>
+      <div class="detail-item"><div class="detail-label">Email</div><div class="detail-value">{{ user.email or '—' }}</div></div>
+      <div class="detail-item"><div class="detail-label">Bot UID</div><div class="detail-value">{{ user.bot_uid or '—' }}</div></div>
+      <div class="detail-item"><div class="detail-label">Created By</div>
+        <div class="detail-value">
+          {% if not user.created_by_agent or user.created_by_agent in ['Owner','OWNER','admin','system','MAHIR TCP'] %}
+            <span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER MAHIR</span>
+          {% else %}
+            <span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT {{ user.created_by_agent }}</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="detail-item"><div class="detail-label">Current Subscription</div>
+        <div class="detail-value">
+          {% if user.sub_status == 'unlimited' %}<span style="color:#4ade80;">∞ Unlimited</span>
+          {% elif user.sub_status == 'expired' %}<span style="color:#ff5a76;">Expired</span>
+          {% else %}<span style="color:#4ade80;">{{ user.sub_days }} days left</span>{% endif %}
+        </div>
+      </div>
+      <div class="detail-item" style="grid-column:1/-1;">
+        <a href="/owner/user_details/{{ user.id }}" class="btn btn-gold btn-sm"><i class="fas fa-eye"></i> View Full User Details</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-history" style="color:var(--purple);"></i> Renewal History for this User ({{ renewal_history|length }})</div>
+    {% if renewal_history %}
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>DAYS ADDED</th>
+            <th>MODE</th>
+            <th>OLD EXPIRY</th>
+            <th>NEW EXPIRY</th>
+            <th>EXTENDED BY</th>
+            <th>ROLE</th>
+            <th>WHEN</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in renewal_history %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td>
+              {% if h.mode == 'reset' %}
+                <span class="days-badge warn"><i class="fas fa-sync"></i> Reset +{{ h.days_added }}d</span>
+              {% else %}
+                <span class="days-badge permanent"><i class="fas fa-plus-circle"></i> +{{ h.days_added }} days</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.mode }}</small></td>
+            <td><small style="color:var(--muted);">{{ h.old_expiry[:16] if h.old_expiry else '—' }}</small></td>
+            <td><small style="color:#7dd3fc;">{{ h.new_expiry[:16] if h.new_expiry else '—' }}</small></td>
+            <td><strong style="color:#FFE28A;">{{ h.extended_by or '—' }}</strong></td>
+            <td>
+              {% if h.extended_by_role == 'owner' %}<span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+              {% elif h.extended_by_role == 'agent' %}<span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT</span>
+              {% else %}<small style="color:var(--muted);">—</small>{% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.created_at[:16] if h.created_at else '—' }}</small></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div style="text-align:center;color:var(--muted);padding:24px;">No renewal history for this user yet.</div>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-info-circle"></i> Status</div>
+    <div style="text-align:center;color:var(--muted);padding:24px;">
+      <i class="fas fa-clock" style="font-size:2rem;margin-bottom:12px;display:block;color:var(--gold);"></i>
+      This key is not used yet — no user associated.
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-tools"></i> Actions</div>
+    <div class="flex">
+      <form method="POST" action="/owner/delete_key/{{ key.id }}" onsubmit="return confirm('⚠️ Delete this key AND its subscription history?');">
+        <button type="submit" class="btn btn-danger"><i class="fas fa-trash"></i> Delete Key & History</button>
+      </form>
+    </div>
+  </div>
+
+  <a href="/owner/group_keys/{{ creator_slug }}" class="back-link"><i class="fas fa-arrow-left"></i> Back to Group Keys</a>
+</div></body></html>'''
+
+
+OWNER_GROUP_USERS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>{{ group_name }} - Users</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1>{% if is_owner %}<i class="fas fa-crown" style="color:#F5C842;"></i> {{ group_name }} — Users{% else %}<i class="fas fa-user-tie" style="color:#7ab5ff;"></i> AGENT {{ group_name }} — Users{% endif %}</h1>
+    <div class="flex">
+      <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-users"></i> Users under {{ group_name }} ({{ users|length }})</div>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>ID</th><th>Username</th><th>Email</th><th>Bot Status</th><th>Days Left</th><th>Renewals</th><th style="text-align:right;">Actions</th></tr></thead>
+        <tbody>
+          {% for user in users %}
+          <tr>
+            <td>{{ user.id }}</td>
+            <td><strong>{{ user.username }}</strong></td>
+            <td>{{ user.email or '—' }}</td>
+            <td>
+              {% if user.bot_status == 'running' %}<span class="badge badge-running">Running</span>
+              {% elif user.bot_status == 'expired' %}<span class="badge badge-expired">Expired</span>
+              {% else %}<span class="badge badge-unused">{{ user.bot_status or 'N/A' }}</span>{% endif %}
+            </td>
+            <td>
+              {% if user.sub_status == 'unlimited' %}<span class="days-badge permanent"><i class="fas fa-infinity"></i> ∞</span>
+              {% elif user.sub_status == 'expired' %}<span class="days-badge danger"><i class="fas fa-times-circle"></i> Expired</span>
+              {% elif user.sub_days <= 3 %}<span class="days-badge danger"><i class="fas fa-exclamation-triangle"></i> {{ user.sub_days }}d</span>
+              {% elif user.sub_days <= 7 %}<span class="days-badge warn"><i class="fas fa-clock"></i> {{ user.sub_days }}d</span>
+              {% else %}<span class="days-badge"><i class="fas fa-check-circle"></i> {{ user.sub_days }}d</span>{% endif %}
+            </td>
+            <td>
+              {% if user.renew_count > 0 %}<span class="days-badge"><i class="fas fa-redo"></i> {{ user.renew_count }}x (+{{ user.renew_days }}d)</span>
+              {% else %}<span style="color:var(--muted);font-size:.75rem;">—</span>{% endif %}
+            </td>
+            <td>
+              <div class="td-actions">
+                <a href="/owner/user_details/{{ user.id }}" class="btn btn-info btn-sm"><i class="fas fa-eye"></i> Details</a>
+              </div>
+            </td>
+          </tr>
+          {% else %}<tr class="empty-row"><td colspan="7">No users in this group.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <a href="/owner/dashboard" class="back-link"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+</div></body></html>'''
+
+
+OWNER_GROUP_HISTORY_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>{{ group_name }} - History</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1>{% if is_owner %}<i class="fas fa-crown" style="color:#F5C842;"></i> {{ group_name }} — History{% else %}<i class="fas fa-user-tie" style="color:#7ab5ff;"></i> AGENT {{ group_name }} — History{% endif %}</h1>
+    <div class="flex">
+      <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-history" style="color:var(--purple);"></i> Subscription History ({{ history|length }} records)</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>USERNAME</th>
+            <th>DAYS ADDED</th>
+            <th>MODE</th>
+            <th>OLD EXPIRY</th>
+            <th>NEW EXPIRY</th>
+            <th>EXTENDED BY</th>
+            <th>WHEN</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in history %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td><strong style="color:#FFE28A;">{{ h.username }}</strong></td>
+            <td>
+              {% if h.mode == 'reset' %}
+                <span class="days-badge warn"><i class="fas fa-sync"></i> Reset +{{ h.days_added }}d</span>
+              {% else %}
+                <span class="days-badge permanent"><i class="fas fa-plus-circle"></i> +{{ h.days_added }} days</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.mode }}</small></td>
+            <td><small style="color:var(--muted);">{{ h.old_expiry[:16] if h.old_expiry else '—' }}</small></td>
+            <td><small style="color:#7dd3fc;">{{ h.new_expiry[:16] if h.new_expiry else '—' }}</small></td>
+            <td><strong style="color:#FFE28A;">{{ h.extended_by or '—' }}</strong></td>
+            <td><small style="color:var(--muted);">{{ h.created_at[:16] if h.created_at else '—' }}</small></td>
+          </tr>
+          {% else %}<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:30px;">No history records.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <a href="/owner/dashboard" class="back-link"><i class="fas fa-arrow-left"></i> Back to Dashboard</a>
+</div></body></html>'''
+
+
+# ============================================================
+#  USER DETAILS (Owner view)
+# ============================================================
+USER_DETAILS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>User Details - OWNER PANEL</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
+.copy-btn{background:rgba(245,200,66,.1);border:1px solid rgba(245,200,66,.25);color:var(--gold);padding:4px 10px;border-radius:8px;cursor:pointer;font-size:.7rem;margin-left:6px;font-weight:600}
+</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-user-circle"></i> {{ user.username }}</h1>
+    <div class="flex">
+      {% if not user.is_admin %}
+      <a href="/owner/login_as/{{ user.id }}" class="btn btn-gold btn-sm" style="font-weight:700;"><i class="fas fa-sign-in-alt"></i> User Panel Login</a>
+      {% endif %}
+      <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-arrow-left"></i> Dashboard</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><i class="fas fa-id-card"></i> Account Information</div>
+    <div style="text-align:center;margin-bottom:16px;">
+      {% if user.bot_disabled_by_admin %}<span class="live-badge live-offline"><i class="fas fa-hand-paper"></i> OWNER DISABLED</span>
+      {% elif user.sub_status == 'expired' %}<span class="live-badge live-offline"><i class="fas fa-clock"></i> EXPIRED</span>
+      {% elif live and live.is_running %}<span class="live-badge live-online"><i class="fas fa-circle"></i> LIVE · RUNNING</span>
+      {% else %}<span class="live-badge live-offline"><i class="fas fa-circle"></i> OFFLINE</span>{% endif %}
+    </div>
+    <div class="detail-grid">
+      <div class="detail-item"><div class="detail-label">User ID</div><div class="detail-value big">#{{ user.id }}</div></div>
+      <div class="detail-item"><div class="detail-label">Username</div><div class="detail-value big">{{ user.username }}<button class="copy-btn" onclick="copyT('{{ user.username }}')">Copy</button></div></div>
+      <div class="detail-item"><div class="detail-label">Email</div><div class="detail-value">{{ user.email }}</div></div>
+      <div class="detail-item"><div class="detail-label">Password</div><div class="detail-value">{{ user.password }}<button class="copy-btn" onclick="copyT('{{ user.password }}')">Copy</button></div></div>
+      <div class="detail-item"><div class="detail-label">Role</div><div class="detail-value">{% if user.is_admin %}OWNER{% elif user.is_agent %}AGENT{% else %}USER{% endif %}</div></div>
+      <div class="detail-item"><div class="detail-label">Created</div><div class="detail-value">{{ user.created_at }}</div></div>
+      <div class="detail-item">
+        <div class="detail-label">Subscription</div>
+        <div class="detail-value">
+          {% if user.sub_status == 'unlimited' %}<span style="color:#4ade80;">∞ Unlimited</span>
+          {% elif user.sub_status == 'expired' %}<span style="color:#ff5a76;">Expired</span>
+          {% else %}<span style="color:#4ade80;">{{ user.sub_days }} days left</span>{% endif %}
+          <br><small style="color:var(--muted);">Time: {{ user.sub_time_left }}</small>
+          {% if user.sub_expiry %}<br><small style="color:var(--muted);">Expires: {{ user.sub_expiry }}</small>{% endif %}
+        </div>
+      </div>
+      <div class="detail-item"><div class="detail-label">Renew Count</div><div class="detail-value big">{{ user.renew_count }}x <small style="color:#4ade80;">(+{{ user.renew_days }}d)</small></div></div>
+      <div class="detail-item"><div class="detail-label">Registration Key</div><div class="detail-value">{{ user.registration_key }}</div></div>
+      <div class="detail-item"><div class="detail-label">Created By</div><div class="detail-value">{% if not user.created_by_agent or user.created_by_agent in ['Owner','OWNER','admin','system','MAHIR TCP'] %}<span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER MAHIR</span>{% else %}<span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT {{ user.created_by_agent }}</span>{% endif %}</div></div>
+    </div>
+  </div>
+
+  {% if user.bot_uid != '—' and not user.is_agent %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-robot"></i> Bot Information</div>
+    <div class="detail-grid">
+      <div class="detail-item"><div class="detail-label">Bot UID</div><div class="detail-value big">{{ user.bot_uid }}</div></div>
+      <div class="detail-item"><div class="detail-label">Bot Password</div><div class="detail-value">{{ user.bot_pw }}</div></div>
+      <div class="detail-item"><div class="detail-label">Bot File</div><div class="detail-value">{{ user.bot_file }}</div></div>
+      <div class="detail-item"><div class="detail-label">Owner UIDs</div><div class="detail-value">{{ user.admin_uid }}</div></div>
+      <div class="detail-item"><div class="detail-label">Bot Status</div><div class="detail-value">{{ user.bot_status }}</div></div>
+      <div class="detail-item"><div class="detail-label">Force Active</div><div class="detail-value">{% if user.bot_force_active %}<span style="color:#4ade80;">YES</span>{% else %}<span style="color:var(--muted);">NO</span>{% endif %}</div></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if live and not user.is_agent %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-satellite-dish"></i> Live Bot Status</div>
+    <div class="detail-grid">
+      <div class="detail-item"><div class="detail-label">Live Bot Name</div><div class="detail-value big">{{ live.bot_name }}</div></div>
+      <div class="detail-item"><div class="detail-label">UID</div><div class="detail-value">{{ live.bot_uid }}</div></div>
+      <div class="detail-item"><div class="detail-label">Region</div><div class="detail-value">{{ live.bot_region }}</div></div>
+      <div class="detail-item"><div class="detail-label">Clan ID</div><div class="detail-value">{{ live.bot_clan_id }}</div></div>
+      <div class="detail-item"><div class="detail-label">Online Server</div><div class="detail-value">{{ live.bot_server }}</div></div>
+      <div class="detail-item"><div class="detail-label">Chat Server</div><div class="detail-value">{{ live.bot_chat_server }}</div></div>
+      <div class="detail-item"><div class="detail-label">Uptime</div><div class="detail-value">{{ live.uptime }}</div></div>
+      <div class="detail-item"><div class="detail-label">CPU</div><div class="detail-value">{{ live.cpu }}%</div></div>
+      <div class="detail-item"><div class="detail-label">RAM</div><div class="detail-value">{{ live.ram }}%</div></div>
+      <div class="detail-item"><div class="detail-label">Last Message</div><div class="detail-value">{{ live.last_message }}</div></div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if not user.is_agent and not user.is_admin %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-sync"></i> Subscription Management</div>
+    <form method="POST" action="/owner/renew_subscription/{{ user.id }}" class="flex">
+      <label style="color:var(--gold2);font-weight:600;">Package:</label>
+      <select name="mode">
+        <option value="extend">Extend from current</option>
+        <option value="reset">New package (reset)</option>
+      </select>
+      <label style="color:var(--gold2);font-weight:600;">Days:</label>
+      <input type="number" name="days" value="30" min="1" style="width:120px;"/>
+      <button type="submit" class="btn btn-gold"><i class="fas fa-save"></i> Apply</button>
+    </form>
+  </div>
+  {% endif %}
+
+  {% if sub_history %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-history"></i> Renewal History ({{ sub_history|length }})</div>
+    <div class="keys-table-wrap">
+      <table class="keys-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>DAYS ADDED</th>
+            <th>MODE</th>
+            <th>OLD EXPIRY</th>
+            <th>NEW EXPIRY</th>
+            <th>EXTENDED BY</th>
+            <th>ROLE</th>
+            <th>WHEN</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for h in sub_history %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td>
+              {% if h.mode == 'reset' %}
+                <span class="days-badge warn"><i class="fas fa-sync"></i> Reset +{{ h.days_added }}d</span>
+              {% else %}
+                <span class="days-badge permanent"><i class="fas fa-plus-circle"></i> +{{ h.days_added }} days</span>
+              {% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.mode }}</small></td>
+            <td><small style="color:var(--muted);">{{ h.old_expiry[:16] if h.old_expiry else '—' }}</small></td>
+            <td><small style="color:#7dd3fc;">{{ h.new_expiry[:16] if h.new_expiry else '—' }}</small></td>
+            <td><strong style="color:#FFE28A;">{{ h.extended_by or '—' }}</strong></td>
+            <td>
+              {% if h.extended_by_role == 'owner' %}<span class="creator-badge owner"><i class="fas fa-crown"></i> OWNER</span>
+              {% elif h.extended_by_role == 'agent' %}<span class="creator-badge agent"><i class="fas fa-user-tie"></i> AGENT</span>
+              {% else %}<small style="color:var(--muted);">—</small>{% endif %}
+            </td>
+            <td><small style="color:var(--muted);">{{ h.created_at[:16] if h.created_at else '—' }}</small></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if not user.is_agent and not user.is_admin %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-cog"></i> Bot Controls</div>
+    <div class="flex" style="gap:10px;">
+      {% if user.bot_disabled_by_admin %}
+      <form method="POST" action="/owner/toggle_user_bot/{{ user.id }}"><button type="submit" class="btn btn-success"><i class="fas fa-play"></i> Enable Bot</button></form>
+      {% else %}
+      <form method="POST" action="/owner/disable_user/{{ user.id }}"><button type="submit" class="btn btn-warning" onclick="return confirm('Disable this bot?');"><i class="fas fa-hand-paper"></i> Disable Bot</button></form>
+      {% endif %}
+      <form method="POST" action="/owner/force_start_bot/{{ user.id }}"><button type="submit" class="btn btn-gold"><i class="fas fa-bolt"></i> Force Start (Auto-recreate if missing)</button></form>
+      <form method="POST" action="/owner/recreate_bot/{{ user.id }}"><button type="submit" class="btn btn-gold"><i class="fas fa-plus-circle"></i> Recreate Bot File</button></form>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if user.is_agent %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-key"></i> Key Limit</div>
+    <form method="POST" action="/owner/set_key_limit/{{ user.id }}" class="flex">
+      <label style="color:var(--gold2);font-weight:600;">Key Limit (-1=∞):</label>
+      <input type="number" name="key_limit" value="{{ user.key_limit }}" min="-1" style="width:140px;"/>
+      <button type="submit" class="btn btn-gold btn-sm"><i class="fas fa-save"></i> Save</button>
+    </form>
+  </div>
+  {% endif %}
+
+  <a href="/owner/dashboard" class="back-link"><i class="fas fa-arrow-left"></i> Back</a>
+</div>
+
+<script>
+function copyT(t){navigator.clipboard.writeText(t).then(function(){alert('Copied!');}).catch(function(){var x=document.createElement('textarea');x.value=t;document.body.appendChild(x);x.select();document.execCommand('copy');x.remove();alert('Copied!');});}
+</script>
+</body></html>'''
+
+
+# ============================================================
+#  FILE MANAGER
+# ============================================================
+FILE_MANAGER_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>File Manager - OWNER</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
+.modal-box.fullscreen{max-width:96vw !important;width:96vw;height:94vh;max-height:94vh}
+.modal-box.fullscreen #editContent{height:calc(94vh - 200px) !important}
+.fs-btn{position:absolute;top:12px;right:60px;background:rgba(59,140,255,.15);border:1px solid rgba(59,140,255,.35);color:#6db2ff;width:34px;height:34px;border-radius:8px;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center}
+</style></head><body>
+<div class="container">
+  <div class="card header">
+    <h1><i class="fas fa-folder-open"></i> File Manager</h1>
+    <div class="flex">
+      <a href="/owner/dashboard" class="btn btn-primary btn-sm"><i class="fas fa-th-large"></i> Dashboard</a>
+      <a href="/owner/logout" class="btn btn-danger btn-sm"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-upload"></i> Upload File (ZIP auto-extracted)</div>
+    <form method="POST" action="/owner/upload_file" enctype="multipart/form-data" class="upload-form" id="uploadForm">
+      <input type="file" name="uploaded_file" required style="flex:1;min-width:200px;"/>
+      <button type="submit" class="btn btn-gold" id="uploadBtn"><i class="fas fa-cloud-upload-alt"></i> Upload</button>
+    </form>
+    {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-folder"></i> Directory: <span class="current-dir">{{ current_path }}</span></div>
+    <div class="breadcrumb"><a href="/owner/files">/</a>{% for part in breadcrumb_parts %} / <a href="/owner/files/{{ part }}">{{ part }}</a>{% endfor %}</div>
+    <div class="table-wrapper">
+      <table>
+        <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th style="text-align:right;">Actions</th></tr></thead>
+        <tbody>
+          {% if parent_dir is not none %}<tr><td><a href="/owner/files/{{ parent_dir }}" class="folder-link"><i class="fas fa-arrow-up"></i> ..</a></td><td>—</td><td>—</td><td>—</td></tr>{% endif %}
+          {% for item in files %}
+          <tr>
+            <td>{% if item.is_dir %}<a href="/owner/files/{{ item.path }}" class="folder-link"><i class="fas fa-folder"></i> {{ item.name }}</a>{% else %}<span class="file-name"><i class="fas fa-file"></i> {{ item.name }}</span>{% endif %}</td>
+            <td>{{ item.size if not item.is_dir else '—' }}</td>
+            <td>{{ item.modified }}</td>
+            <td><div class="td-actions">{% if not item.is_dir %}<a href="/owner/download/{{ item.path }}" class="btn btn-info btn-sm"><i class="fas fa-download"></i></a><button onclick="editFile('{{ item.path }}')" class="btn btn-warning btn-sm"><i class="fas fa-edit"></i></button><button onclick="deleteFile('{{ item.path }}', this)" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>{% endif %}</div></td>
+          </tr>
+          {% else %}<tr class="empty-row"><td colspan="4">Empty</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div id="editModal" class="modal-overlay">
+  <div class="modal-box" id="editModalBox" style="max-width:820px;">
+    <button class="modal-close" onclick="closeEditModal()">&times;</button>
+    <button class="fs-btn" onclick="toggleFullscreen()" id="fsBtn" title="Fullscreen"><i class="fas fa-expand"></i></button>
+    <div class="modal-title"><i class="fas fa-pen-fancy"></i> Edit: <span id="editFileName" style="color:var(--gold2);font-size:1rem;"></span></div>
+    <textarea id="editContent" spellcheck="false" style="width:100%;height:380px;background:#05050c;color:var(--text);border:1px solid rgba(245,200,66,.12);border-radius:12px;padding:14px;font-family:var(--mono);font-size:.85rem;resize:vertical;"></textarea>
+    <div class="flex" style="justify-content:flex-end;margin-top:14px;">
+      <button onclick="saveEdit()" class="btn btn-success btn-sm"><i class="fas fa-save"></i> Save</button>
+      <button onclick="closeEditModal()" class="btn btn-clear btn-sm"><i class="fas fa-times"></i> Cancel</button>
+    </div>
+    <div id="editStatus" style="margin-top:10px;text-align:center;font-size:.85rem;color:var(--gold2);"></div>
+  </div>
+</div>
+<script>
+document.getElementById('uploadForm').addEventListener('submit',function(){var b=document.getElementById('uploadBtn');b.disabled=true;b.innerHTML='<span class="spinner"></span> Uploading...';});
+var currentEditPath='';
+function editFile(path){currentEditPath=path;document.getElementById('editFileName').textContent=path;document.getElementById('editContent').value='Loading...';document.getElementById('editStatus').textContent='';document.getElementById('editModal').classList.add('active');fetch('/owner/edit_file/'+encodeURIComponent(path)).then(function(r){return r.json();}).then(function(data){document.getElementById('editContent').value=data.error?('Error: '+data.error):data.content;});}
+function closeEditModal(){document.getElementById('editModal').classList.remove('active');var box=document.getElementById('editModalBox');if(box)box.classList.remove('fullscreen');var fs=document.getElementById('fsBtn');if(fs)fs.innerHTML='<i class="fas fa-expand"></i>';}
+function toggleFullscreen(){var box=document.getElementById('editModalBox');var btn=document.getElementById('fsBtn');box.classList.toggle('fullscreen');btn.innerHTML=box.classList.contains('fullscreen')?'<i class="fas fa-compress"></i>':'<i class="fas fa-expand"></i>';}
+function saveEdit(){var c=document.getElementById('editContent').value;var s=document.getElementById('editStatus');s.textContent='Saving...';fetch('/owner/edit_file/'+encodeURIComponent(currentEditPath),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:c})}).then(function(r){return r.json();}).then(function(data){if(data.success){s.textContent='Saved!';s.style.color='#4ade80';setTimeout(function(){location.reload();},800);}else{s.textContent='Error: '+(data.error||'');s.style.color='#ff5a76';}});}
+function deleteFile(path,btn){if(!confirm('Delete?'))return;if(btn)btn.disabled=true;fetch('/owner/delete_file/'+encodeURIComponent(path),{method:'POST'}).then(function(r){return r.json();}).then(function(data){if(data.success){location.reload();}else{alert('Error');if(btn)btn.disabled=false;}});}
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){var box=document.getElementById('editModalBox');if(box && box.classList.contains('fullscreen')){toggleFullscreen();return;}closeEditModal();}});
+</script></body></html>'''
+
+
+# ============================================================
+#  USER PANEL
+# ============================================================
+USER_PANEL_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>MAHIR PREMIUM | Bot Controller</title><link rel="preconnect" href="https://fonts.googleapis.com"/><link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet"/><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/><style>''' + COMMON_CSS + '''
+.logout-btn{position:fixed;top:20px;right:20px;z-index:999}
+.cover-section{position:relative;border-radius:22px;overflow:hidden;margin-bottom:24px;border:1px solid rgba(245,200,66,.15)}
+.cover-section img.cover-image{width:100%;height:260px;object-fit:cover;display:block}
+.cover-overlay{position:absolute;inset:0;background:linear-gradient(100deg,rgba(7,7,15,.92) 20%,rgba(7,7,15,.5) 60%,rgba(7,7,15,.25));display:flex;flex-direction:column;justify-content:center;padding:32px 40px}
+.logo-row{display:flex;align-items:center;gap:18px}
+.logo-row img{height:72px;width:72px;border-radius:16px;object-fit:cover;border:1px solid rgba(245,200,66,.25)}
+.cover-title{font-size:2.2rem;font-weight:800;background:linear-gradient(120deg,#F5C842,#FFE28A 35%,#B388FF 70%,#3B8CFF);-webkit-background-clip:text;background-clip:text;color:transparent;line-height:1.1}
+.cover-sub{color:rgba(233,233,248,.65);font-size:.85rem;letter-spacing:1.5px;margin-top:4px}
+.cover-badge{position:absolute;top:18px;right:20px;background:rgba(7,7,15,.7);border:1px solid rgba(245,200,66,.25);padding:6px 16px;border-radius:999px;font-size:.66rem;font-weight:700;color:var(--gold);letter-spacing:2px;text-transform:uppercase}
+.download-card{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+.dc-left{display:flex;align-items:center;gap:16px}
+.dc-icon{font-size:2rem;color:var(--gold);background:rgba(245,200,66,.07);width:60px;height:60px;border-radius:16px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(245,200,66,.12)}
+.dc-title{font-size:1.05rem;font-weight:700}
+.dc-desc{color:var(--muted);font-size:.8rem;margin:2px 0 6px}
+.version-tag{display:inline-block;background:rgba(245,200,66,.08);color:var(--gold);padding:2px 10px;border-radius:999px;font-size:.62rem;font-weight:700;margin-right:6px;border:1px solid rgba(245,200,66,.12)}
+.tab-container{display:flex;gap:8px;margin-bottom:14px;border-bottom:1px solid rgba(245,200,66,.08);padding-bottom:10px;flex-wrap:wrap}
+.tab-btn{background:transparent;border:1px solid transparent;padding:8px 18px;border-radius:10px;color:var(--muted);cursor:pointer;font-weight:600;font-size:.82rem;font-family:inherit}
+.tab-btn.active{background:rgba(245,200,66,.08);color:var(--gold);border-color:rgba(245,200,66,.25)}
+.tab-content{display:none}.tab-content.active{display:block}
+.log-box{background:#05050c;border:1px solid rgba(245,200,66,.08);border-radius:14px;padding:14px;height:400px;overflow-y:auto;font-family:var(--mono);font-size:.78rem;transition:all .3s ease}
+.log-box.fullscreen{position:fixed;inset:0;z-index:99990;height:100vh !important;width:100vw;border-radius:0;padding:20px;background:#05050c}
+.log-line{padding:4px 8px;border-left:3px solid var(--gold);margin-bottom:2px;color:#c5c5e5;word-wrap:break-word;white-space:pre-wrap}
+.error-line{border-left-color:var(--red);color:#fca5a5;background:rgba(212,42,58,.05)}
+.message-card{background:rgba(245,200,66,.03);border:1px solid rgba(245,200,66,.08);border-radius:12px;padding:12px 14px;margin-bottom:10px;display:flex;gap:12px;align-items:flex-start}
+.message-pfp{width:48px;height:48px;border-radius:50%;object-fit:cover;border:2px solid rgba(245,200,66,.3);flex-shrink:0;background:rgba(0,0,0,.4)}
+.message-body{flex:1;min-width:0}
+.message-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid rgba(245,200,66,.06)}
+.message-sender{font-weight:800;color:var(--gold2)}
+.message-time{font-size:.65rem;color:var(--muted)}
+.message-meta{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:.8rem}
+.message-label{color:var(--gold2);font-weight:600}
+.message-value{color:#c5c5e5;word-break:break-all}
+.fullscreen-btn{background:rgba(255,255,255,.06);border:1px solid rgba(245,200,66,.15);padding:7px 14px;border-radius:10px;color:var(--text);cursor:pointer;font-size:.78rem;font-family:inherit}
+.fullscreen-btn:hover{background:rgba(245,200,66,.1);color:var(--gold)}
+.control-bar{display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap}
+.pause-btn{background:rgba(255,255,255,.06);border:1px solid rgba(245,200,66,.15);padding:7px 14px;border-radius:10px;color:var(--text);cursor:pointer;font-size:.78rem;font-family:inherit}
+.button-group{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
+.button-group .btn{flex:1;min-width:110px}
+.chart-container{position:relative;height:250px}
+.config-form{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+.config-status{padding:13px 16px;background:rgba(245,200,66,.05);border:1px solid rgba(245,200,66,.12);border-left:4px solid var(--gold);border-radius:10px;color:var(--gold2);font-size:.85rem;margin-bottom:18px}
+.subscription-hero{background:linear-gradient(135deg,rgba(15,10,30,.95),rgba(10,5,20,.95));border:1px solid rgba(245,200,66,.2);border-radius:20px;padding:22px;margin-bottom:20px;box-shadow:0 15px 40px rgba(0,0,0,.4)}
+.sub-hero-title{font-size:.85rem;font-weight:700;color:var(--gold);text-transform:uppercase;letter-spacing:2px;margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.sub-hero-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px}
+.sub-hero-item{background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.08);border-radius:14px;padding:16px;text-align:center}
+.sub-hero-label{font-size:.62rem;text-transform:uppercase;letter-spacing:2px;color:var(--gold2);font-weight:700;margin-bottom:8px}
+.sub-hero-value{font-size:1.4rem;font-weight:800;color:#fff;word-break:break-word;line-height:1.2}
+.sub-hero-value.small{font-size:1rem}
+.sub-hero-value.green{color:#4ade80}
+.sub-hero-value.red{color:#ff5a76}
+.sub-hero-value.gold{color:#F5C842}
+@media(max-width:768px){.download-card{flex-direction:column}.button-group .btn{flex:1 1 45%}.chart-container{height:190px}.sub-hero-value{font-size:1.1rem}}
+</style></head><body>
+
+<div class="notice-indicator" id="noticeBtn" onclick="showNotice()" style="display:none;"><i class="fas fa-bullhorn"></i> Owner Notice</div>
+
+<div class="notice-overlay" id="noticePopup">
+  <div class="notice-box">
+    <button class="modal-close" onclick="hideNotice()">&times;</button>
+    <span class="notice-icon" id="noticeIcon">📢</span>
+    <div class="notice-title" id="noticeTitle">OWNER NOTICE</div>
+    <div class="notice-msg" id="noticeMsg"></div>
+    <div class="notice-contact-title">Contact Owner</div>
+    <div class="notice-buttons">
+      <a href="https://t.me/mahirtcpchat" target="_blank" class="notice-btn notice-btn-tg"><i class="fab fa-telegram"></i> Telegram</a>
+      <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="notice-btn notice-btn-tt"><i class="fab fa-tiktok"></i> TikTok</a>
+      <a href="https://whatsapp.com/channel/0029Vb9Omjk2ZjCevpv6h209" target="_blank" class="notice-btn notice-btn-wa-ch"><i class="fab fa-whatsapp"></i> WhatsApp Channel</a>
+      <a href="https://chat.whatsapp.com/CTiEuMnEKacHZ7wirSNjqs" target="_blank" class="notice-btn notice-btn-wa-gp"><i class="fab fa-whatsapp"></i> WhatsApp Group</a>
+      <a href="https://MAHIR.XO.JE/" target="_blank" class="notice-btn notice-btn-web"><i class="fas fa-globe"></i> Website</a>
+    </div>
+  </div>
+</div>
+
+<div class="notice-overlay" id="loginNoticePopup">
+  <div class="notice-box" style="border-color:rgba(59,140,255,.5);">
+    <button class="modal-close" onclick="document.getElementById('loginNoticePopup').classList.remove('show')">&times;</button>
+    <span class="notice-icon" id="loginNoticeIcon">🔔</span>
+    <div class="notice-title" id="loginNoticeTitle" style="background:linear-gradient(120deg,#3B8CFF,#00d9f5,#F5C842);-webkit-background-clip:text;background-clip:text;color:transparent;">IMPORTANT NOTICE</div>
+    <div class="notice-msg" id="loginNoticeMsg"></div>
+    <div class="notice-contact-title">Contact Owner</div>
+    <div class="notice-buttons">
+      <a href="https://t.me/mahirtcpchat" target="_blank" class="notice-btn notice-btn-tg"><i class="fab fa-telegram"></i> Telegram</a>
+      <a href="https://www.tiktok.com/@MAHIR__22" target="_blank" class="notice-btn notice-btn-tt"><i class="fab fa-tiktok"></i> TikTok</a>
+      <a href="https://whatsapp.com/channel/0029Vb9Omjk2ZjCevpv6h209" target="_blank" class="notice-btn notice-btn-wa-ch"><i class="fab fa-whatsapp"></i> WhatsApp Channel</a>
+      <a href="https://MAHIR.XO.JE/" target="_blank" class="notice-btn notice-btn-web"><i class="fas fa-globe"></i> Website</a>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  {% if owner_mode %}
+  <a href="/owner/return" class="btn btn-gold btn-sm" style="position:absolute;top:16px;right:100px;z-index:50;font-weight:700;"><i class="fas fa-crown"></i> Return to Owner</a>
+  {% endif %}
+  <button class="logout-btn btn btn-danger btn-sm" onclick="window.location.href='/logout'"><i class="fas fa-sign-out-alt"></i> Logout</button>
+  <div class="cover-section">
+    <img class="cover-image" src="https://mahir-photo-url.vercel.app/image/Picsart_26-06-20_16-14-53-925.jpg" alt="Cover"/>
+    <div class="cover-overlay">
+      <div class="logo-row">
+        <img src="https://mahir-photo-url.vercel.app/image/dbf54e35e2454c77a97d5cceaeeb4b59_20260531_194906.png" alt="MAHIR"/>
+        <div><div class="cover-title">MAHIR PREMIUM</div><div class="cover-sub">ELITE BOT CONTROLLER</div></div>
+      </div>
+      <div class="cover-badge"><i class="fas fa-crown"></i> {{ 'PREMIUM' if config_done else 'SETUP' }}</div>
+    </div>
+  </div>
+
+  {% if sub_status == 'active' and sub_days <= 3 %}
+  <div class="card" style="background:rgba(212,42,58,.1);border-color:rgba(212,42,58,.35);">
+    <div style="color:var(--red2);font-weight:700;"><i class="fas fa-exclamation-triangle"></i> আপনার সাবস্ক্রিপশন {{ sub_days }} দিনের মধ্যে শেষ! এখনই renew করুন।</div>
+  </div>
+  {% endif %}
+
+  {% if sub_status != 'expired' %}
+  <div class="subscription-hero">
+    <div class="sub-hero-title"><i class="fas fa-clock" style="color:#F5C842;"></i> Your Subscription Status</div>
+    <div class="sub-hero-grid">
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Status</div>
+        <div class="sub-hero-value small {% if sub_status == 'unlimited' %}green{% elif sub_status == 'expired' %}red{% else %}green{% endif %}">
+          {% if sub_status == 'unlimited' %}∞ UNLIMITED{% elif sub_status == 'expired' %}EXPIRED{% else %}ACTIVE{% endif %}
+        </div>
+      </div>
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Days Left</div>
+        <div class="sub-hero-value {% if sub_days <= 3 %}red{% elif sub_days <= 7 %}gold{% else %}green{% endif %}">
+          {% if sub_status == 'unlimited' %}∞{% else %}{{ sub_days }}{% endif %}
+        </div>
+      </div>
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Time Remaining</div>
+        <div class="sub-hero-value small gold">{{ sub_time_left }}</div>
+      </div>
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Expires On</div>
+        <div class="sub-hero-value small" style="font-size:.85rem;">{{ sub_expiry_display }}</div>
+      </div>
+      {% if renew_count > 0 %}
+      <div class="sub-hero-item">
+        <div class="sub-hero-label">Total Renewals</div>
+        <div class="sub-hero-value small gold">{{ renew_count }}x (+{{ renew_days }}d)</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if not config_done %}
+  <div class="card">
+    <div class="card-title"><i class="fas fa-cog"></i> Bot Configuration</div>
+    {% with messages = get_flashed_messages(with_categories=true) %}{% if messages %}{% for category, message in messages %}<div class="alert {{ category }}"><i class="fas fa-{% if category == 'error' %}exclamation-circle{% else %}check-circle{% endif %}"></i> {{ message }}</div>{% endfor %}{% endif %}{% endwith %}
+    <div class="config-status"><i class="fas fa-info-circle"></i> Free Fire bot credentials দিন।</div>
+    <form method="POST" action="/configure" class="config-form" id="configForm">
+      <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Owner UID</label><input type="text" name="admin_uid" placeholder="e.g., 1120167200" required/></div>
+      <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Bot UID</label><input type="text" name="bot_uid" placeholder="Bot UID" required/></div>
+      <div><label style="color:var(--gold2);font-weight:600;margin-bottom:6px;display:block;">Bot Password</label><input type="text" name="bot_pw" placeholder="Password hash" required/></div>
+      <button type="submit" class="btn btn-gold btn-block" id="deployBtn"><i class="fas fa-play"></i> Deploy Bot</button>
+    </form>
+  </div>
+  {% else %}
+  <div class="card download-card">
+    <div class="dc-left">
+      <div class="dc-icon"><i class="fab fa-android"></i></div>
+      <div>
+        <div class="dc-title"><i class="fas fa-mobile-alt" style="color:var(--gold);margin-right:6px;"></i> MAHIR TCP Bot</div>
+        <div class="dc-desc">Download the official Android app</div>
+        <span class="version-tag"><i class="fas fa-tag"></i> v2.0.1</span>
+      </div>
+    </div>
+    <a href="https://www.mediafire.com/file/lvykrek51q17hae/MAHIR_TCP.apk" target="_blank" class="btn btn-gold"><i class="fas fa-download"></i> Download APK</a>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-robot"></i> Bot Identity & Status</div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">UID</div><div class="stat-value" id="botUid">---</div></div>
+      <div class="stat-card"><div class="stat-label">Name</div><div class="stat-value" id="botName">---</div></div>
+      <div class="stat-card"><div class="stat-label">Region</div><div class="stat-value" id="botRegion">---</div></div>
+      <div class="stat-card"><div class="stat-label">Clan ID</div><div class="stat-value" id="botClanId">---</div></div>
+      <div class="stat-card"><div class="stat-label">Status</div><div class="stat-value" id="botStatus">---</div></div>
+      <div class="stat-card"><div class="stat-label">Online Server</div><div class="stat-value" id="botServer" style="font-size:.82rem;">---</div></div>
+      <div class="stat-card"><div class="stat-label">Chat Server</div><div class="stat-value" id="botChatServer" style="font-size:.82rem;">---</div></div>
+      <div class="stat-card"><div class="stat-label">BY</div><div class="stat-value" id="botBy">---</div></div>
+      <div class="stat-card"><div class="stat-label">Created By</div><div class="stat-value" id="botCreatedBy">{{ creator_display|safe }}</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-chart-line"></i> System Performance</div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Process</div><div class="stat-value" id="processStatus">---</div></div>
+      <div class="stat-card"><div class="stat-label">Uptime</div><div class="stat-value" id="uptime">00:00:00</div></div>
+      <div class="stat-card"><div class="stat-label">Restarts</div><div class="stat-value" id="restartCount">0</div></div>
+      <div class="stat-card"><div class="stat-label">Errors</div><div class="stat-value" id="errorCount" style="color:var(--red2);">0</div></div>
+    </div>
+    <div class="system-stats">
+      <div class="stat-card"><div class="stat-label">CPU</div><div class="stat-value" id="cpuValue">0%</div><div class="progress-bar"><div class="progress-fill" id="cpuBar"></div></div></div>
+      <div class="stat-card"><div class="stat-label">RAM</div><div class="stat-value" id="ramValue">0%</div><div class="progress-bar"><div class="progress-fill" id="ramBar"></div></div></div>
+      <div class="stat-card"><div class="stat-label">Disk</div><div class="stat-value" id="diskValue">0%</div><div class="progress-bar"><div class="progress-fill" id="diskBar"></div></div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title"><i class="fas fa-chart-area"></i> Performance Monitor</div>
+    <div class="chart-container"><canvas id="performanceChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="tab-container">
+      <button class="tab-btn active" onclick="switchTab('logs')"><i class="fas fa-terminal"></i> Console</button>
+      <button class="tab-btn" onclick="switchTab('messages')"><i class="fas fa-envelope"></i> Messages</button>
+      <button class="tab-btn" onclick="switchTab('errors')"><i class="fas fa-exclamation-triangle"></i> Errors</button>
+    </div>
+    <div id="logsTab" class="tab-content active">
+      <div class="control-bar"><button onclick="togglePause()" id="pauseBtn" class="pause-btn"><i class="fas fa-pause"></i> Pause</button><button onclick="toggleColorMode()" id="colorModeBtn" class="pause-btn"><i class="fas fa-palette"></i> Color ON</button><button onclick="toggleFullscreen('logBox')" class="fullscreen-btn" id="fsBtn"><i class="fas fa-expand"></i> Fullscreen</button><button onclick="exportLogs()" class="btn btn-export btn-sm"><i class="fas fa-download"></i> Export</button><span style="margin-left:auto;font-size:.72rem;color:var(--gold2);" id="logStatus">Auto-scroll: ON</span></div>
+      <div id="logBox" class="log-box"><div class="log-line">Waiting...</div></div>
+    </div>
+    <div id="messagesTab" class="tab-content">
+      <div class="control-bar"><button onclick="clearMessages()" class="btn btn-clear btn-sm">Clear</button><button onclick="exportMessages()" class="btn btn-export btn-sm">Export</button></div>
+      <div id="messageHistory" class="log-box" style="height:380px;"><div class="log-line">No messages...</div></div>
+    </div>
+    <div id="errorsTab" class="tab-content">
+      <div class="control-bar"><button onclick="clearErrors()" class="btn btn-clear btn-sm">Clear</button><button onclick="exportErrors()" class="btn btn-export btn-sm">Export</button></div>
+      <div id="errorBox" class="log-box"><div class="log-line">No errors</div></div>
+    </div>
+    <div class="button-group">
+      <button onclick="sendAction('start')" id="btnStart" class="btn btn-start"><i class="fas fa-play"></i> Start</button>
+      <button onclick="sendAction('stop')" id="btnStop" class="btn btn-stop"><i class="fas fa-stop"></i> Stop</button>
+      <button onclick="sendAction('reset')" id="btnReset" class="btn btn-reset"><i class="fas fa-sync-alt"></i> Reset</button>
+      <button onclick="openAdminPanel()" id="btnAdmin" class="btn btn-admin"><i class="fas fa-cog"></i> Admin Control Panel</button>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<div id="adminModal" class="modal-overlay">
+  <div class="modal-box" style="max-width:820px;">
+    <button class="modal-close" onclick="closeAdminPanel()">&times;</button>
+    <div class="modal-title" style="margin-bottom:20px;"><i class="fas fa-cog"></i> Admin Control Panel</div>
+
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-robot"></i> Bot Identity (Live)</div>
+      <div class="detail-grid">
+        <div class="detail-item"><div class="detail-label">Bot UID</div><div class="detail-value big" id="adminLiveUid">---</div></div>
+        <div class="detail-item"><div class="detail-label">Name</div><div class="detail-value" id="adminLiveName">---</div></div>
+        <div class="detail-item"><div class="detail-label">Region</div><div class="detail-value" id="adminLiveRegion">---</div></div>
+        <div class="detail-item"><div class="detail-label">Clan ID</div><div class="detail-value" id="adminLiveClanId">---</div></div>
+        <div class="detail-item"><div class="detail-label">Status</div><div class="detail-value" id="adminLiveStatus">---</div></div>
+        <div class="detail-item"><div class="detail-label">Online Server</div><div class="detail-value" id="adminLiveServer" style="font-size:.85rem;">---</div></div>
+        <div class="detail-item"><div class="detail-label">Chat Server</div><div class="detail-value" id="adminLiveChat" style="font-size:.85rem;">---</div></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-user-shield"></i> Owner / Admin UIDs</div>
+      <p style="color:var(--muted);font-size:.8rem;margin-bottom:10px;">Comma separated. Master UID is always kept.</p>
+      <div class="modal-input-group"><label>UIDs:</label><input type="text" id="adminUidsInput" placeholder="1120167200, 3020431227" style="flex:1;"/></div>
+      <button onclick="updateAdminUIDs()" id="adminUidsBtn" class="modal-btn modal-btn-save" style="margin-top:10px;"><i class="fas fa-save"></i> Save & Restart Bot</button>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-key"></i> Bot Credentials</div>
+      <div class="detail-grid" style="margin-bottom:12px;">
+        <div class="detail-item">
+          <div class="detail-label">Bot UID</div>
+          <input type="text" id="botUidInput" style="width:100%;margin-top:6px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px;border-radius:10px;"/>
+        </div>
+        <div class="detail-item">
+          <div class="detail-label">Password</div>
+          <input type="text" id="botPwInput" style="width:100%;margin-top:6px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px;border-radius:10px;"/>
+        </div>
+      </div>
+      <button onclick="updateBotCreds()" id="botCredsBtn" class="modal-btn modal-btn-save"><i class="fas fa-save"></i> Save Credentials & Restart</button>
+    </div>
+
+    <div class="card" style="margin-bottom:16px;background:rgba(0,0,0,.35);border:1px solid rgba(245,200,66,.12);border-radius:16px;padding:16px;">
+      <div class="card-title" style="margin-bottom:12px;"><i class="fas fa-user-friends"></i> Friend Management</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;">
+        <input type="text" id="friendUidInput" placeholder="Friend UID" style="flex:1;min-width:160px;background:rgba(0,0,0,.4);border:1px solid rgba(245,200,66,.2);color:#fff;padding:10px 12px;border-radius:10px;"/>
+        <button onclick="friendAction('add')" id="friendAddBtn" class="modal-btn modal-btn-action"><i class="fas fa-user-plus"></i> Add</button>
+        <button onclick="friendAction('remove')" id="friendRemoveBtn" class="modal-btn modal-btn-danger"><i class="fas fa-user-minus"></i> Remove</button>
+        <button onclick="friendAction('list')" id="friendListBtn" class="modal-btn modal-btn-info"><i class="fas fa-list"></i> List Friends</button>
+      </div>
+      <div id="friendResult" class="modal-result-box" style="min-height:60px;max-height:180px;overflow-y:auto;">Result will appear here...</div>
+    </div>
+
+    <div style="text-align:right;margin-top:8px;">
+      <button onclick="closeAdminPanel()" class="modal-btn modal-btn-cancel"><i class="fas fa-times"></i> Close Panel</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+var GLOBAL_NOTICE = {{ notice_json|safe }};
+var IS_BLOCKED = {{ 'true' if blocked else 'false' }};
+var BLOCK_TYPE = "{{ block_type or '' }}";
+var BLOCK_MSG = {{ block_msg_json|safe }};
+var LOGIN_NOTICE_ENABLED = {{ 'true' if login_notice_enabled else 'false' }};
+var LOGIN_NOTICE_TEXT = {{ login_notice_json|safe }};
+var PERSONAL_NOTICE_ENABLED = {{ 'true' if personal_notice_enabled else 'false' }};
+var PERSONAL_NOTICE_TEXT = {{ personal_notice_json|safe }};
+
+function showNotice(){
+  document.getElementById('noticeMsg').innerHTML = GLOBAL_NOTICE;
+  document.getElementById('noticeIcon').textContent = '📢';
+  document.getElementById('noticeTitle').textContent = 'OWNER NOTICE';
+  document.getElementById('noticePopup').classList.add('show');
+}
+function hideNotice(){document.getElementById('noticePopup').classList.remove('show');}
+document.getElementById('noticePopup').addEventListener('click', function(e){if(e.target===this)hideNotice();});
+document.getElementById('loginNoticePopup').addEventListener('click', function(e){if(e.target===this)this.classList.remove('show');});
+
+document.addEventListener('DOMContentLoaded', function(){
+  if (IS_BLOCKED) {
+    document.getElementById('noticeMsg').innerHTML = BLOCK_MSG;
+    if (BLOCK_TYPE === 'global') { document.getElementById('noticeIcon').textContent = '🛠️'; document.getElementById('noticeTitle').textContent = 'SYSTEM MAINTENANCE'; }
+    else if (BLOCK_TYPE === 'expired') { document.getElementById('noticeIcon').textContent = '⏰'; document.getElementById('noticeTitle').textContent = 'SUBSCRIPTION EXPIRED'; }
+    else if (BLOCK_TYPE === 'admin_disabled') { document.getElementById('noticeIcon').textContent = '🚫'; document.getElementById('noticeTitle').textContent = 'BOT DISABLED'; }
+    document.getElementById('noticePopup').classList.add('show');
+  } else {
+    if (GLOBAL_NOTICE && GLOBAL_NOTICE.trim()) {
+      document.getElementById('noticeBtn').style.display = 'flex';
+    }
+    if (PERSONAL_NOTICE_ENABLED && PERSONAL_NOTICE_TEXT && PERSONAL_NOTICE_TEXT.trim()) {
+      document.getElementById('loginNoticeIcon').textContent = '📌';
+      document.getElementById('loginNoticeTitle').textContent = 'PERSONAL NOTICE';
+      document.getElementById('loginNoticeMsg').innerHTML = PERSONAL_NOTICE_TEXT;
+      setTimeout(function(){document.getElementById('loginNoticePopup').classList.add('show');}, 500);
+    } else if (LOGIN_NOTICE_ENABLED && LOGIN_NOTICE_TEXT && LOGIN_NOTICE_TEXT.trim()) {
+      document.getElementById('loginNoticeIcon').textContent = '🔔';
+      document.getElementById('loginNoticeTitle').textContent = 'IMPORTANT NOTICE';
+      document.getElementById('loginNoticeMsg').innerHTML = LOGIN_NOTICE_TEXT;
+      setTimeout(function(){document.getElementById('loginNoticePopup').classList.add('show');}, 800);
+    }
+  }
+});
+
+function getBtn(id){return document.getElementById(id);}
+function setLoading(btn,loading){if(!btn)return;if(loading){btn._origHtml=btn.innerHTML;btn.disabled=true;btn.innerHTML='<span class="spinner"></span> Loading...';}else{btn.disabled=false;btn.innerHTML=btn._origHtml||btn.innerHTML;}}
+function showNotification(message,type){var el=document.createElement('div');el.className='notification notification-'+type;var icon=type==='success'?'check-circle':(type==='error'?'exclamation-circle':'info-circle');el.innerHTML='<i class="fas fa-'+icon+'"></i> '+message;document.body.appendChild(el);setTimeout(function(){el.remove();},3000);}
+function escapeHtml(text){if(!text)return '';var d=document.createElement('div');d.textContent=text;return d.innerHTML;}
+var performanceChart=null;
+function initChart(){var ctx=document.getElementById('performanceChart');if(!ctx)return;performanceChart=new Chart(ctx.getContext('2d'),{type:'line',data:{labels:Array(20).fill(''),datasets:[{label:'CPU %',data:Array(20).fill(0),borderColor:'#F5C842',tension:.4,fill:true,borderWidth:2,pointRadius:0},{label:'RAM %',data:Array(20).fill(0),borderColor:'#8540F5',tension:.4,fill:true,borderWidth:2,pointRadius:0}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{labels:{color:'#c5c5e5'}}},scales:{y:{beginAtZero:true,max:100,grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}},x:{grid:{color:'rgba(245,200,66,.05)'},ticks:{color:'#a78bfa'}}}}});}
+if(typeof Chart!=='undefined')initChart();
+var currentTab='logs';
+var colorMode = localStorage.getItem('mahirColorMode') !== '0';
+function switchTab(tab){currentTab=tab;var btns=document.querySelectorAll('.tab-btn');btns.forEach(function(b){b.classList.remove('active');});document.querySelectorAll('.tab-content').forEach(function(c){c.classList.remove('active');});if(tab==='logs'){btns[0].classList.add('active');document.getElementById('logsTab').classList.add('active');}else if(tab==='messages'){btns[1].classList.add('active');document.getElementById('messagesTab').classList.add('active');}else{btns[2].classList.add('active');document.getElementById('errorsTab').classList.add('active');}}
+function toggleColorMode(){colorMode=!colorMode;localStorage.setItem('mahirColorMode',colorMode?'1':'0');var btn=document.getElementById('colorModeBtn');if(btn)btn.innerHTML=colorMode?'<i class="fas fa-palette"></i> Color ON':'<i class="fas fa-palette"></i> Color OFF';updateUI();}
+function ansiToHtml(str){
+  if(!str)return '';
+  var s=escapeHtml(str);
+  s=s.replace(/\\[92m/g,'<span style="color:#00e676">');
+  s=s.replace(/\\[93m/g,'<span style="color:#ffeb3b">');
+  s=s.replace(/\\[95m/g,'<span style="color:#e040fb">');
+  s=s.replace(/\\[96m/g,'<span style="color:#00e5ff">');
+  s=s.replace(/\\[91m/g,'<span style="color:#ff5252">');
+  s=s.replace(/\\[94m/g,'<span style="color:#448aff">');
+  s=s.replace(/\\[90m/g,'<span style="color:#9e9e9e">');
+  s=s.replace(/\\[1m/g,'<span style="font-weight:700">');
+  s=s.replace(/\\[0m|\\[m/g,'</span>');
+  s=s.replace(/\\[[0-9;]*m/g,'');
+  return s;
+}
+function formatLogLine(l){
+  if(colorMode) return '<div class="log-line">'+ansiToHtml(l)+'</div>';
+  var plain=l.replace(/\\[[0-9;]*[mK]/g,'');
+  return '<div class="log-line">'+escapeHtml(plain)+'</div>';
+}
+var autoScroll=true;
+function togglePause(){autoScroll=!autoScroll;var btn=document.getElementById('pauseBtn');var status=document.getElementById('logStatus');if(autoScroll){btn.innerHTML='<i class="fas fa-pause"></i> Pause';status.innerHTML='Auto-scroll: ON';}else{btn.innerHTML='<i class="fas fa-play"></i> Resume';status.innerHTML='Auto-scroll: OFF';}}
+function toggleFullscreen(boxId){var box=document.getElementById(boxId);var btn=document.getElementById('fsBtn');if(!box)return;if(box.classList.contains('fullscreen')){box.classList.remove('fullscreen');if(btn)btn.innerHTML='<i class="fas fa-expand"></i> Fullscreen';document.body.style.overflow='';}else{box.classList.add('fullscreen');if(btn)btn.innerHTML='<i class="fas fa-compress"></i> Exit';document.body.style.overflow='hidden';}}
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){var box=document.getElementById('logBox');if(box&&box.classList.contains('fullscreen')){toggleFullscreen('logBox');}}});
+function clearErrors(){fetch('/api/clear_errors',{method:'POST'}).then(function(){updateUI();showNotification('Cleared!','success');});}
+function clearMessages(){fetch('/api/clear_messages',{method:'POST'}).then(function(){updateUI();showNotification('Cleared!','success');});}
+function downloadText(text,filename){var blob=new Blob([text],{type:'text/plain'});var url=URL.createObjectURL(blob);var a=document.createElement('a');a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);}
+function exportLogs(){fetch('/api/export_logs').then(function(r){return r.json();}).then(function(d){if(d.logs&&d.logs.length){downloadText(d.logs.join('\\n'),'logs.txt');showNotification('Exported!','success');}});}
+function exportErrors(){fetch('/api/export_errors').then(function(r){return r.json();}).then(function(d){if(d.errors&&d.errors.length){downloadText(d.errors.join('\\n'),'errors.txt');showNotification('Exported!','success');}});}
+function exportMessages(){fetch('/api/export_messages').then(function(r){return r.json();}).then(function(d){if(d.messages&&d.messages.length){var t='';d.messages.forEach(function(m){t+='['+m.timestamp+'] '+m.data.nickname+' ('+m.data.sender_uid+'): '+m.data.message+'\\n';});downloadText(t,'messages.txt');showNotification('Exported!','success');}});}
+function sendAction(action){var btnMap={start:'btnStart',stop:'btnStop',reset:'btnReset'};var btn=getBtn(btnMap[action]);setLoading(btn,true);fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action})}).then(function(r){return r.json();}).then(function(d){setLoading(btn,false);if(d.error){showNotification(d.error,'error');}else{showNotification(action.toUpperCase()+' done!','success');setTimeout(updateUI,500);}}).catch(function(){setLoading(btn,false);showNotification('Failed','error');});}
+
+function openAdminPanel(){
+  document.getElementById('adminModal').classList.add('active');
+  fetch('/api/admin_uids').then(function(r){return r.json();}).then(function(d){if(d.uids)document.getElementById('adminUidsInput').value=d.uids.join(', ');}).catch(function(){});
+  fetch('/api/bot_creds').then(function(r){return r.json();}).then(function(d){document.getElementById('botUidInput').value=d.uid||'';document.getElementById('botPwInput').value=d.pw||'';}).catch(function(){});
+  fetch('/api/status').then(function(r){return r.json();}).then(function(data){
+    if(data.error)return;
+    var s=function(id,v){var el=document.getElementById(id);if(el)el.innerHTML=v||'---';};
+    s('adminLiveUid',escapeHtml(data.bot_uid));
+    s('adminLiveName',escapeHtml(data.bot_name));
+    s('adminLiveRegion',escapeHtml(data.bot_region));
+    s('adminLiveClanId',escapeHtml(data.bot_clan_id));
+    s('adminLiveStatus',data.bot_status||'Offline');
+    s('adminLiveServer',escapeHtml(data.bot_server));
+    s('adminLiveChat',escapeHtml(data.bot_chat_server));
+  }).catch(function(){});
+}
+function closeAdminPanel(){document.getElementById('adminModal').classList.remove('active');}
+document.getElementById('adminModal') && document.getElementById('adminModal').addEventListener('click',function(e){if(e.target===this)closeAdminPanel();});
+function updateAdminUIDs(){var input=document.getElementById('adminUidsInput').value;var uids=input.split(',').map(function(s){return s.trim();}).filter(function(s){return s;});if(!uids.length){showNotification('Enter UIDs','error');return;}var btn=document.getElementById('adminUidsBtn');setLoading(btn,true);fetch('/api/admin_uids',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uids:uids})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Updated!','success');setTimeout(updateUI,3000);}else showNotification('Failed','error');});}
+function updateBotCreds(){var uid=document.getElementById('botUidInput').value.trim();var pw=document.getElementById('botPwInput').value.trim();if(!uid||!pw){showNotification('Fill both','error');return;}var btn=document.getElementById('botCredsBtn');setLoading(btn,true);fetch('/api/bot_creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uid:uid,pw:pw})}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);if(data.status==='success'){showNotification('Updated!','success');setTimeout(updateUI,3000);}else showNotification('Failed','error');});}
+function friendAction(action){var uid=document.getElementById('friendUidInput').value.trim();if(action!=='list'&&!uid){showNotification('Enter UID','error');return;}var btnMap={add:'friendAddBtn',remove:'friendRemoveBtn',list:'friendListBtn'};var btn=document.getElementById(btnMap[action]);setLoading(btn,true);var payload={action:action};if(uid)payload.uid=uid;document.getElementById('friendResult').innerHTML='Loading...';fetch('/api/friend',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.json();}).then(function(data){setLoading(btn,false);var t='';if(action==='list'){if(data.status==='success'&&data.friends){t='Friends:\\n'+(data.friends.length?data.friends.map(function(f,i){return (i+1)+'. '+f.name+' ('+f.uid+')';}).join('\\n'):'Empty');}else{t='Error: '+(data.message||'');}}else{t=JSON.stringify(data,null,2);}document.getElementById('friendResult').innerHTML=escapeHtml(t).replace(/\\n/g,'<br>');});}
+
+function updateUI(){
+  if(IS_BLOCKED) return;
+  fetch('/api/status').then(function(r){return r.json();}).then(function(data){if(data.error)return;var s=function(id,v){var el=document.getElementById(id);if(el)el.innerHTML=v;};
+    s('botUid',escapeHtml(data.bot_uid)||'---');s('botName',escapeHtml(data.bot_name)||'---');s('botRegion',escapeHtml(data.bot_region)||'---');
+    s('botClanId',escapeHtml(data.bot_clan_id)||'---');
+    s('botStatus',data.bot_status||'Offline');
+    s('botServer',escapeHtml(data.bot_server)||'---');s('botChatServer',escapeHtml(data.bot_chat_server)||'---');
+    s('botBy',escapeHtml(data.bot_by)||'---');
+    s('processStatus',data.is_running?'<span class="badge badge-active">RUNNING</span>':'<span class="badge badge-offline">STOPPED</span>');
+    s('uptime',data.uptime||'00:00:00');s('restartCount',data.restart_count||0);s('errorCount',(data.error_logs||[]).length);
+    var cpu=parseFloat(data.cpu)||0,ram=parseFloat(data.ram)||0,disk=parseFloat(data.disk)||0;
+    s('cpuValue',Math.floor(cpu)+'%');s('ramValue',Math.floor(ram)+'%');s('diskValue',Math.floor(disk)+'%');
+    ['cpuBar','ramBar','diskBar'].forEach(function(id,i){var bar=document.getElementById(id);if(bar)bar.style.width=[cpu,ram,disk][i]+'%';});
+    if(data.logs){var h=data.logs.slice(-200).map(function(l){return formatLogLine(l);}).join('');var box=document.getElementById('logBox');if(box){box.innerHTML=h;if(autoScroll&&currentTab==='logs')box.scrollTop=box.scrollHeight;}}
+    if(data.error_logs){var e=data.error_logs.slice(-100).map(function(l){return '<div class="log-line error-line">'+escapeHtml(l)+'</div>';}).join('');var eb=document.getElementById('errorBox');if(eb)eb.innerHTML=e;}
+    if(data.message_history){var m=data.message_history.slice().reverse().map(function(msg){var pfp=msg.data.pfp_url&&msg.data.pfp_url!=='N/A'?msg.data.pfp_url:'';var pfpHtml=pfp?'<img class="message-pfp" src="'+escapeHtml(pfp)+'" alt="PFP" onerror="this.style.display=\\'none\\'"/>':'<div class="message-pfp" style="display:flex;align-items:center;justify-content:center;font-size:1.2rem;color:var(--gold);">👤</div>';return '<div class="message-card">'+pfpHtml+'<div class="message-body"><div class="message-header"><span class="message-sender">'+escapeHtml(msg.data.nickname)+'</span><span class="message-time">'+escapeHtml(msg.timestamp)+'</span></div><div class="message-meta"><span class="message-label">UID:</span><span class="message-value">'+escapeHtml(msg.data.sender_uid)+'</span><span class="message-label">Message:</span><span class="message-value">'+escapeHtml(msg.data.message)+'</span>'+(msg.data.guild_name&&msg.data.guild_name!=='N/A'?'<span class="message-label">Guild:</span><span class="message-value">'+escapeHtml(msg.data.guild_name)+'</span>':'')+'</div></div></div>';}).join('');var mb=document.getElementById('messageHistory');if(mb)mb.innerHTML=m;}
+    if(performanceChart&&data.cpu_history){performanceChart.data.datasets[0].data=data.cpu_history;performanceChart.data.datasets[1].data=data.ram_history;performanceChart.update('none');}
+  });}
+setInterval(updateUI,1500);updateUI();
+(function(){var btn=document.getElementById('colorModeBtn');if(btn)btn.innerHTML=colorMode?'<i class="fas fa-palette"></i> Color ON':'<i class="fas fa-palette"></i> Color OFF';})();
+</script></body></html>'''
+
+
+# ============================================================
+#  ROUTES
+# ============================================================
+@app.route('/')
+def index():
+    if session.get('owner_mode'):
+        return redirect(url_for('owner_dashboard'))
+    if session.get('is_admin'):
+        return redirect(url_for('owner_dashboard'))
+    elif session.get('is_agent'):
+        return redirect(url_for('agent_dashboard'))
+    elif session.get('user_id'):
+        return redirect(url_for('user_dashboard'))
+    return redirect(url_for('login'))
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    # Do NOT force logout / redirect to login on every 500.
+    # That was causing spontaneous "logout" when SQLite briefly locked.
+    try:
+        init_db(); migrate_db()
+    except Exception:
+        pass
+    try:
+        if session.get('is_admin') or session.get('owner_mode'):
+            flash('Temporary server error. Please try again.', 'error')
+            return redirect(url_for('owner_dashboard'))
+        if session.get('is_agent'):
+            flash('Temporary server error. Please try again.', 'error')
+            return redirect(url_for('agent_dashboard'))
+        if session.get('user_id') is not None:
+            flash('Temporary server error. Please try again.', 'error')
+            return redirect(url_for('user_dashboard'))
+    except Exception:
+        pass
+    return redirect(url_for('login'))
+
+
+@app.errorhandler(Exception)
+def handle_unexpected(e):
+    # Catch-all so DB lock / other errors never look like a forced logout.
+    # OperationalError and similar are handled here instead of a separate
+    # sqlite3-specific handler (more reliable under gunicorn).
+    if isinstance(e, sqlite3.OperationalError):
+        try:
+            init_db(); migrate_db()
+        except Exception:
+            pass
+        try:
+            flash('Database is busy, please try again in a moment.', 'error')
+            if session.get('is_admin') or session.get('owner_mode'):
+                return redirect(url_for('owner_dashboard'))
+            if session.get('is_agent'):
+                return redirect(url_for('agent_dashboard'))
+            if session.get('user_id') is not None:
+                return redirect(url_for('user_dashboard'))
+        except Exception:
+            pass
+        return redirect(url_for('login'))
+    # Re-raise HTTP exceptions / other things Flask should handle normally
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    # Unknown error — log and soft-redirect without destroying session
+    print(f'[UNHANDLED] {type(e).__name__}: {e}')
+    try:
+        if session.get('is_admin') or session.get('owner_mode'):
+            flash('Temporary server error. Please try again.', 'error')
+            return redirect(url_for('owner_dashboard'))
+        if session.get('is_agent'):
+            flash('Temporary server error. Please try again.', 'error')
+            return redirect(url_for('agent_dashboard'))
+        if session.get('user_id') is not None:
+            flash('Temporary server error. Please try again.', 'error')
+            return redirect(url_for('user_dashboard'))
+    except Exception:
+        pass
+    return redirect(url_for('login'))
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT id, username, password, is_admin, is_agent FROM users WHERE username=?', (username,))
+        user = c.fetchone()
+        conn.close()
+        if user and check_password(user[2], password):
+            session['user_id'] = user[0]; session['username'] = user[1]
+            session['is_admin'] = bool(user[3]); session['is_agent'] = bool(user[4])
+            session.permanent = True
+            if session['is_admin']: return redirect(url_for('owner_dashboard'))
+            elif session['is_agent']: return redirect(url_for('agent_dashboard'))
+            else: return redirect(url_for('user_dashboard'))
+        flash('Invalid credentials', 'error')
+    return render_template_string(LOGIN_HTML)
+
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        email = request.form.get('email', '')
+        reg_key = request.form['registration_key']
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT id, expiry_date, created_by FROM keys WHERE key=? AND is_used=0', (reg_key,))
+        key_row = c.fetchone()
+        if not key_row:
+            conn.close()
+            flash('Invalid key', 'error')
+            return render_template_string(REGISTER_HTML)
+        if key_row[1]:
+            try:
+                if datetime.fromisoformat(key_row[1]) < datetime.now():
+                    conn.close()
+                    flash('Key expired', 'error')
+                    return render_template_string(REGISTER_HTML)
+            except: pass
+        c.execute('SELECT id FROM users WHERE username=?', (username,))
+        if c.fetchone():
+            conn.close()
+            flash('Username taken', 'error')
+            return render_template_string(REGISTER_HTML)
+        agent_name = key_row[2] if key_row[2] and key_row[2] not in ('admin', 'system', 'MAHIR TCP', 'OWNER') else None
+        c.execute('''INSERT INTO users (username, password, email, registration_key, is_admin, is_agent, subscription_expiry, created_by_agent)
+                     VALUES (?, ?, ?, ?, 0, 0, ?, ?)''', (username, password, email, reg_key, key_row[1], agent_name))
+        c.execute('UPDATE keys SET is_used=1, used_by=?, used_at=CURRENT_TIMESTAMP WHERE key=?', (username, reg_key))
+        conn.commit(); conn.close()
+        flash('Registration successful!', 'success')
+        return redirect(url_for('login'))
+    return render_template_string(REGISTER_HTML)
+
+
+@app.route('/recover', methods=['GET', 'POST'])
+def recover():
+    if request.method == 'POST':
+        username = request.form['username']
+        email = request.form['email']
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT password FROM users WHERE username=? AND email=?', (username, email))
+        row = c.fetchone()
+        if row:
+            stored = row[0]
+            if is_hashed(stored):
+                new_pw = secrets.token_hex(8)
+                c.execute('UPDATE users SET password=? WHERE username=?', (new_pw, username))
+                conn.commit(); conn.close()
+                flash(f'Password reset: {new_pw}', 'success')
+            else:
+                conn.close()
+                flash(f'Your password: {stored}', 'success')
         else:
-            return jsonify({"status":"error","message":"invalid"}), 400
-        return jsonify(r.json()) if r.status_code == 200 else jsonify({"status":"error","message":str(r.status_code)})
-    except Exception as e:
-        return jsonify({"status":"error","message":str(e)})
+            conn.close()
+            flash('Not found', 'error')
+    return render_template_string(RECOVER_HTML)
 
-@app.route("/api/guild", methods=["POST"])
-@login_required
-def api_guild():
-    data = request.json or {}
-    action = data.get("action"); gid = data.get("guild_id")
-    if not gid: return jsonify({"success":False,"message":"missing guild_id"}), 400
-    m = get_monitor(session["user_id"])
-    if not m: return jsonify({"success":False,"message":"not configured"}), 400
-    with open(m.bot_file) as f: content = f.read()
-    match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", content)
-    if not match: return jsonify({"success":False,"message":"no creds"}), 400
-    uid, pw = match.group(1), match.group(2)
-    try:
-        r = rq.get(f"https://mahir-guild-api.vercel.app/{action}?clan_id={gid}&uid={uid}&pass={pw}", timeout=15)
-        return jsonify(r.json()) if r.status_code == 200 else jsonify({"success":False,"message":str(r.status_code)})
-    except Exception as e:
-        return jsonify({"success":False,"message":str(e)})
 
-# ══════════════════════════════════════════════════════════════
-# OWNER APIs
-# ══════════════════════════════════════════════════════════════
-@app.route("/api/owner/stats")
-@owner_required
-def api_owner_stats():
-    with DB() as c:
-        total_users = c.execute("SELECT COUNT(*) FROM users WHERE role='user'").fetchone()[0]
-        total_agents= c.execute("SELECT COUNT(*) FROM users WHERE role='agent'").fetchone()[0]
-        total_keys  = c.execute("SELECT COUNT(*) FROM keys").fetchone()[0]
-        used_keys   = c.execute("SELECT COUNT(*) FROM keys WHERE is_used=1").fetchone()[0]
-        unused_keys = total_keys - used_keys
-        expired     = c.execute("""SELECT COUNT(*) FROM users
-                                   WHERE role='user' AND subscription_expiry IS NOT NULL
-                                   AND subscription_expiry < datetime('now')""").fetchone()[0]
-    active = sum(1 for m in monitors.values() if m.is_running)
-    return jsonify({
-        "total_users": total_users, "total_agents": total_agents,
-        "total_keys": total_keys, "used_keys": used_keys, "unused_keys": unused_keys,
-        "expired_users": expired, "active_bots": active,
-        "offline_bots": total_users - active,
-        "global_stop": get_global_stop(),
-        "cpu": psutil.cpu_percent(interval=0.1),
-        "ram": psutil.virtual_memory().percent,
-        "disk": psutil.disk_usage('/').percent,
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+
+# ========== AGENT ROUTES ==========
+@app.route('/agent/login', methods=['GET', 'POST'])
+def agent_login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('SELECT id, username, password, is_agent FROM users WHERE username=?', (username,))
+        user = c.fetchone()
+        conn.close()
+        if user and user[3] == 1 and check_password(user[2], password):
+            session['user_id'] = user[0]; session['username'] = user[1]
+            session['is_agent'] = True; session['is_admin'] = False
+            session.permanent = True
+            return redirect(url_for('agent_dashboard'))
+        flash('Invalid', 'error')
+    return render_template_string(AGENT_LOGIN_HTML)
+
+
+@app.route('/agent/dashboard')
+@agent_required
+def agent_dashboard():
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, key, created_at, used_by, is_used, expiry_date, duration_days 
+                 FROM keys WHERE created_by=? ORDER BY id DESC''', (session['username'],))
+    keys = []
+    for r in c.fetchall():
+        used_by = r[3]
+        user_sub_days = None
+        user_sub_status = None
+        used_user_id = None
+        if used_by:
+            c.execute('SELECT id FROM users WHERE username=?', (used_by,))
+            ur = c.fetchone()
+            if ur:
+                used_user_id = ur[0]
+                sub = check_subscription_status(ur[0])
+                user_sub_status = sub['status']
+                if sub['status'] == 'unlimited':
+                    user_sub_days = None
+                elif sub['status'] == 'expired':
+                    user_sub_days = 0
+                else:
+                    user_sub_days = sub['days_left']
+        keys.append({
+            'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': used_by,
+            'is_used': r[4], 'expiry_date': r[5],
+            'duration_days': r[6] if r[6] is not None else 0,
+            'user_sub_days': user_sub_days,
+            'user_sub_status': user_sub_status,
+            'used_user_id': used_user_id
+        })
+    c.execute('SELECT key_limit, can_manage_db FROM users WHERE id=?', (session['user_id'],))
+    row = c.fetchone()
+    key_limit = row[0] if row and row[0] is not None else -1
+    can_manage_db = bool(row[1]) if row else False
+    c.execute('''SELECT id, username, email, bot_uid, bot_status, subscription_expiry, registration_key 
+                 FROM users WHERE created_by_agent=? AND is_admin=0 AND is_agent=0 ORDER BY id DESC''',
+              (session['username'],))
+    users_rows = c.fetchall()
+    my_users = []
+    for u in users_rows:
+        sub = check_subscription_status(u[0])
+        c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (u[0],))
+        rn = c.fetchone()
+        renew_count = rn[0] if rn else 0
+        renew_days = rn[1] if rn else 0
+        sub_time_left = format_time_left(sub['expiry']) if sub['expiry'] else '∞'
+        my_users.append({
+            'id': u[0], 'username': u[1], 'email': u[2],
+            'bot_uid': u[3] or '—', 'bot_status': u[4],
+            'sub_status': sub['status'], 'sub_days': sub['days_left'],
+            'sub_time_left': sub_time_left,
+            'sub_expiry': sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else None,
+            'renew_count': renew_count, 'renew_days': renew_days
+        })
+    conn.close()
+    return render_template_string(AGENT_DASHBOARD_HTML, keys=keys, new_key=None,
+                                  key_limit=key_limit, key_count=len(keys),
+                                  can_manage_db=can_manage_db, my_users=my_users)
+
+
+@app.route('/agent/subscription')
+@agent_required
+def agent_subscription():
+    agent = session['username']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, username, email, bot_uid, bot_status, subscription_expiry, registration_key 
+                 FROM users WHERE created_by_agent=? AND is_admin=0 AND is_agent=0 ORDER BY id DESC''',
+              (agent,))
+    users_rows = c.fetchall()
+    my_users = []
+    active_count = 0; expiring_count = 0; expired_count = 0
+    for u in users_rows:
+        sub = check_subscription_status(u[0])
+        c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (u[0],))
+        rn = c.fetchone()
+        renew_count = rn[0] if rn else 0
+        renew_days = rn[1] if rn else 0
+        sub_time_left = format_time_left(sub['expiry']) if sub['expiry'] else '∞'
+        if sub['status'] == 'expired':
+            expired_count += 1
+        elif sub['status'] == 'unlimited':
+            active_count += 1
+        elif sub['days_left'] <= 7:
+            expiring_count += 1
+            active_count += 1
+        else:
+            active_count += 1
+        my_users.append({
+            'id': u[0], 'username': u[1], 'email': u[2],
+            'bot_uid': u[3] or '—', 'bot_status': u[4],
+            'sub_status': sub['status'], 'sub_days': sub['days_left'],
+            'sub_time_left': sub_time_left,
+            'sub_expiry': sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else None,
+            'renew_count': renew_count, 'renew_days': renew_days
+        })
+    c.execute('''SELECT id, user_id, username, extended_by, extended_by_role, days_added, mode, 
+                 old_expiry, new_expiry, created_at
+                 FROM subscription_history WHERE extended_by=? ORDER BY id DESC LIMIT 100''', (agent,))
+    my_history = []
+    for r in c.fetchall():
+        my_history.append({
+            'id': r[0], 'user_id': r[1], 'username': r[2], 'extended_by': r[3],
+            'extended_by_role': r[4], 'days_added': r[5], 'mode': r[6],
+            'old_expiry': r[7], 'new_expiry': r[8], 'created_at': r[9]
+        })
+    conn.close()
+    return render_template_string(AGENT_SUBSCRIPTION_HTML,
+                                  my_users=my_users,
+                                  my_history=my_history,
+                                  active_count=active_count,
+                                  expiring_count=expiring_count,
+                                  expired_count=expired_count)
+
+
+@app.route('/agent/customer_history/<int:user_id>')
+@agent_required
+def agent_customer_history(user_id):
+    agent = session['username']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, username, email, password, bot_uid, bot_pw, bot_file,
+                 bot_status, admin_uid, created_at, registration_key,
+                 subscription_expiry, bot_disabled_by_admin, bot_force_active,
+                 created_by_agent, is_admin, is_agent
+                 FROM users WHERE id=? AND is_admin=0 AND is_agent=0''', (user_id,))
+    u = c.fetchone()
+    if not u:
+        conn.close()
+        flash('❌ Customer not found.', 'error')
+        return redirect(url_for('agent_subscription'))
+
+    owns_via_agent = (u[14] == agent)
+    owns_via_key = False
+    if not owns_via_agent and u[10]:
+        c.execute('SELECT created_by FROM keys WHERE key=?', (u[10],))
+        kr = c.fetchone()
+        if kr and kr[0] == agent:
+            owns_via_key = True
+            c.execute('UPDATE users SET created_by_agent=? WHERE id=? AND (created_by_agent IS NULL OR created_by_agent="")', (agent, user_id))
+            conn.commit()
+
+    if not owns_via_agent and not owns_via_key:
+        conn.close()
+        flash('❌ Access denied! This customer is not yours.', 'error')
+        return redirect(url_for('agent_subscription'))
+
+    sub = check_subscription_status(user_id)
+    sub_time_left = format_time_left(sub['expiry']) if sub['expiry'] else '∞'
+
+    c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (user_id,))
+    rn = c.fetchone()
+    renew_count = rn[0] if rn else 0
+    renew_days = rn[1] if rn else 0
+
+    c.execute('''SELECT id, user_id, username, extended_by, extended_by_role, days_added, mode,
+                 old_expiry, new_expiry, created_at
+                 FROM subscription_history WHERE user_id=? ORDER BY id DESC''', (user_id,))
+    sub_history = []
+    for r in c.fetchall():
+        sub_history.append({
+            'id': r[0], 'user_id': r[1], 'username': r[2], 'extended_by': r[3],
+            'extended_by_role': r[4], 'days_added': r[5], 'mode': r[6],
+            'old_expiry': r[7], 'new_expiry': r[8], 'created_at': r[9]
+        })
+    conn.close()
+
+    user_data = {
+        'id': u[0],
+        'username': u[1],
+        'email_masked': mask_email(u[2]),
+        'password_masked': mask_password(u[3]),
+        'bot_uid': u[4] or '—',
+        'bot_pw_masked': mask_bot_password(u[5]),
+        'bot_file': u[6] or '—',
+        'bot_status': u[7] or 'unknown',
+        'admin_uid': u[8] or '—',
+        'created_at': u[9],
+        'registration_key': u[10] or '—',
+        'sub_status': sub['status'],
+        'sub_days': sub['days_left'],
+        'sub_time_left': sub_time_left,
+        'sub_expiry': sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else None,
+        'bot_disabled_by_admin': u[12] or 0,
+        'bot_force_active': u[13] or 0,
+        'created_by_agent': u[14] or 'Owner',
+        'renew_count': renew_count,
+        'renew_days': renew_days
+    }
+
+    live = None
+    with monitors_lock:
+        if user_id in monitors:
+            try: live = monitors[user_id].get_status()
+            except: pass
+
+    return render_template_string(AGENT_CUSTOMER_HISTORY_HTML,
+                                  user=user_data,
+                                  sub_history=sub_history,
+                                  live=live)
+
+
+@app.route('/agent/renew_subscription/<int:user_id>', methods=['POST'])
+@agent_required
+def agent_renew_subscription(user_id):
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT created_by_agent FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row or row[0] != session['username']:
+        flash('❌ Access denied! This customer is not yours.', 'error')
+        return redirect(url_for('agent_subscription'))
+    return _renew_subscription(user_id, 'agent_subscription')
+
+
+@app.route('/agent/create_key', methods=['POST'])
+@agent_required
+def agent_create_key():
+    days = int(request.form.get('days_valid', 30))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT key_limit FROM users WHERE id=?', (session['user_id'],))
+    row = c.fetchone()
+    key_limit = row[0] if row and row[0] is not None else -1
+    c.execute('SELECT COUNT(*) FROM keys WHERE created_by=?', (session['username'],))
+    if key_limit >= 0 and c.fetchone()[0] >= key_limit:
+        conn.close()
+        flash(f'Max {key_limit} keys.', 'error')
+        return redirect(url_for('agent_dashboard'))
+    key = secrets.token_hex(16).upper()
+    expiry = None if days == 0 else datetime.now() + timedelta(days=days)
+    c.execute('INSERT INTO keys (key, created_by, expiry_date, duration_days) VALUES (?, ?, ?, ?)',
+              (key, session['username'], expiry.isoformat() if expiry else None, days))
+    conn.commit(); conn.close()
+    flash(f'🔑 New Key: {key}', 'success')
+    return redirect(url_for('agent_dashboard'))
+
+
+@app.route('/agent/logout')
+def agent_logout():
+    session.clear()
+    return redirect(url_for('agent_login'))
+
+
+@app.route('/agent/download_db', methods=['POST'])
+@agent_required
+def agent_download_db():
+    password = request.form.get('db_password', '')
+    if password != DB_DOWNLOAD_PASSWORD:
+        flash('❌ Wrong DB password!', 'error')
+        return redirect(url_for('agent_dashboard'))
+    if os.path.exists(DB_FILE):
+        return send_file(DB_FILE, as_attachment=True)
+    flash('❌ DB file not found', 'error')
+    return redirect(url_for('agent_dashboard'))
+
+
+# ========== OWNER ROUTES ==========
+def _build_grouped_data():
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    c.execute('SELECT id, username FROM users WHERE is_agent=1 ORDER BY username')
+    agents = c.fetchall()
+
+    groups_keys = []
+    groups_users = []
+    groups_history = []
+
+    owner_slug = '__owner__'
+    c.execute("SELECT COUNT(*), SUM(CASE WHEN is_used=1 THEN 1 ELSE 0 END) FROM keys WHERE created_by IN ('OWNER','MAHIR TCP','admin','system')")
+    r = c.fetchone()
+    owner_total_keys = r[0] or 0
+    owner_used_keys = r[1] or 0
+    c.execute("""SELECT COUNT(DISTINCT sh.user_id) FROM subscription_history sh
+                 INNER JOIN keys k ON k.key = (SELECT registration_key FROM users WHERE id = sh.user_id)
+                 WHERE k.created_by IN ('OWNER','MAHIR TCP','admin','system')""")
+    r = c.fetchone()
+    owner_renewed = r[0] or 0
+    groups_keys.append({
+        'name': 'OWNER MAHIR', 'slug': owner_slug, 'is_owner': True,
+        'total_keys': owner_total_keys, 'used_keys': owner_used_keys,
+        'unused_keys': owner_total_keys - owner_used_keys,
+        'renewed_users': owner_renewed
     })
 
-@app.route("/api/owner/users")
-@owner_required
-def api_owner_users():
-    q = request.args.get("q","").strip()
-    with DB() as c:
-        sql = """SELECT id,username,email,role,is_admin,bot_status,bot_file,bot_uid,
-                        subscription_expiry,is_disabled,disable_reason,parent_agent,created_at
-                 FROM users"""
-        params = []
-        if q:
-            sql += " WHERE username LIKE ? OR bot_uid LIKE ?"
-            params = [f"%{q}%", f"%{q}%"]
-        sql += " ORDER BY id DESC LIMIT 500"
-        rows = [dict(r) for r in c.execute(sql, params).fetchall()]
-    for r in rows:
-        r["is_running"] = bool(monitors.get(r["id"], None) and monitors[r["id"]].is_running)
-        r["is_expired"] = is_expired(r["subscription_expiry"], r["role"])
-    return jsonify({"users": rows})
+    c.execute("""SELECT COUNT(*) FROM users 
+                 WHERE is_admin=0 AND is_agent=0 
+                 AND (created_by_agent IS NULL OR created_by_agent='' OR created_by_agent IN ('Owner','OWNER','admin','system','MAHIR TCP'))""")
+    r = c.fetchone()
+    owner_total_users = r[0] or 0
+    active_owner = 0; expired_owner = 0; renewed_owner = 0
+    c.execute("""SELECT id FROM users WHERE is_admin=0 AND is_agent=0 
+                 AND (created_by_agent IS NULL OR created_by_agent='' OR created_by_agent IN ('Owner','OWNER','admin','system','MAHIR TCP'))""")
+    owner_uids = [r[0] for r in c.fetchall()]
+    for uid in owner_uids:
+        sub = check_subscription_status(uid)
+        if sub['status'] == 'expired': expired_owner += 1
+        else: active_owner += 1
+        c.execute('SELECT COUNT(*) FROM subscription_history WHERE user_id=?', (uid,))
+        if c.fetchone()[0] > 0: renewed_owner += 1
+    groups_users.append({
+        'name': 'OWNER MAHIR', 'slug': owner_slug, 'is_owner': True,
+        'total_users': owner_total_users, 'active_users': active_owner,
+        'expired_users': expired_owner, 'renewed_users': renewed_owner
+    })
 
-@app.route("/api/owner/user/<int:uid>/disable", methods=["POST"])
-@owner_required
-def api_owner_disable(uid):
-    reason = (request.json or {}).get("reason","Disabled by owner")
-    with DB() as c:
-        c.execute("UPDATE users SET is_disabled=1, disable_reason=? WHERE id=?", (reason, uid))
-        r = c.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
-    m = monitors.get(uid)
-    if m: m.stop(by_user=True)
-    audit("user_disable", r["username"] if r else str(uid))
-    return jsonify({"status":"ok"})
+    c.execute("""SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history 
+                 WHERE extended_by_role='owner' OR extended_by IN ('OWNER','MAHIR TCP','admin','system')""")
+    r = c.fetchone()
+    groups_history.append({
+        'name': 'OWNER MAHIR', 'slug': owner_slug, 'is_owner': True,
+        'total_entries': r[0] or 0, 'total_days': r[1] or 0
+    })
 
-@app.route("/api/owner/user/<int:uid>/enable", methods=["POST"])
-@owner_required
-def api_owner_enable(uid):
-    with DB() as c:
-        c.execute("UPDATE users SET is_disabled=0, disable_reason=NULL WHERE id=?", (uid,))
-    audit("user_enable", str(uid))
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/user/<int:uid>/force-start", methods=["POST"])
-@owner_required
-def api_owner_force_start(uid):
-    with DB() as c:
-        u = c.execute("SELECT username,bot_file FROM users WHERE id=?", (uid,)).fetchone()
-    if not u or not u["bot_file"]:
-        return jsonify({"error":"no bot file"}), 400
-    m = get_monitor(uid, u["username"], u["bot_file"])
-    if m:
-        m.user_stopped = False
-        m.start()
-    audit("force_start", u["username"])
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/user/<int:uid>/restart", methods=["POST"])
-@owner_required
-def api_owner_restart(uid):
-    with DB() as c:
-        u = c.execute("SELECT username,bot_file FROM users WHERE id=?", (uid,)).fetchone()
-    if not u or not u["bot_file"]: return jsonify({"error":"no bot file"}), 400
-    m = get_monitor(uid, u["username"], u["bot_file"])
-    if m: m.restart()
-    audit("restart", u["username"])
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/user/<int:uid>/delete", methods=["POST"])
-@owner_required
-def api_owner_delete(uid):
-    with DB() as c:
-        r = c.execute("SELECT username,bot_file,is_admin FROM users WHERE id=?", (uid,)).fetchone()
-        if not r: return jsonify({"error":"not found"}), 404
-        if r["is_admin"]: return jsonify({"error":"cannot delete owner"}), 403
-        if r["bot_file"]:
-            p = os.path.join(BOT_DIR, r["bot_file"])
-            if os.path.exists(p):
-                try: os.remove(p)
-                except Exception: pass
-        c.execute("DELETE FROM users WHERE id=?", (uid,))
-        c.execute("DELETE FROM subscriptions WHERE username=?", (r["username"],))
-    drop_monitor(uid)
-    audit("user_delete", r["username"])
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/user/<int:uid>/renew", methods=["POST"])
-@owner_required
-def api_owner_renew(uid):
-    days = int((request.json or {}).get("days", 30))
-    new_exp = (datetime.now() + timedelta(days=days)).isoformat()
-    with DB() as c:
-        c.execute("UPDATE users SET subscription_expiry=? WHERE id=?", (new_exp, uid))
-        r = c.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
-        c.execute("INSERT INTO subscriptions (username, expiry_date, renewed_by) VALUES (?,?,?)",
-                  (r["username"], new_exp, session["username"]))
-    audit("renew", r["username"], meta=f"{days}d")
-    return jsonify({"status":"ok", "expiry": new_exp})
-
-@app.route("/api/owner/notice/global", methods=["GET","POST"])
-@owner_required
-def api_owner_notice_global():
-    if request.method == "GET":
-        return jsonify({"message": get_global_notice()})
-    msg = (request.json or {}).get("message","")
-    with DB() as c:
-        c.execute("DELETE FROM notices WHERE scope='global'")
-        if msg:
-            c.execute("INSERT INTO notices (scope,message,enabled) VALUES ('global',?,1)", (msg,))
-    audit("global_notice")
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/notice/user/<int:uid>", methods=["POST"])
-@owner_required
-def api_owner_notice_user(uid):
-    msg = (request.json or {}).get("message","")
-    with DB() as c:
-        c.execute("UPDATE users SET personal_notice=? WHERE id=?", (msg, uid))
-    audit("personal_notice", str(uid))
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/keys")
-@owner_required
-def api_owner_keys():
-    with DB() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM keys ORDER BY id DESC LIMIT 300").fetchall()]
-    return jsonify({"keys": rows})
-
-@app.route("/api/owner/keys/create", methods=["POST"])
-@owner_required
-def api_owner_key_create():
-    data = request.json or {}
-    days = int(data.get("days", 30))
-    lifetime = bool(data.get("lifetime", False))
-    key = secrets.token_hex(16).upper()
-    expiry = None if lifetime else (datetime.now() + timedelta(days=days)).isoformat()
-    with DB() as c:
-        c.execute("INSERT INTO keys (key,created_by,expiry_date) VALUES (?,?,?)",
-                  (key, session["username"], expiry))
-    audit("key_create", key)
-    return jsonify({"status":"ok", "key": key, "expiry": expiry})
-
-@app.route("/api/owner/keys/<int:kid>/delete", methods=["POST"])
-@owner_required
-def api_owner_key_delete(kid):
-    with DB() as c:
-        c.execute("DELETE FROM keys WHERE id=?", (kid,))
-    audit("key_delete", str(kid))
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/agents")
-@owner_required
-def api_owner_agents():
-    with DB() as c:
-        rows = [dict(r) for r in c.execute("""SELECT id,username,email,created_at,max_keys
-                                              FROM users WHERE role='agent' ORDER BY id DESC""").fetchall()]
-        for r in rows:
-            r["customer_count"] = c.execute("SELECT COUNT(*) FROM users WHERE parent_agent=?",
-                                             (r["username"],)).fetchone()[0]
-            r["keys_created"] = c.execute("SELECT COUNT(*) FROM keys WHERE created_by=?",
-                                          (r["username"],)).fetchone()[0]
-    return jsonify({"agents": rows})
-
-@app.route("/api/owner/agents/create", methods=["POST"])
-@owner_required
-def api_owner_agent_create():
-    data = request.json or {}
-    u = (data.get("username") or "").strip()
-    p = data.get("password") or ""
-    e = data.get("email") or ""
-    mk = int(data.get("max_keys", 0))
-    if not (u and p): return jsonify({"error":"username & password required"}), 400
-    with DB() as c:
-        if c.execute("SELECT 1 FROM users WHERE username=?", (u,)).fetchone():
-            return jsonify({"error":"username taken"}), 409
-        c.execute("""INSERT INTO users (username,password,email,role,max_keys,is_admin)
-                     VALUES (?,?,?,?,?,0)""",
-                  (u, generate_password_hash(p, method="pbkdf2:sha256:600000"), e, ROLE_AGENT, mk))
-    audit("agent_create", u)
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/agents/<int:aid>/delete", methods=["POST"])
-@owner_required
-def api_owner_agent_delete(aid):
-    with DB() as c:
-        r = c.execute("SELECT username FROM users WHERE id=? AND role='agent'", (aid,)).fetchone()
-        if not r: return jsonify({"error":"agent not found"}), 404
-        c.execute("UPDATE users SET parent_agent=NULL WHERE parent_agent=?", (r["username"],))
-        c.execute("DELETE FROM users WHERE id=?", (aid,))
-    audit("agent_delete", r["username"])
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/bots/global", methods=["POST"])
-@owner_required
-def api_owner_global_control():
-    action = (request.json or {}).get("action")
-    if action == "stop_all":
-        set_global_stop(True)
-        for m in list(monitors.values()):
-            try: m.stop(by_user=True)
-            except Exception: pass
-    elif action == "start_all":
-        set_global_stop(False)
-        for m in list(monitors.values()):
-            m.user_stopped = False
-            try: m.start()
-            except Exception: pass
-    elif action == "restart_all":
-        set_global_stop(False)
-        for m in list(monitors.values()):
-            try: m.restart()
-            except Exception: pass
-    else:
-        return jsonify({"error":"invalid"}), 400
-    audit(f"global_{action}")
-    return jsonify({"status":"ok"})
-
-@app.route("/api/owner/bots/live")
-@owner_required
-def api_owner_bots_live():
-    out = []
-    with DB() as c:
-        rows = c.execute("""SELECT id,username,bot_file,subscription_expiry,role,
-                                    is_disabled FROM users WHERE bot_file IS NOT NULL""").fetchall()
-    for u in rows:
-        m = monitors.get(u["id"])
-        st = m.status() if m else {"is_running": False, "bot_status": "OFFLINE",
-                                    "cpu": 0, "ram": 0, "uptime": "00:00:00",
-                                    "restart_count": 0}
-        out.append({
-            "id": u["id"], "username": u["username"],
-            "is_running": st["is_running"], "bot_status": st["bot_status"],
-            "cpu": st["cpu"], "ram": st["ram"], "uptime": st["uptime"],
-            "restart_count": st["restart_count"],
-            "subscription_expiry": u["subscription_expiry"],
-            "is_expired": is_expired(u["subscription_expiry"], u["role"]),
-            "is_disabled": bool(u["is_disabled"]),
+    for aid, aname in agents:
+        slug = aname
+        c.execute('SELECT COUNT(*), SUM(CASE WHEN is_used=1 THEN 1 ELSE 0 END) FROM keys WHERE created_by=?', (aname,))
+        r = c.fetchone()
+        total_keys = r[0] or 0
+        used_keys = r[1] or 0
+        c.execute('SELECT COUNT(DISTINCT user_id) FROM subscription_history WHERE extended_by=?', (aname,))
+        renewed = c.fetchone()[0] or 0
+        groups_keys.append({
+            'name': aname, 'slug': slug, 'is_owner': False,
+            'total_keys': total_keys, 'used_keys': used_keys,
+            'unused_keys': total_keys - used_keys, 'renewed_users': renewed
         })
-    return jsonify({"bots": out})
 
-@app.route("/api/owner/audit")
-@owner_required
-def api_owner_audit():
-    with DB() as c:
-        rows = [dict(r) for r in c.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 500").fetchall()]
-    return jsonify({"rows": rows})
+        c.execute('SELECT COUNT(*) FROM users WHERE created_by_agent=? AND is_admin=0 AND is_agent=0', (aname,))
+        total_users = c.fetchone()[0] or 0
+        c.execute('SELECT id FROM users WHERE created_by_agent=? AND is_admin=0 AND is_agent=0', (aname,))
+        uids = [r[0] for r in c.fetchall()]
+        active = 0; expired = 0; renewed_users = 0
+        for uid in uids:
+            sub = check_subscription_status(uid)
+            if sub['status'] == 'expired': expired += 1
+            else: active += 1
+            c.execute('SELECT COUNT(*) FROM subscription_history WHERE user_id=?', (uid,))
+            if c.fetchone()[0] > 0: renewed_users += 1
+        groups_users.append({
+            'name': aname, 'slug': slug, 'is_owner': False,
+            'total_users': total_users, 'active_users': active,
+            'expired_users': expired, 'renewed_users': renewed_users
+        })
 
-# ══════════════════════════════════════════════════════════════
-# AGENT APIs
-# ══════════════════════════════════════════════════════════════
-@app.route("/api/agent/stats")
-@agent_or_owner
-def api_agent_stats():
-    me = session["username"]
-    with DB() as c:
-        custs = c.execute("SELECT COUNT(*) FROM users WHERE parent_agent=?", (me,)).fetchone()[0]
-        keys  = c.execute("SELECT COUNT(*) FROM keys WHERE created_by=?", (me,)).fetchone()[0]
-        used  = c.execute("SELECT COUNT(*) FROM keys WHERE created_by=? AND is_used=1", (me,)).fetchone()[0]
-    return jsonify({"customers": custs, "keys": keys, "used_keys": used,
-                    "unused_keys": keys - used})
+        c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE extended_by=?', (aname,))
+        r = c.fetchone()
+        groups_history.append({
+            'name': aname, 'slug': slug, 'is_owner': False,
+            'total_entries': r[0] or 0, 'total_days': r[1] or 0
+        })
 
-@app.route("/api/agent/customers")
-@agent_or_owner
-def api_agent_customers():
-    me = session["username"]
-    with DB() as c:
-        rows = [dict(r) for r in c.execute("""SELECT id,username,subscription_expiry,
-                                              bot_status,is_disabled
-                                              FROM users WHERE parent_agent=?
-                                              ORDER BY id DESC""", (me,)).fetchall()]
+    conn.close()
+    return groups_keys, groups_users, groups_history
+
+
+@app.route('/owner/login', methods=['GET', 'POST'])
+def owner_login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        if username == OWNER_USERNAME and password == OWNER_PASSWORD:
+            session.clear()
+            session['user_id'] = -1
+            session['username'] = 'OWNER'
+            session['is_admin'] = True
+            session['is_agent'] = False
+            session['owner_mode'] = True
+            session.permanent = True
+            return redirect(url_for('owner_dashboard'))
+        flash('Invalid owner credentials', 'error')
+    return render_template_string(OWNER_LOGIN_HTML)
+
+
+@app.route('/owner/logout')
+def owner_logout():
+    session.clear()
+    return redirect(url_for('owner_login'))
+
+
+@app.route('/owner/login_as/<int:user_id>')
+def owner_login_as(user_id):
+    if not session.get('owner_mode'):
+        flash('Owner access required', 'error')
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT id, username, is_admin, is_agent FROM users WHERE id=?', (user_id,))
+    u = c.fetchone()
+    conn.close()
+    if not u:
+        flash('User not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    session['user_id'] = u[0]
+    session['username'] = u[1]
+    session['is_admin'] = bool(u[2])
+    session['is_agent'] = bool(u[3])
+    if session['is_admin']:
+        return redirect(url_for('owner_dashboard'))
+    elif session['is_agent']:
+        return redirect(url_for('agent_dashboard'))
+    else:
+        return redirect(url_for('user_dashboard'))
+
+
+@app.route('/owner/return')
+def owner_return():
+    if not session.get('owner_mode'):
+        return redirect(url_for('login'))
+    session['user_id'] = -1
+    session['username'] = 'OWNER'
+    session['is_admin'] = True
+    session['is_agent'] = False
+    return redirect(url_for('owner_dashboard'))
+
+
+@app.route('/owner/dashboard')
+def owner_dashboard():
+    if not session.get('is_admin'):
+        flash('Owner access required', 'error')
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, username, email, created_at, bot_status, bot_file, 
+                 is_admin, is_agent, key_limit, can_manage_db, password,
+                 bot_disabled_by_admin, subscription_expiry, registration_key, bot_uid, 
+                 created_by_agent, personal_notice, personal_notice_enabled
+                 FROM users ORDER BY id DESC''')
+    rows = c.fetchall()
+    users = []; agents = []
     for r in rows:
-        r["is_expired"] = is_expired(r["subscription_expiry"], ROLE_USER)
-    return jsonify({"customers": rows})
+        sub = check_subscription_status(r[0])
+        c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (r[0],))
+        rn = c.fetchone()
+        renew_count = rn[0] if rn else 0
+        renew_days = rn[1] if rn else 0
+        user_dict = {
+            'id': r[0], 'username': r[1], 'email': r[2], 'created_at': r[3],
+            'bot_status': r[4], 'bot_file': r[5], 'is_admin': r[6], 'is_agent': r[7],
+            'key_limit': r[8] if r[8] is not None else -1,
+            'can_manage_db': r[9] or 0, 'password': r[10],
+            'bot_disabled_by_admin': r[11] or 0,
+            'sub_status': sub['status'], 'sub_days': sub['days_left'], 'bot_uid': r[14],
+            'created_by_agent': r[15],
+            'personal_notice': r[16] or '',
+            'personal_notice_enabled': r[17] or 0,
+            'renew_count': renew_count, 'renew_days': renew_days
+        }
+        users.append(user_dict)
+        if r[7] == 1:
+            c2 = conn.cursor()
+            c2.execute('SELECT COUNT(*) FROM keys WHERE created_by=?', (r[1],))
+            kc = c2.fetchone()[0]
+            c2.close()
+            ag = user_dict.copy(); ag['key_count'] = kc
+            agents.append(ag)
 
-@app.route("/api/agent/keys")
-@agent_or_owner
-def api_agent_keys():
-    me = session["username"]
-    with DB() as c:
-        rows = [dict(r) for r in c.execute(
-            "SELECT * FROM keys WHERE created_by=? ORDER BY id DESC LIMIT 200", (me,)).fetchall()]
-    return jsonify({"keys": rows})
+    c.execute('''SELECT id, user_id, username, extended_by, extended_by_role, days_added, mode, 
+                 old_expiry, new_expiry, created_at
+                 FROM subscription_history ORDER BY id DESC LIMIT 100''')
+    sub_history = []
+    for r in c.fetchall():
+        sub_history.append({
+            'id': r[0], 'user_id': r[1], 'username': r[2], 'extended_by': r[3],
+            'extended_by_role': r[4], 'days_added': r[5], 'mode': r[6],
+            'old_expiry': r[7], 'new_expiry': r[8], 'created_at': r[9]
+        })
 
-@app.route("/api/agent/keys/create", methods=["POST"])
-@agent_or_owner
-def api_agent_key_create():
-    me = session["username"]
-    with DB() as c:
-        u = c.execute("SELECT max_keys FROM users WHERE username=?", (me,)).fetchone()
-        if u and u["max_keys"]:
-            made = c.execute("SELECT COUNT(*) FROM keys WHERE created_by=?", (me,)).fetchone()[0]
-            if made >= u["max_keys"]:
-                return jsonify({"error":"key limit reached"}), 403
-    data = request.json or {}
-    days = int(data.get("days", 30))
+    c.execute('''SELECT id, key, created_by, created_at, used_by, is_used, expiry_date, duration_days 
+                 FROM keys ORDER BY id DESC LIMIT 50''')
+    keys = []
+    for r in c.fetchall():
+        keys.append({
+            'id': r[0], 'key': r[1], 'created_by': r[2], 'created_at': r[3],
+            'used_by': r[4], 'is_used': r[5], 'expiry_date': r[6],
+            'duration_days': r[7] if r[7] is not None else 0
+        })
+    conn.close()
+    stats = {'cpu': 0, 'ram_percent': 0, 'ram_used': 0, 'ram_total': 0, 'disk_percent': 0, 'disk_used': 0, 'disk_total': 0}
+    try:
+        stats['cpu'] = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory()
+        stats['ram_percent'] = mem.percent; stats['ram_used'] = mem.used; stats['ram_total'] = mem.total
+        disk = psutil.disk_usage('/')
+        stats['disk_percent'] = disk.percent; stats['disk_used'] = disk.used; stats['disk_total'] = disk.total
+    except: pass
+
+    grouped_keys, grouped_users, grouped_history = _build_grouped_data()
+
+    return render_template_string(OWNER_DASHBOARD_HTML, users=users, agents=agents, keys=keys,
+                                  new_key=None, global_stop=get_global_stop(),
+                                  global_notice=get_global_notice(),
+                                  login_notice_enabled=is_user_login_notice_enabled(),
+                                  login_notice_text=get_user_login_notice(),
+                                  sub_history=sub_history,
+                                  grouped_keys=grouped_keys,
+                                  grouped_users=grouped_users,
+                                  grouped_history=grouped_history,
+                                  **stats)
+
+
+@app.route('/owner/group_keys/<path:slug>')
+def owner_group_keys(slug):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    is_owner = (slug == '__owner__')
+    if is_owner:
+        group_name = 'OWNER MAHIR'
+        c_where = "created_by IN ('OWNER','MAHIR TCP','admin','system')"
+        params = ()
+    else:
+        group_name = slug
+        c_where = "created_by = ?"
+        params = (slug,)
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(f'''SELECT id, key, created_by, created_at, used_by, used_at, is_used, expiry_date, duration_days
+                  FROM keys WHERE {c_where} ORDER BY id DESC''', params)
+    raw_keys = c.fetchall()
+
+    keys = []
+    used_count = 0; unused_count = 0; renewed_count = 0
+    for r in raw_keys:
+        used_by = r[4]
+        renew_count = 0; renew_days = 0
+        if used_by:
+            c.execute('SELECT id FROM users WHERE username=?', (used_by,))
+            ur = c.fetchone()
+            if ur:
+                c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (ur[0],))
+                rr = c.fetchone()
+                renew_count = rr[0] or 0
+                renew_days = rr[1] or 0
+        if r[6]: used_count += 1
+        else: unused_count += 1
+        if renew_count > 0: renewed_count += 1
+        keys.append({
+            'id': r[0], 'key': r[1], 'created_by': r[2], 'created_at': r[3],
+            'used_by': r[4], 'used_at': r[5], 'is_used': r[6],
+            'expiry_date': r[7], 'duration_days': r[8] if r[8] is not None else 0,
+            'renew_count': renew_count, 'renew_days': renew_days
+        })
+    conn.close()
+    return render_template_string(OWNER_GROUP_KEYS_HTML,
+                                  group_name=group_name, is_owner=is_owner,
+                                  keys=keys, used_count=used_count,
+                                  unused_count=unused_count,
+                                  renewed_count=renewed_count)
+
+
+@app.route('/owner/key_details/<int:key_id>')
+def owner_key_details(key_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, key, created_by, created_at, used_by, used_at, is_used, expiry_date, duration_days
+                 FROM keys WHERE id=?''', (key_id,))
+    r = c.fetchone()
+    if not r:
+        conn.close()
+        flash('Key not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    key = {
+        'id': r[0], 'key': r[1], 'created_by': r[2], 'created_at': r[3],
+        'used_by': r[4], 'used_at': r[5], 'is_used': r[6],
+        'expiry_date': r[7], 'duration_days': r[8] if r[8] is not None else 0
+    }
+    is_owner_group = key['created_by'] in ('OWNER', 'MAHIR TCP', 'admin', 'system')
+    creator_slug = '__owner__' if is_owner_group else key['created_by']
+
+    user = None
+    renewal_history = []
+    if key['used_by']:
+        c.execute('''SELECT id, username, email, bot_uid, created_by_agent, subscription_expiry,
+                     registration_key, is_admin, is_agent FROM users WHERE username=?''', (key['used_by'],))
+        ur = c.fetchone()
+        if ur:
+            sub = check_subscription_status(ur[0])
+            user = {
+                'id': ur[0], 'username': ur[1], 'email': ur[2],
+                'bot_uid': ur[3] or '—', 'created_by_agent': ur[4],
+                'sub_status': sub['status'], 'sub_days': sub['days_left']
+            }
+            c.execute('''SELECT id, user_id, username, extended_by, extended_by_role, days_added,
+                         mode, old_expiry, new_expiry, created_at
+                         FROM subscription_history WHERE user_id=? ORDER BY id DESC''', (ur[0],))
+            for h in c.fetchall():
+                renewal_history.append({
+                    'id': h[0], 'user_id': h[1], 'username': h[2], 'extended_by': h[3],
+                    'extended_by_role': h[4], 'days_added': h[5], 'mode': h[6],
+                    'old_expiry': h[7], 'new_expiry': h[8], 'created_at': h[9]
+                })
+    conn.close()
+    return render_template_string(OWNER_KEY_DETAILS_HTML,
+                                  key=key, user=user,
+                                  renewal_history=renewal_history,
+                                  is_owner_group=is_owner_group,
+                                  creator_slug=creator_slug)
+
+
+@app.route('/owner/group_users/<path:slug>')
+def owner_group_users(slug):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    is_owner = (slug == '__owner__')
+    if is_owner:
+        group_name = 'OWNER MAHIR'
+        c_where = """is_admin=0 AND is_agent=0 AND (created_by_agent IS NULL OR created_by_agent='' 
+                     OR created_by_agent IN ('Owner','OWNER','admin','system','MAHIR TCP'))"""
+        params = ()
+    else:
+        group_name = slug
+        c_where = "created_by_agent=? AND is_admin=0 AND is_agent=0"
+        params = (slug,)
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(f'''SELECT id, username, email, bot_status, subscription_expiry, created_by_agent
+                  FROM users WHERE {c_where} ORDER BY id DESC''', params)
+    raw = c.fetchall()
+    users = []
+    for r in raw:
+        sub = check_subscription_status(r[0])
+        c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (r[0],))
+        rn = c.fetchone()
+        users.append({
+            'id': r[0], 'username': r[1], 'email': r[2], 'bot_status': r[3],
+            'sub_status': sub['status'], 'sub_days': sub['days_left'],
+            'renew_count': rn[0] if rn else 0,
+            'renew_days': rn[1] if rn else 0
+        })
+    conn.close()
+    return render_template_string(OWNER_GROUP_USERS_HTML,
+                                  group_name=group_name, is_owner=is_owner, users=users)
+
+
+@app.route('/owner/group_history/<path:slug>')
+def owner_group_history(slug):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    is_owner = (slug == '__owner__')
+    if is_owner:
+        group_name = 'OWNER MAHIR'
+        c_where = "extended_by_role='owner' OR extended_by IN ('OWNER','MAHIR TCP','admin','system')"
+        params = ()
+    else:
+        group_name = slug
+        c_where = "extended_by=?"
+        params = (slug,)
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(f'''SELECT id, user_id, username, extended_by, extended_by_role, days_added,
+                  mode, old_expiry, new_expiry, created_at
+                  FROM subscription_history WHERE {c_where} ORDER BY id DESC''', params)
+    history = []
+    for r in c.fetchall():
+        history.append({
+            'id': r[0], 'user_id': r[1], 'username': r[2], 'extended_by': r[3],
+            'extended_by_role': r[4], 'days_added': r[5], 'mode': r[6],
+            'old_expiry': r[7], 'new_expiry': r[8], 'created_at': r[9]
+        })
+    conn.close()
+    return render_template_string(OWNER_GROUP_HISTORY_HTML,
+                                  group_name=group_name, is_owner=is_owner, history=history)
+
+
+@app.route('/owner/preview_global_notice')
+def owner_preview_global_notice():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    notice = get_global_notice()
+    return f'''<!DOCTYPE html><html><head><title>Notice Preview</title><style>
+body{{background:#07070f;color:#e9e9f8;font-family:Inter,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px}}
+.box{{background:linear-gradient(135deg,#1a0a2e,#0a0a1a);border:2px solid rgba(245,200,66,.35);border-radius:22px;padding:32px 28px;max-width:520px;text-align:center;box-shadow:0 0 60px rgba(245,200,66,.3)}}
+.icon{{font-size:3.5rem;margin-bottom:16px;display:block}}
+.title{{font-size:1.4rem;font-weight:900;background:linear-gradient(120deg,#F5C842,#FF5A6A,#B388FF);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:14px;letter-spacing:1px}}
+.msg{{color:#c5c5e5;font-size:.95rem;line-height:1.7;padding:16px;background:rgba(0,0,0,.4);border-radius:14px;border:1px solid rgba(245,200,66,.1);margin-bottom:22px;text-align:left}}
+</style></head><body><div class="box">
+<span class="icon">📢</span>
+<div class="title">OWNER NOTICE</div>
+<div class="msg">{notice}</div></div></body></html>'''
+
+
+@app.route('/owner/set_global_notice', methods=['POST'])
+def owner_set_global_notice():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    notice = request.form.get('notice_text', '').strip()
+    set_setting('global_notice_text', notice)
+    flash('✅ Global notice updated!', 'success')
+    return redirect(url_for('owner_dashboard'))
+
+
+@app.route('/owner/set_user_login_notice', methods=['POST'])
+def owner_set_user_login_notice():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    action = request.form.get('action', 'save')
+    notice_text = request.form.get('notice_text', '').strip()
+
+    if action == 'enable':
+        set_setting('user_login_notice_enabled', '1')
+        set_setting('user_login_notice_text', notice_text)
+        flash('✅ User login notice ENABLED!', 'success')
+    elif action == 'disable':
+        set_setting('user_login_notice_enabled', '0')
+        if notice_text:
+            set_setting('user_login_notice_text', notice_text)
+        flash('🔕 User login notice DISABLED.', 'success')
+    else:
+        set_setting('user_login_notice_text', notice_text)
+        flash('✅ Notice text saved!', 'success')
+    return redirect(url_for('owner_dashboard'))
+
+
+@app.route('/owner/set_user_notice/<int:user_id>', methods=['POST'])
+def owner_set_user_notice(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    notice_text = request.form.get('personal_notice', '').strip()
+    enabled = 1 if request.form.get('enabled') == '1' else 0
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('UPDATE users SET personal_notice=?, personal_notice_enabled=? WHERE id=?',
+              (notice_text, enabled, user_id))
+    conn.commit(); conn.close()
+    flash(f'✅ Personal notice {"enabled" if enabled else "disabled"} for user #{user_id}', 'success')
+    return redirect(request.referrer or url_for('owner_dashboard'))
+
+
+@app.route('/owner/stop_all_bots', methods=['POST'])
+def owner_stop_all_bots():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    set_setting('global_bot_stop', '1')
+    with monitors_lock:
+        for uid, m in list(monitors.items()):
+            try:
+                m.watchdog_running = False
+                m.stop_process()
+            except: pass
+    flash('🛑 All bots STOPPED globally!', 'success')
+    return redirect(url_for('owner_dashboard'))
+
+
+@app.route('/owner/start_all_bots', methods=['POST'])
+def owner_start_all_bots():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    set_setting('global_bot_stop', '0')
+    success, fail = reset_all_bots()
+    flash(f'✅ Global stop OFF! Rebuilt + {success} bots started.', 'success')
+    return redirect(url_for('owner_dashboard'))
+
+
+@app.route('/owner/force_start_bot/<int:user_id>', methods=['POST'])
+def owner_force_start_bot(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('UPDATE users SET bot_force_active=1, bot_disabled_by_admin=0, desired_bot_state="running" WHERE id=?', (user_id,))
+    conn.commit()
+    c.execute('SELECT bot_file, bot_uid, bot_pw, admin_uid FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0]:
+        path = os.path.join(USER_BOTS_DIR, row[0])
+        # ✅ Auto-recreate if file was deleted (expired)
+        if not os.path.exists(path):
+            try:
+                if row[1] and row[2]:
+                    if not os.path.exists(MAHIR_SOURCE):
+                        with open(MAHIR_SOURCE, 'w') as f:
+                            f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+                    shutil.copy2(MAHIR_SOURCE, path)
+                    inject_credentials_into_bot_file(path, row[1], row[2], parse_admin_uids(row[3]))
+                    print(f"♻️ Auto-recreated bot file for user {user_id}")
+            except Exception as e:
+                print(f"Auto-recreate error: {e}")
+        if os.path.exists(path):
+            with monitors_lock:
+                if user_id in monitors:
+                    try:
+                        monitors[user_id].watchdog_running = False
+                        monitors[user_id].stop_process()
+                    except: pass
+                    del monitors[user_id]
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            m.start_process()
+            flash(f'⚡ Bot force-started for user {user_id}!', 'success')
+        else:
+            flash('❌ Bot file not found & could not recreate', 'error')
+    else:
+        flash('❌ No bot file for this user', 'error')
+    return redirect(request.referrer or url_for('owner_dashboard'))
+
+
+@app.route('/owner/disable_user/<int:user_id>', methods=['POST'])
+def owner_disable_user(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    reason = request.form.get('reason', '').strip() or 'Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।'
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('UPDATE users SET bot_disabled_by_admin=1, disable_reason=?, bot_force_active=0 WHERE id=?', (reason, user_id))
+    conn.commit(); conn.close()
+    with monitors_lock:
+        if user_id in monitors:
+            try:
+                monitors[user_id].watchdog_running = False
+                monitors[user_id].stop_process()
+            except: pass
+    flash('🛑 User bot DISABLED with custom reason.', 'success')
+    return redirect(request.referrer or url_for('owner_dashboard'))
+
+
+@app.route('/owner/toggle_user_bot/<int:user_id>', methods=['POST'])
+def owner_toggle_user_bot(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    if row:
+        new_val = 0 if row[0] else 1
+        c.execute('UPDATE users SET bot_disabled_by_admin=?, disable_reason=? WHERE id=?',
+                  (new_val, None if not new_val else 'Owner disabled', user_id))
+        conn.commit()
+        if new_val:
+            with monitors_lock:
+                if user_id in monitors:
+                    try:
+                        monitors[user_id].watchdog_running = False
+                        monitors[user_id].stop_process()
+                    except: pass
+            flash('🛑 User bot DISABLED.', 'success')
+        else:
+            flash('✅ User bot ENABLED. Click "Force Start" to run.', 'success')
+    conn.close()
+    return redirect(request.referrer or url_for('owner_dashboard'))
+
+
+@app.route('/owner/recreate_bot/<int:user_id>', methods=['POST'])
+def owner_recreate_bot(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT username, admin_uid, bot_uid, bot_pw FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        flash('User not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    username, admin_uid, bot_uid, bot_pw = row
+    if not bot_uid or not bot_pw:
+        flash('Bot credentials missing.', 'error')
+        return redirect(url_for('owner_user_details', user_id=user_id))
+    safe_name = sanitize_filename(username)
+    bot_filename = f"{safe_name}_mahir.py"
+    bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
+    try:
+        shutil.copy2(MAHIR_SOURCE, bot_file_path)
+        admin_uids_list = parse_admin_uids(admin_uid)
+        ok, msg = inject_credentials_into_bot_file(bot_file_path, bot_uid, bot_pw, admin_uids_list)
+        if not ok:
+            flash(f'Error: {msg}', 'error')
+            return redirect(url_for('owner_user_details', user_id=user_id))
+        new_expiry = (datetime.now() + timedelta(days=30)).isoformat()
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('UPDATE users SET bot_file=?, bot_status="configured", bot_disabled_by_admin=0, subscription_expiry=? WHERE id=?',
+                  (bot_filename, new_expiry, user_id))
+        conn.commit(); conn.close()
+        with monitors_lock:
+            if user_id in monitors:
+                try:
+                    monitors[user_id].watchdog_running = False
+                    monitors[user_id].stop_process()
+                except: pass
+                try: del monitors[user_id]
+                except: pass
+        flash('✅ Bot file recreated with 30-day subscription! Click "Force Start" to run.', 'success')
+    except Exception as e:
+        flash(f'❌ {e}', 'error')
+    return redirect(url_for('owner_user_details', user_id=user_id))
+
+
+@app.route('/owner/renew_subscription/<int:user_id>', methods=['POST'])
+def owner_renew_subscription(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    return _renew_subscription(user_id, 'owner_user_details')
+
+
+@app.route('/owner/create_agent', methods=['POST'])
+def owner_create_agent():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    username = request.form['username']
+    email = request.form['email']
+    password = request.form['password']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT id FROM users WHERE username=?', (username,))
+    if c.fetchone():
+        flash('Username exists', 'error')
+        conn.close()
+        return redirect(url_for('owner_dashboard'))
+    c.execute('''INSERT INTO users (username, password, email, registration_key, is_agent, is_admin, bot_status, key_limit, can_manage_db)
+                 VALUES (?, ?, ?, ?, 1, 0, 'agent', -1, 0)''', (username, password, email, 'agent_created'))
+    conn.commit(); conn.close()
+    flash(f'Agent {username} created', 'success')
+    return redirect(url_for('owner_dashboard'))
+
+
+@app.route('/owner/delete_agent/<int:agent_id>', methods=['POST'])
+def owner_delete_agent(agent_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT username, bot_file FROM users WHERE id=? AND is_agent=1', (agent_id,))
+    row = c.fetchone()
+    if row:
+        uname, bot_file = row
+        c.execute('DELETE FROM keys WHERE created_by=?', (uname,))
+        if bot_file and os.path.exists(bot_file):
+            try: os.remove(bot_file)
+            except: pass
+        c.execute('DELETE FROM users WHERE id=?', (agent_id,))
+        conn.commit()
+    conn.close()
+    flash('Agent deleted', 'success')
+    return redirect(url_for('owner_dashboard'))
+
+
+@app.route('/owner/delete_key/<int:key_id>', methods=['POST'])
+def owner_delete_key(key_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT key, used_by FROM keys WHERE id=?', (key_id,))
+    kr = c.fetchone()
+    if not kr:
+        conn.close()
+        flash('Key not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    key_val, used_by = kr
+
+    c.execute('SELECT id, bot_file FROM users WHERE registration_key=?', (key_val,))
+    linked_users = c.fetchall()
+
+    user_ids_to_delete_history = [u[0] for u in linked_users]
+    if used_by:
+        c.execute('SELECT id FROM users WHERE username=?', (used_by,))
+        ur = c.fetchone()
+        if ur and ur[0] not in user_ids_to_delete_history:
+            user_ids_to_delete_history.append(ur[0])
+
+    for uid, bf in linked_users:
+        with monitors_lock:
+            if uid in monitors:
+                try:
+                    monitors[uid].watchdog_running = False
+                    monitors[uid].stop_process()
+                except: pass
+                del monitors[uid]
+        if bf:
+            for suffix in ['', '_login.py']:
+                fn = bf.replace('.py', suffix) if suffix else bf
+                fp = os.path.join(USER_BOTS_DIR, fn)
+                if os.path.exists(fp):
+                    try: os.remove(fp)
+                    except: pass
+
+    for uid, _ in linked_users:
+        c.execute('DELETE FROM users WHERE id=?', (uid,))
+
+    for uid in user_ids_to_delete_history:
+        c.execute('DELETE FROM subscription_history WHERE user_id=?', (uid,))
+
+    c.execute('DELETE FROM keys WHERE id=?', (key_id,))
+
+    conn.commit(); conn.close()
+    flash('✅ Key deleted with associated users & subscription history.', 'success')
+    return redirect(request.referrer or url_for('owner_dashboard'))
+
+
+@app.route('/owner/create_key', methods=['POST'])
+def owner_create_key():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    days = int(request.form.get('days_valid', 30))
     key = secrets.token_hex(16).upper()
-    expiry = (datetime.now() + timedelta(days=days)).isoformat()
-    with DB() as c:
-        c.execute("INSERT INTO keys (key,created_by,expiry_date,agent) VALUES (?,?,?,?)",
-                  (key, me, expiry, me))
-    audit("agent_key_create", key)
-    return jsonify({"status":"ok", "key": key})
+    expiry = None if days == 0 else datetime.now() + timedelta(days=days)
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('INSERT INTO keys (key, created_by, expiry_date, duration_days) VALUES (?, ?, ?, ?)',
+              (key, 'OWNER', expiry.isoformat() if expiry else None, days))
+    conn.commit(); conn.close()
+    flash(f'🔑 Key: {key}', 'success')
+    return redirect(url_for('owner_dashboard'))
 
-@app.route("/api/agent/customer/<int:uid>/renew", methods=["POST"])
-@agent_or_owner
-def api_agent_renew(uid):
-    me = session["username"]
-    days = int((request.json or {}).get("days", 30))
-    with DB() as c:
-        r = c.execute("SELECT username,parent_agent FROM users WHERE id=?", (uid,)).fetchone()
-        if not r: return jsonify({"error":"not found"}), 404
-        if session.get("role") != ROLE_OWNER and r["parent_agent"] != me:
-            return jsonify({"error":"not your customer"}), 403
-        new_exp = (datetime.now() + timedelta(days=days)).isoformat()
-        c.execute("UPDATE users SET subscription_expiry=? WHERE id=?", (new_exp, uid))
-        c.execute("INSERT INTO subscriptions (username,expiry_date,renewed_by,agent) VALUES (?,?,?,?)",
-                  (r["username"], new_exp, me, me))
-    audit("agent_renew", r["username"], meta=f"{days}d")
-    return jsonify({"status":"ok", "expiry": new_exp})
 
-# ══════════════════════════════════════════════════════════════
-# BOOT / SHUTDOWN
-# ══════════════════════════════════════════════════════════════
-_booted = False
-_boot_lock = threading.Lock()
+@app.route('/owner/delete_user/<int:user_id>', methods=['POST'])
+def owner_delete_user(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT bot_file FROM users WHERE id=? AND is_admin=0 AND is_agent=0', (user_id,))
+    row = c.fetchone()
+    if row and row[0]:
+        fp = os.path.join(USER_BOTS_DIR, row[0])
+        if os.path.exists(fp):
+            try: os.remove(fp)
+            except: pass
+    c.execute('DELETE FROM users WHERE id=? AND is_admin=0 AND is_agent=0', (user_id,))
+    conn.commit(); conn.close()
+    with monitors_lock:
+        if user_id in monitors:
+            try:
+                monitors[user_id].watchdog_running = False
+                monitors[user_id].stop_process()
+            except: pass
+            del monitors[user_id]
+    flash('User deleted', 'success')
+    return redirect(url_for('owner_dashboard'))
 
-def boot_bots():
-    global _booted
-    with _boot_lock:
-        if _booted: return
-        _booted = True
-    init_db()
-    global_stop = get_global_stop()
-    with DB() as c:
-        users = c.execute("""SELECT id,username,bot_file,is_disabled,role,
-                                    subscription_expiry FROM users
-                             WHERE bot_file IS NOT NULL""").fetchall()
-    for u in users:
-        if u["is_disabled"] or global_stop: continue
-        if is_expired(u["subscription_expiry"], u["role"]): continue
-        m = get_monitor(u["id"], u["username"], u["bot_file"])
-        if m: m.start()
-    watchdog.start()
-    print(f"[boot] {len(monitors)} monitor(s) initialized.")
 
-def shutdown_all(*_):
-    print("\n[shutdown] stopping bots...")
-    for m in list(monitors.values()):
-        try: m.stop(by_user=True)
-        except Exception: pass
-    watchdog.stop()
-    time.sleep(0.5)
-    sys.exit(0)
+@app.route('/owner/user_details/<int:user_id>')
+def owner_user_details(user_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, username, email, password, bot_uid, bot_pw, bot_file, 
+                 bot_status, bot_pid, admin_uid, is_admin, is_agent, key_limit, 
+                 can_manage_db, created_at, registration_key, bot_disabled_by_admin, 
+                 subscription_expiry, bot_force_active, created_by_agent
+                 FROM users WHERE id=?''', (user_id,))
+    user = c.fetchone()
+    if not user:
+        conn.close()
+        flash('Not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    c.execute('SELECT COUNT(*) FROM keys WHERE created_by=?', (user[1],))
+    key_count = c.fetchone()[0]
+    c.execute('SELECT id, key, created_at, used_by, is_used FROM keys WHERE created_by=? ORDER BY id DESC', (user[1],))
+    keys_list = [{'id': r[0], 'key': r[1], 'created_at': r[2], 'used_by': r[3], 'is_used': r[4]} for r in c.fetchall()]
+    c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (user_id,))
+    rn = c.fetchone()
+    renew_count = rn[0] if rn else 0
+    renew_days = rn[1] if rn else 0
+    c.execute('''SELECT id, user_id, username, extended_by, extended_by_role, days_added, mode, 
+                 old_expiry, new_expiry, created_at
+                 FROM subscription_history WHERE user_id=? ORDER BY id DESC''', (user_id,))
+    sub_history = []
+    for r in c.fetchall():
+        sub_history.append({
+            'id': r[0], 'user_id': r[1], 'username': r[2], 'extended_by': r[3],
+            'extended_by_role': r[4], 'days_added': r[5], 'mode': r[6],
+            'old_expiry': r[7], 'new_expiry': r[8], 'created_at': r[9]
+        })
+    conn.close()
+    sub = check_subscription_status(user_id)
+    sub_time_left = format_time_left(sub['expiry']) if sub['expiry'] else '∞'
+    user_data = {
+        'id': user[0], 'username': user[1], 'email': user[2] or '—',
+        'password': user[3], 'bot_uid': user[4] or '—', 'bot_pw': user[5] or '—',
+        'bot_file': user[6] or '—', 'bot_status': user[7] or 'unknown',
+        'bot_pid': user[8], 'admin_uid': user[9] or '—',
+        'is_admin': user[10], 'is_agent': user[11],
+        'key_limit': user[12] if user[12] is not None else -1,
+        'can_manage_db': user[13] or 0, 'created_at': user[14],
+        'registration_key': user[15], 'key_count': key_count,
+        'bot_disabled_by_admin': user[16] or 0,
+        'sub_status': sub['status'], 'sub_days': sub['days_left'],
+        'sub_time_left': sub_time_left,
+        'sub_expiry': sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else None,
+        'bot_force_active': user[18] or 0,
+        'created_by_agent': user[19] or 'Owner',
+        'renew_count': renew_count,
+        'renew_days': renew_days
+    }
+    live = None
+    with monitors_lock:
+        if user_id in monitors:
+            try: live = monitors[user_id].get_status()
+            except: pass
+    return render_template_string(USER_DETAILS_HTML, user=user_data, live=live, keys=keys_list, sub_history=sub_history)
 
-signal.signal(signal.SIGTERM, shutdown_all)
-signal.signal(signal.SIGINT, shutdown_all)
 
-# Boot once (avoid Flask reloader duplicate)
-if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not os.environ.get("FLASK_DEBUG"):
-    boot_bots()
+@app.route('/owner/set_key_limit/<int:agent_id>', methods=['POST'])
+def owner_set_key_limit(agent_id):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    try: nl = int(request.form.get('key_limit', -1))
+    except: nl = -1
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('UPDATE users SET key_limit=? WHERE id=?', (nl, agent_id))
+    conn.commit(); conn.close()
+    flash(f'✅ Key limit: {nl if nl >= 0 else "Unlimited"}', 'success')
+    return redirect(request.referrer or url_for('owner_dashboard'))
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0",
-            port=int(os.environ.get("PORT", 8080)),
-            debug=False, use_reloader=False)
+
+def _renew_subscription(user_id, redirect_endpoint):
+    try: days = int(request.form.get('days', 30))
+    except: days = 30
+    mode = request.form.get('mode', 'extend')
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT subscription_expiry, username FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        flash('❌ User not found', 'error')
+        if redirect_endpoint == 'owner_user_details':
+            return redirect(url_for('owner_dashboard'))
+        return redirect(url_for(redirect_endpoint))
+
+    old_expiry_str = row[0]
+    username = row[1]
+    now = datetime.now()
+    old_expiry_dt = None
+    if old_expiry_str:
+        try: old_expiry_dt = datetime.fromisoformat(old_expiry_str)
+        except: old_expiry_dt = None
+
+    if mode == 'extend' and old_expiry_dt and old_expiry_dt > now:
+        new_expiry = old_expiry_dt + timedelta(days=days)
+    else:
+        new_expiry = now + timedelta(days=days)
+
+    c.execute('UPDATE users SET subscription_expiry=?, bot_status=CASE WHEN bot_status="expired" THEN "configured" ELSE bot_status END WHERE id=?',
+              (new_expiry.isoformat(), user_id))
+    conn.commit(); conn.close()
+
+    extended_by = session.get('username', 'Unknown')
+    if session.get('is_admin') or session.get('owner_mode'):
+        extended_by_role = 'owner'
+        extended_by_display = 'MAHIR TCP'
+    elif session.get('is_agent'):
+        extended_by_role = 'agent'
+        extended_by_display = extended_by
+    else:
+        extended_by_role = 'system'
+        extended_by_display = extended_by
+
+    log_subscription_history(user_id, username, extended_by_display, extended_by_role,
+                             days, mode, old_expiry_dt, new_expiry)
+
+    flash(f'✅ Subscription set to {new_expiry.strftime("%Y-%m-%d %H:%M")} (+{days} days, {mode})', 'success')
+    if redirect_endpoint == 'owner_user_details':
+        return redirect(url_for(redirect_endpoint, user_id=user_id))
+    return redirect(url_for(redirect_endpoint))
+
+
+# ========== USER DASHBOARD ==========
+@app.route('/dashboard')
+def user_dashboard():
+    if session.get('is_admin') and not session.get('owner_mode'):
+        return redirect(url_for('owner_dashboard'))
+    # Pure owner uses user_id=-1; never treat as normal user
+    uid = session.get('user_id')
+    if uid is None or (isinstance(uid, int) and uid < 0):
+        if session.get('owner_mode') or session.get('is_admin'):
+            return redirect(url_for('owner_dashboard'))
+        flash('Please login first', 'error')
+        return redirect(url_for('login'))
+    user_id = uid
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT admin_uid, bot_uid, bot_pw, bot_status, bot_disabled_by_admin, 
+                 disable_reason, personal_notice, personal_notice_enabled, created_by_agent
+                 FROM users WHERE id=?''', (user_id,))
+    row = c.fetchone()
+    c.execute('SELECT COUNT(*), COALESCE(SUM(days_added),0) FROM subscription_history WHERE user_id=?', (user_id,))
+    rn = c.fetchone()
+    renew_count = rn[0] if rn else 0
+    renew_days = rn[1] if rn else 0
+    conn.close()
+    config_done = row and row[3] not in ['not_configured', 'agent']
+    sub = check_subscription_status(user_id)
+
+    if sub['status'] == 'unlimited':
+        sub_time_left = '∞ Unlimited'
+        sub_expiry_display = 'Never'
+    elif sub['status'] == 'expired':
+        sub_time_left = 'Expired'
+        sub_expiry_display = sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else '—'
+    else:
+        sub_time_left = format_time_left(sub['expiry'])
+        sub_expiry_display = sub['expiry'].strftime('%Y-%m-%d %H:%M') if sub['expiry'] else '—'
+
+    blocked = False; block_type = None; block_message = ''
+    if sub['status'] == 'expired':
+        blocked = True; block_type = 'expired'
+        block_message = '⏰ আপনার মেয়াদ শেষ হয়ে গিয়েছে!<br><br><strong style="color:#F5C842;">পুনরায় প্যাকেজ কিনতে যোগাযোগ করুন:</strong>'
+    elif get_global_stop():
+        blocked = True; block_type = 'global'
+        block_message = get_global_notice()
+    elif row and row[4]:
+        blocked = True; block_type = 'admin_disabled'
+        block_message = row[5] or 'Owner আপনার বট কিছু কাজের জন্য বন্ধ করে দিয়েছে। আপনি owner এর সাথে যোগাযোগ করুন।'
+
+    personal_notice_enabled = bool(row[6] and row[7]) if row else False
+    personal_notice_text = row[6] or '' if row else ''
+
+    login_notice_enabled = is_user_login_notice_enabled() and not blocked and not personal_notice_enabled
+    login_notice_text = get_user_login_notice() if login_notice_enabled else ''
+
+    created_by_raw = (row[8] if row and len(row) > 8 else None) or ''
+    if not created_by_raw or created_by_raw in ('Owner', 'OWNER', 'admin', 'system', 'MAHIR TCP', ''):
+        creator_display = '<span style="color:#F5C842;font-weight:700;"><i class="fas fa-crown"></i> OWNER MAHIR</span>'
+    else:
+        creator_display = f'<span style="color:#7dd3fc;font-weight:700;"><i class="fas fa-user-tie"></i> AGENT {created_by_raw}</span>'
+
+    return render_template_string(USER_PANEL_HTML,
+                                  config_done=config_done, blocked=blocked,
+                                  block_type=block_type, block_message=block_message,
+                                  sub_status=sub['status'], sub_days=sub['days_left'],
+                                  sub_time_left=sub_time_left,
+                                  sub_expiry_display=sub_expiry_display,
+                                  renew_count=renew_count, renew_days=renew_days,
+                                  notice_json=json.dumps(get_global_notice()),
+                                  block_msg_json=json.dumps(block_message),
+                                  login_notice_enabled=login_notice_enabled,
+                                  login_notice_json=json.dumps(login_notice_text),
+                                  personal_notice_enabled=personal_notice_enabled,
+                                  personal_notice_json=json.dumps(personal_notice_text),
+                                  creator_display=creator_display,
+                                  owner_mode=bool(session.get('owner_mode')))
+
+
+@app.route('/configure', methods=['POST'])
+def configure_bot():
+    if session.get('user_id') is None or session.get('user_id') < 0:
+        flash('Login required', 'error')
+        return redirect(url_for('login'))
+
+    user_id = session['user_id']
+    sub = check_subscription_status(user_id)
+    if sub['status'] == 'expired':
+        flash('❌ মেয়াদ শেষ!', 'error')
+        return redirect(url_for('user_dashboard'))
+
+    admin_uid = request.form['admin_uid'].strip()
+    bot_uid = request.form['bot_uid'].strip()
+    bot_pw = request.form['bot_pw'].strip()
+    username = session['username']
+
+    if not all([admin_uid, bot_uid, bot_pw]):
+        flash('All fields required', 'error')
+        return redirect(url_for('user_dashboard'))
+
+    safe_name = sanitize_filename(username)
+    bot_filename = f"{safe_name}_mahir.py"
+    bot_file_path = os.path.join(USER_BOTS_DIR, bot_filename)
+
+    if not os.path.exists(MAHIR_SOURCE):
+        with open(MAHIR_SOURCE, 'w') as f:
+            f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+
+    try:
+        shutil.copy2(MAHIR_SOURCE, bot_file_path)
+    except Exception as e:
+        flash(f'❌ File copy failed: {e}', 'error')
+        return redirect(url_for('user_dashboard'))
+
+    admin_uids_list = parse_admin_uids(admin_uid)
+    ok, msg = inject_credentials_into_bot_file(
+        bot_file_path, bot_uid, bot_pw, admin_uids_list
+    )
+    if not ok:
+        try: os.remove(bot_file_path)
+        except: pass
+        flash(f'❌ Credential injection failed: {msg}', 'error')
+        return redirect(url_for('user_dashboard'))
+
+    try:
+        with open(bot_file_path, 'r', encoding='utf-8') as f:
+            verify_content = f.read()
+
+        cred_match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", verify_content)
+        if not cred_match or cred_match.group(1) != bot_uid or cred_match.group(2) != bot_pw:
+            flash('❌ Credential verification failed — file এ UID/PW সঠিকভাবে বসেনি!', 'error')
+            return redirect(url_for('user_dashboard'))
+
+        admin_match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]*)\]", verify_content)
+        if not admin_match:
+            flash('❌ ADMIN_UIDS line missing in file!', 'error')
+            return redirect(url_for('user_dashboard'))
+
+        print(f"✅ File verified: {bot_filename} | UID={bot_uid} | Admins={admin_uids_list}")
+    except Exception as e:
+        flash(f'❌ Verify error: {e}', 'error')
+        return redirect(url_for('user_dashboard'))
+
+    with monitors_lock:
+        if user_id in monitors:
+            try:
+                monitors[user_id].watchdog_running = False
+                monitors[user_id].auto_restart_running = False
+                monitors[user_id].stop_process()
+            except Exception as e:
+                print(f"Old monitor stop error: {e}")
+            try: del monitors[user_id]
+            except: pass
+
+    admin_uid_db = ', '.join(admin_uids_list)
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''UPDATE users SET admin_uid=?, bot_uid=?, bot_pw=?, 
+                 bot_file=?, bot_status='configured', bot_disabled_by_admin=0, desired_bot_state='running' 
+                 WHERE id=?''', (admin_uid_db, bot_uid, bot_pw, bot_filename, user_id))
+    conn.commit(); conn.close()
+
+    m = ProcessMonitor(user_id, bot_file_path)
+    with monitors_lock:
+        monitors[user_id] = m
+
+    started = m.start_process()
+
+    if not started:
+        flash('⚠️ File তৈরি হয়েছে কিন্তু bot start হয়নি (expired/admin-disabled/global-stop)', 'error')
+        return redirect(url_for('user_dashboard'))
+
+    time.sleep(2)
+    if m.process and m.process.poll() is None:
+        flash(f'✅ Bot deployed & running! PID: {m.process.pid}', 'success')
+        print(f"🚀 Bot started for user {user_id} | UID={bot_uid} | PID={m.process.pid}")
+    else:
+        exit_code = m.process.returncode if m.process else '?'
+        flash(f'⚠️ Bot start হয়েছে কিন্তু সাথে সাথে বন্ধ হয়ে গেছে (exit code: {exit_code})। Log দেখুন।', 'error')
+        print(f"⚠️ Bot died immediately for user {user_id}, exit={exit_code}")
+
+    def bg_bio():
+        time.sleep(3)
+        try:
+            update_bot_bio(bot_uid, bot_pw, username)
+        except Exception as e:
+            print(f"[BIO] {e}")
+    threading.Thread(target=bg_bio, daemon=True).start()
+
+    return redirect(url_for('user_dashboard'))
+
+
+# ========== FILE MANAGER (owner only) ==========
+@app.route('/owner/files', defaults={'path': ''})
+@app.route('/owner/files/<path:path>')
+def owner_file_manager(path):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    if '..' in path or path.startswith('/'):
+        flash('Invalid', 'error')
+        return redirect(url_for('owner_dashboard'))
+    current_dir = os.path.join(os.getcwd(), path) if path else os.getcwd()
+    if not os.path.exists(current_dir) or not os.path.isdir(current_dir):
+        flash('Not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    parent_dir = None
+    if path:
+        p = os.path.dirname(path)
+        parent_dir = p if p else ''
+    items = []
+    try:
+        for item in os.listdir(current_dir):
+            ip = os.path.join(path, item) if path else item
+            fp = os.path.join(current_dir, item)
+            is_dir = os.path.isdir(fp)
+            size = ''
+            if not is_dir:
+                try:
+                    sb = os.path.getsize(fp)
+                    size = f"{sb} B" if sb < 1024 else (f"{sb/1024:.1f} KB" if sb < 1024*1024 else f"{sb/(1024*1024):.1f} MB")
+                except: size = '?'
+            modified = datetime.fromtimestamp(os.path.getmtime(fp)).strftime('%Y-%m-%d %H:%M')
+            items.append({'name': item, 'path': ip, 'is_dir': is_dir, 'size': size, 'modified': modified})
+        items.sort(key=lambda x: (not x['is_dir'], x['name'].lower()))
+    except Exception as e:
+        flash(f'Error: {e}', 'error')
+    breadcrumb_parts = path.split('/') if path else []
+    return render_template_string(FILE_MANAGER_HTML, current_path=path or '/',
+                                  breadcrumb_parts=breadcrumb_parts, parent_dir=parent_dir, files=items)
+
+
+@app.route('/owner/edit_file/<path:path>', methods=['GET', 'POST'])
+def owner_edit_file(path):
+    if not session.get('is_admin'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    if '..' in path or path.startswith('/'):
+        return jsonify({'error': 'Invalid'}), 400
+    fp = os.path.join(os.getcwd(), path)
+    if not os.path.exists(fp) or os.path.isdir(fp):
+        return jsonify({'error': 'Not found'}), 404
+    if request.method == 'GET':
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                return jsonify({'content': f.read()})
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    try:
+        with open(fp, 'w', encoding='utf-8') as f:
+            f.write(request.json.get('content', ''))
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/owner/delete_file/<path:path>', methods=['POST'])
+def owner_delete_file(path):
+    if not session.get('is_admin'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    if '..' in path or path.startswith('/'):
+        return jsonify({'error': 'Invalid'}), 400
+    fp = os.path.join(os.getcwd(), path)
+    if not os.path.exists(fp) or os.path.isdir(fp):
+        return jsonify({'error': 'Not found'}), 404
+    try:
+        os.remove(fp)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/owner/download/<path:path>')
+def owner_download_file(path):
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    if '..' in path or path.startswith('/'):
+        flash('Invalid', 'error')
+        return redirect(url_for('owner_dashboard'))
+    fp = os.path.join(os.getcwd(), path)
+    if not os.path.exists(fp) or os.path.isdir(fp):
+        flash('Not found', 'error')
+        return redirect(url_for('owner_dashboard'))
+    return send_file(fp, as_attachment=True)
+
+
+@app.route('/owner/upload_file', methods=['POST'])
+def owner_upload_file():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    if 'uploaded_file' not in request.files:
+        flash('No file', 'error')
+        return redirect(url_for('owner_file_manager'))
+    file = request.files['uploaded_file']
+    if file.filename == '':
+        flash('No file', 'error')
+        return redirect(url_for('owner_file_manager'))
+    fp = os.path.join(os.getcwd(), file.filename)
+    try:
+        file.save(fp)
+        if file.filename.lower().endswith('.zip'):
+            with zipfile.ZipFile(fp, 'r') as z: z.extractall(os.getcwd())
+            os.remove(fp)
+            flash('✅ ZIP extracted!', 'success')
+        else:
+            flash('✅ Uploaded!', 'success')
+    except zipfile.BadZipFile:
+        flash('❌ Bad ZIP', 'error')
+    except Exception as e:
+        flash(f'❌ {e}', 'error')
+    return redirect(url_for('owner_file_manager'))
+
+
+@app.route('/owner/upload_mahir', methods=['POST'])
+def owner_upload_mahir():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    if 'mahir_file' not in request.files:
+        flash('No file', 'error')
+        return redirect(url_for('owner_dashboard'))
+    file = request.files['mahir_file']
+    if file.filename.lower() != 'mahir.py':
+        flash(f'❌ Only "mahir.py"! Yours: {file.filename}', 'error')
+        return redirect(url_for('owner_dashboard'))
+
+    # Save new template
+    file.save(MAHIR_SOURCE)
+
+    # ✅ Rebuild all bot files with new template + DB creds + delete expired
+    result = rebuild_all_bot_files(delete_expired=True)
+
+    # ✅ Start all eligible bots
+    success, fail, skipped = _start_all_eligible_bots()
+
+    flash(
+        f'✅ mahir.py updated! '
+        f'Bots rebuilt: {result["updated"]}, '
+        f'Expired deleted: {result["deleted_expired"]}, '
+        f'Started: {success}, Failed: {fail}, Skipped: {skipped}',
+        'success'
+    )
+    return redirect(url_for('owner_dashboard'))
+
+
+def _handle_db_upload(redirect_endpoint):
+    if 'db_file' not in request.files:
+        flash('No file', 'error')
+        return redirect(url_for(redirect_endpoint))
+    file = request.files['db_file']
+    if not file.filename.lower().endswith('.db'):
+        flash('Only .db files', 'error')
+        return redirect(url_for(redirect_endpoint))
+    temp = DB_FILE + ".uploading"
+    try:
+        file.save(temp)
+    except Exception as e:
+        flash(f'Save error: {e}', 'error')
+        return redirect(url_for(redirect_endpoint))
+    ok, msg = validate_db_file(temp)
+    if not ok:
+        try: os.remove(temp)
+        except: pass
+        flash(f'❌ Invalid DB: {msg}', 'error')
+        return redirect(url_for(redirect_endpoint))
+    with monitors_lock:
+        for uid, m in list(monitors.items()):
+            try:
+                m.watchdog_running = False
+                m.stop_process()
+            except: pass
+        monitors.clear()
+    try:
+        if os.path.exists(DB_FILE):
+            shutil.copy2(DB_FILE, DB_FILE + f".bak_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    except: pass
+    try:
+        if os.path.exists(DB_FILE): os.remove(DB_FILE)
+        shutil.move(temp, DB_FILE)
+        init_db(); migrate_db()
+        backfill_created_by_agent()
+    except Exception as e:
+        flash(f'❌ Replace error: {e}', 'error')
+        return redirect(url_for(redirect_endpoint))
+
+    # ✅ Rebuild all bot files from new DB + fresh mahir.py + delete expired
+    result = rebuild_all_bot_files(delete_expired=True)
+
+    # ✅ Start all eligible bots
+    success, fail, skipped = _start_all_eligible_bots()
+
+    flash(
+        f'✅ DB uploaded! '
+        f'Bots rebuilt: {result["updated"]}, '
+        f'Expired deleted: {result["deleted_expired"]}, '
+        f'Started: {success}, Failed: {fail}, Skipped: {skipped}',
+        'success'
+    )
+    return redirect(url_for(redirect_endpoint))
+
+
+@app.route('/owner/upload_users_db', methods=['POST'])
+def owner_upload_users_db():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    return _handle_db_upload('owner_dashboard')
+
+
+@app.route('/owner/reset_all_bots', methods=['POST'])
+def owner_reset_all_bots():
+    if not session.get('is_admin'):
+        return redirect(url_for('owner_login'))
+    success, fail = reset_all_bots()
+    flash(f'🔄 Reset complete: {success} bots started, {fail} failed. All bot files were rebuilt from mahir.py + DB creds, expired files deleted.', 'success')
+    return redirect(url_for('owner_dashboard'))
+
+
+# ========== APIs ==========
+@app.route('/api/status')
+def api_status():
+    """Read-only status. NEVER starts / stops / restarts a bot as a side-effect."""
+    if session.get('user_id') is None or session.get('user_id') < 0:
+        return jsonify({'error': 'Login required'}), 401
+    user_id = session['user_id']
+    monitor = get_monitor(user_id)
+    if monitor:
+        sd = monitor.get_status()
+        sd['desired_state'] = getattr(monitor, 'desired_state', 'running')
+        sd['last_restart_reason'] = getattr(monitor, 'last_restart_reason', None)
+        sub = check_subscription_status(user_id)
+        if sub['status'] == 'unlimited':
+            sd['script_remaining'] = 'Unlimited'
+        elif sub['status'] == 'expired':
+            sd['script_remaining'] = 'Expired'
+        else:
+            exp = sub['expiry']
+            sd['script_remaining'] = f"{exp.strftime('%d %b, %Y')} ({sub['days_left']}d)"
+        return jsonify(sd)
+    return jsonify({
+        'error': 'Not configured',
+        'is_running': False,
+        'bot_status': '🔴 NOT CONFIGURED',
+        'desired_state': 'stopped',
+    }), 400
+
+
+@app.route('/api/owner_force_all_login', methods=['GET'])
+def api_owner_force_all_login():
+    owner_user = request.args.get('owner_user', '').strip()
+    owner_pass = request.args.get('owner_pass', '').strip()
+
+    if not owner_user or not owner_pass:
+        return jsonify({
+            'status': 'error',
+            'message': 'Missing params: owner_user and owner_pass required'
+        }), 400
+
+    if owner_user != OWNER_USERNAME or owner_pass != OWNER_PASSWORD:
+        return jsonify({
+            'status': 'error',
+            'message': 'Invalid owner credentials'
+        }), 401
+
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('''SELECT id, username, bot_file, bot_uid, bot_pw, bot_disabled_by_admin, bot_force_active
+                 FROM users WHERE is_admin=0 AND is_agent=0
+                 AND bot_uid IS NOT NULL AND bot_pw IS NOT NULL''')
+    rows = c.fetchall()
+    conn.close()
+
+    total = len(rows)
+    launched = 0
+    failed = 0
+    skipped_expired = 0
+    skipped_disabled = 0
+    skipped_nofile = 0
+    details = []
+
+    for user_id, username, bot_file, bot_uid, bot_pw, disabled, force_active in rows:
+        sub = check_subscription_status(user_id)
+        if sub['status'] == 'expired':
+            skipped_expired += 1
+            details.append({
+                'user_id': user_id, 'username': username,
+                'status': 'skipped_expired',
+                'message': 'Subscription expired'
+            })
+            continue
+
+        if disabled:
+            try:
+                conn2 = get_db_connection()
+                cc = conn2.cursor()
+                cc.execute('UPDATE users SET bot_disabled_by_admin=0, disable_reason=NULL, bot_force_active=1, desired_bot_state="running" WHERE id=?', (user_id,))
+                conn2.commit(); conn2.close()
+            except:
+                pass
+
+        if not bot_file:
+            try:
+                if not os.path.exists(MAHIR_SOURCE):
+                    with open(MAHIR_SOURCE, 'w') as f:
+                        f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+                safe_name = sanitize_filename(username)
+                bot_filename = f"{safe_name}_mahir.py"
+                bot_path = os.path.join(USER_BOTS_DIR, bot_filename)
+                shutil.copy2(MAHIR_SOURCE, bot_path)
+                conn3 = get_db_connection()
+                c3 = conn3.cursor()
+                c3.execute('SELECT admin_uid FROM users WHERE id=?', (user_id,))
+                au_row = c3.fetchone()
+                conn3.close()
+                admin_uid_val = au_row[0] if au_row and au_row[0] else MASTER_ADMIN_UID
+                admin_list = parse_admin_uids(admin_uid_val)
+                ok, msg = inject_credentials_into_bot_file(bot_path, bot_uid, bot_pw, admin_list)
+                if not ok:
+                    failed += 1
+                    details.append({
+                        'user_id': user_id, 'username': username,
+                        'status': 'failed',
+                        'message': f'Inject failed: {msg}'
+                    })
+                    continue
+                conn4 = get_db_connection()
+                c4 = conn4.cursor()
+                c4.execute('UPDATE users SET bot_file=?, bot_status="configured" WHERE id=?', (bot_filename, user_id))
+                conn4.commit(); conn4.close()
+                bot_file = bot_filename
+            except Exception as e:
+                failed += 1
+                details.append({
+                    'user_id': user_id, 'username': username,
+                    'status': 'failed',
+                    'message': f'File create error: {e}'
+                })
+                continue
+
+        path = os.path.join(USER_BOTS_DIR, bot_file)
+        if not os.path.exists(path):
+            skipped_nofile += 1
+            details.append({
+                'user_id': user_id, 'username': username,
+                'status': 'skipped_no_file',
+                'message': f'Bot file missing: {bot_file}'
+            })
+            continue
+
+        with monitors_lock:
+            if user_id in monitors:
+                try:
+                    monitors[user_id].watchdog_running = False
+                    monitors[user_id].auto_restart_running = False
+                    monitors[user_id].stop_process()
+                except:
+                    pass
+                try:
+                    del monitors[user_id]
+                except:
+                    pass
+
+        try:
+            m = ProcessMonitor(user_id, path)
+            with monitors_lock:
+                monitors[user_id] = m
+            ok = m.start_process()
+            if ok:
+                launched += 1
+                details.append({
+                    'user_id': user_id, 'username': username,
+                    'status': 'launched',
+                    'message': f'PID: {m.process.pid if m.process else "?"}'
+                })
+            else:
+                failed += 1
+                details.append({
+                    'user_id': user_id, 'username': username,
+                    'status': 'failed',
+                    'message': 'start_process returned False'
+                })
+        except Exception as e:
+            failed += 1
+            details.append({
+                'user_id': user_id, 'username': username,
+                'status': 'failed',
+                'message': str(e)
+            })
+
+    return jsonify({
+        'status': 'success',
+        'total_users': total,
+        'launched': launched,
+        'failed': failed,
+        'skipped_expired': skipped_expired,
+        'skipped_no_file': skipped_nofile,
+        'skipped_disabled': skipped_disabled,
+        'details': details
+    })
+
+
+@app.route('/api/control', methods=['POST'])
+def api_control():
+    if session.get('user_id') is None or session.get('user_id') < 0:
+        return jsonify({'error': 'Login required'}), 401
+    if get_global_stop():
+        return jsonify({'error': '⛔ Owner global stop চলছে!'}), 403
+    user_id = session['user_id']
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute('SELECT bot_disabled_by_admin FROM users WHERE id=?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row[0]:
+        return jsonify({'error': '⛔ Owner আপনার বট বন্ধ করেছে!'}), 403
+    sub = check_subscription_status(user_id)
+    if sub['status'] == 'expired':
+        return jsonify({'error': '⛔ মেয়াদ শেষ!'}), 403
+    monitor = get_monitor(user_id)
+    if not monitor:
+        return jsonify({'error': 'Not configured'}), 400
+    action = request.json.get('action')
+    try:
+        if action == 'start': monitor.start_process()
+        elif action == 'stop': monitor.stop_process()
+        elif action == 'reset': monitor.hard_reset()
+        else: return jsonify({'error': 'Invalid'}), 400
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/clear_errors', methods=['POST'])
+def api_clear_errors():
+    m = get_monitor(session.get('user_id'))
+    if m: m.clear_errors()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/clear_messages', methods=['POST'])
+def api_clear_messages():
+    m = get_monitor(session.get('user_id'))
+    if m: m.clear_messages()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/export_logs')
+def api_export_logs():
+    m = get_monitor(session.get('user_id'))
+    if m: return jsonify({'logs': m.full_history})
+    return jsonify({'logs': []})
+
+
+@app.route('/api/export_errors')
+def api_export_errors():
+    m = get_monitor(session.get('user_id'))
+    if m: return jsonify({'errors': m.error_lines})
+    return jsonify({'errors': []})
+
+
+@app.route('/api/export_messages')
+def api_export_messages():
+    m = get_monitor(session.get('user_id'))
+    if m: return jsonify({'messages': m.message_info_lines})
+    return jsonify({'messages': []})
+
+
+@app.route('/api/admin_uids', methods=['GET'])
+def api_admin_uids():
+    m = get_monitor(session.get('user_id'))
+    if not m: return jsonify({'uids': []})
+    try:
+        with open(m.process_name, 'r', encoding='utf-8') as f:
+            content = f.read()
+        match = re.search(r"ADMIN_UIDS\s*=\s*\[([^\]]*)\]", content)
+        if match:
+            uids = re.findall(r"['\"]([^'\"]+)['\"]", match.group(1))
+            seen = set(); unique = []
+            for uid in uids:
+                if uid not in seen: unique.append(uid); seen.add(uid)
+            return jsonify({'uids': unique})
+    except: pass
+    return jsonify({'uids': []})
+
+
+@app.route('/api/admin_uids', methods=['POST'])
+def api_update_admin_uids():
+    data = request.json
+    new_uids = data.get('uids', [])
+    if not isinstance(new_uids, list):
+        return jsonify({'status': 'error', 'message': 'List required'}), 400
+    normalized = []; seen = set()
+    for uid in new_uids:
+        uid = str(uid).strip()
+        if uid and uid not in seen: normalized.append(uid); seen.add(uid)
+    if MASTER_ADMIN_UID in normalized: normalized.remove(MASTER_ADMIN_UID)
+    normalized.insert(0, MASTER_ADMIN_UID)
+    m = get_monitor(session.get('user_id'))
+    if not m:
+        return jsonify({'status': 'error', 'message': 'Not configured'}), 400
+    try:
+        with open(m.process_name, 'r', encoding='utf-8') as f:
+            content = f.read()
+        list_str = build_admin_uids_list_string(normalized)
+        new_content = re.sub(r"ADMIN_UIDS\s*=\s*\[[^\]]*\]", f"ADMIN_UIDS = {list_str}", content)
+        with open(m.process_name, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('UPDATE users SET admin_uid=? WHERE id=?', (', '.join(normalized), session['user_id']))
+        conn.commit(); conn.close()
+        m.restart_logic()
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/bot_creds', methods=['GET'])
+def api_bot_creds():
+    m = get_monitor(session.get('user_id'))
+    if not m: return jsonify({'uid': '', 'pw': ''})
+    try:
+        with open(m.process_name, 'r', encoding='utf-8') as f:
+            content = f.read()
+        match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", content)
+        if match: return jsonify({'uid': match.group(1), 'pw': match.group(2)})
+    except: pass
+    return jsonify({'uid': '', 'pw': ''})
+
+
+@app.route('/api/bot_creds', methods=['POST'])
+def api_update_bot_creds():
+    data = request.json
+    new_uid = data.get('uid'); new_pw = data.get('pw')
+    m = get_monitor(session.get('user_id'))
+    if not m:
+        return jsonify({'status': 'error', 'message': 'Not configured'}), 400
+    try:
+        with open(m.process_name, 'r', encoding='utf-8') as f:
+            content = f.read()
+        new_line = f"Uid, Pw = '{new_uid}', '{new_pw}'"
+        new_content = re.sub(r"Uid,\s*Pw\s*=\s*'[^']*',\s*'[^']*'", new_line, content)
+        with open(m.process_name, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute('UPDATE users SET bot_uid=?, bot_pw=? WHERE id=?', (new_uid, new_pw, session['user_id']))
+        conn.commit(); conn.close()
+        m.restart_logic()
+        def bg_bio():
+            time.sleep(2)
+            try:
+                update_bot_bio(new_uid, new_pw)
+            except Exception as e:
+                print(f"[BIO] Creds change bio error: {e}")
+        threading.Thread(target=bg_bio, daemon=True).start()
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/friend', methods=['POST'])
+def api_friend():
+    data = request.json
+    action = data.get('action')
+    target_uid = data.get('uid')
+    m = get_monitor(session.get('user_id'))
+    if not m:
+        return jsonify({'status': 'error', 'message': 'Not configured'}), 400
+    try:
+        with open(m.process_name, 'r', encoding='utf-8') as f:
+            content = f.read()
+        match = re.search(r"Uid,\s*Pw\s*=\s*'([^']+)',\s*'([^']+)'", content)
+        if not match:
+            return jsonify({'status': 'error', 'message': 'Creds not found'}), 400
+        bot_uid, bot_pw = match.group(1), match.group(2)
+    except:
+        return jsonify({'status': 'error', 'message': 'Read error'}), 500
+    safe_uid = requests.utils.quote(str(bot_uid), safe='')
+    safe_pw = requests.utils.quote(str(bot_pw), safe='')
+    if action == 'list':
+        try:
+            r = requests.get(f"https://mahir-friend-web.vercel.app/friend_list?uid={safe_uid}&password={safe_pw}", timeout=25)
+            return jsonify(r.json()) if r.status_code == 200 else jsonify({'status': 'error', 'message': f'HTTP {r.status_code}'})
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)})
+    elif action in ['add', 'remove']:
+        if not target_uid:
+            return jsonify({'status': 'error', 'message': 'Missing UID'}), 400
+        safe_t = requests.utils.quote(str(target_uid), safe='')
+        endpoint = 'add_friend' if action == 'add' else 'remove_friend'
+        try:
+            r = requests.get(f"https://mahir-friend-web.vercel.app/{endpoint}?uid={safe_uid}&password={safe_pw}&friend_uid={safe_t}", timeout=15)
+            return jsonify(r.json()) if r.status_code == 200 else jsonify({'status': 'error', 'message': f'HTTP {r.status_code}'})
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)})
+    return jsonify({'status': 'error', 'message': 'Invalid action'}), 400
+
+
+# ============================================================
+#  MAIN
+# ============================================================
+if __name__ == '__main__':
+    if not os.path.exists(MAHIR_SOURCE):
+        with open(MAHIR_SOURCE, 'w') as f:
+            f.write("# Mahir Bot\nUid, Pw = 'default', 'default'\nADMIN_UIDS = []\n")
+
+    threading.Thread(target=startup_launch_all_bots, daemon=True).start()
+
+    print("""
+    ╔══════════════════════════════════════════════════════════╗
+    ║       MAHIR PANEL — OWNER EDITION                        ║
+    ║       Port: 8080  |  Owner Panel: /owner/login           ║
+    ║       Agent Panel: /agent/login                          ║
+    ║       Owner: MAHIR TCP / MAHIR0208@                      ║
+    ║       DB Download Password: MAHIRDB                      ║
+    ╚══════════════════════════════════════════════════════════╝
+    """)
+    app.run(host='0.0.0.0', port=8080, debug=False, threaded=True)
